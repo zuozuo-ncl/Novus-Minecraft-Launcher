@@ -14,7 +14,7 @@ share/
 ```
 
 ## 快速开始
-- 进入https://ncl.cc.cd。
+- 进入https://ncl.cc.cd
 - 下载 NCL.exe 或 NCL_x86.exe。
 - 双击运行，等待 Java 环境自动配置完成。
 - 开始游戏。
