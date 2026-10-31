@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 License: AGPL-3.0
 # Novus Minecraft Launcher
 
@@ -211,3 +212,7 @@ node relay-host.js
 ## 说明
 
 - `MC launcher-Server/version.json` 中的版本号是部署时的快照，与线上实际值可能不同，以服务器返回为准
+=======
+# Novus-Minecraft-Launcher
+一个由 C++ 引导器 + JavaFX 核心 + Node.js 联机中继组成的 Minecraft 全栈启动器。支持老旧系统、底层防篡改与一键联机。
+>>>>>>> 79e9bc11ce225bc8ac089d9701a3262ae004089d
