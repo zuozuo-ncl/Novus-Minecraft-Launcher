@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MC Launcher 版本管理</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+      background: #f5f5f5;
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      padding: 30px;
+    }
+
+    h1 {
+      color: #333;
+      margin-bottom: 10px;
+      font-size: 28px;
+    }
+
+    .subtitle {
+      color: #666;
+      margin-bottom: 30px;
+      font-size: 14px;
+    }
+
+    .card {
+      background: #fafafa;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 20px;
+      margin-bottom: 20px;
+    }
+
+    .card h2 {
+      font-size: 18px;
+      color: #333;
+      margin-bottom: 15px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .version-badge {
+      display: inline-block;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .version-latest {
+      background: #e8f5e9;
+      color: #2e7d32;
+    }
+
+    .version-old {
+      background: #fff3e0;
+      color: #ef6c00;
+    }
+
+    .form-group {
+      margin-bottom: 15px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-weight: 500;
+      color: #444;
+      font-size: 14px;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      font-size: 14px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #2196f3;
+      box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.15);
+    }
+
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn-primary {
+      background: #2196f3;
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: #1976d2;
+    }
+
+    .btn-danger {
+      background: #f44336;
+      color: white;
+    }
+
+    .btn-danger:hover {
+      background: #d32f2f;
+    }
+
+    .btn-success {
+      background: #4caf50;
+      color: white;
+    }
+
+    .btn-success:hover {
+      background: #388e3c;
+    }
+
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .version-list {
+      list-style: none;
+    }
+
+    .version-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 15px;
+      background: white;
+      border: 1px solid #e0e0e0;
+      border-radius: 6px;
+      margin-bottom: 8px;
+      transition: box-shadow 0.2s;
+    }
+
+    .version-item:hover {
+      box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+    }
+
+    .version-info {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .version-number {
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 15px;
+      font-weight: 600;
+      color: #333;
+    }
+
+    .version-actions {
+      display: flex;
+      gap: 8px;
+    }
+
+    .empty-state {
+      text-align: center;
+      color: #999;
+      padding: 30px;
+      font-size: 14px;
+    }
+
+    .alert {
+      padding: 12px 16px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      font-size: 14px;
+      display: none;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .alert.success {
+      background: #e8f5e9;
+      color: #2e7d32;
+      border: 1px solid #c8e6c9;
+    }
+
+    .alert.error {
+      background: #ffebee;
+      color: #c62828;
+      border: 1px solid #ffcdd2;
+    }
+
+    .alert.show {
+      display: flex;
+    }
+
+    .api-docs {
+      background: #263238;
+      color: #aed581;
+      border-radius: 8px;
+      padding: 20px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      overflow-x: auto;
+    }
+
+    .api-docs .keyword { color: #82b1ff; }
+    .api-docs .string { color: #aed581; }
+    .api-docs .comment { color: #78909c; }
+    .api-docs .method-get { color: #64b5f6; }
+    .api-docs .method-post { color: #81c784; }
+    .api-docs .method-put { color: #ffb74d; }
+    .api-docs .method-delete { color: #e57373; }
+    .api-docs .url { color: #ffcc80; }
+
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #e0e0e0;
+      margin-bottom: 20px;
+    }
+
+    .tab {
+      padding: 12px 24px;
+      cursor: pointer;
+      font-weight: 500;
+      color: #666;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+      transition: all 0.2s;
+    }
+
+    .tab.active {
+      color: #2196f3;
+      border-bottom-color: #2196f3;
+    }
+
+    .tab:hover:not(.active) {
+      color: #333;
+    }
+
+    .tab-content {
+      display: none;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    .form-row {
+      display: flex;
+      gap: 12px;
+    }
+
+    .form-row .form-group {
+      flex: 1;
+    }
+
+    @media (max-width: 600px) {
+      .container {
+        padding: 20px;
+        margin: 10px;
+      }
+      .form-row {
+        flex-direction: column;
+        gap: 0;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🎮 MC Launcher 版本管理</h1>
+    <p class="subtitle">管理客户端版本号，控制更新推送</p>
+
+    <div id="alert" class="alert"></div>
+
+    <div class="tabs">
+      <div class="tab active" data-tab="overview">概览</div>
+      <div class="tab" data-tab="versions">版本列表</div>
+      <div class="tab" data-tab="add">添加版本</div>
+      <div class="tab" data-tab="api">API 文档</div>
+    </div>
+
+    
+    <div class="tab-content active" id="tab-overview">
+      <div class="card">
+        <h2>当前最新版本 <span id="latestVersionBadge" class="version-badge version-latest">1.0.0</span></h2>
+        <p style="color: #666; font-size: 14px;">客户端检测到版本低于此版本时，将提示更新</p>
+      </div>
+
+      <div class="card">
+        <h2>📋 快速操作</h2>
+        <div class="form-group">
+          <label>设为最新版本</label>
+          <div class="form-row">
+            <div class="form-group" style="margin-bottom: 0;">
+              <input type="text" id="setLatestVersion" placeholder="输入版本号 (如 1.1.0)">
+            </div>
+            <div class="form-group" style="margin-bottom: 0;">
+              <button class="btn btn-success" onclick="setLatestVersion()">设为最新</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    
+    <div class="tab-content" id="tab-versions">
+      <div class="card">
+        <h2>所有版本</h2>
+        <ul class="version-list" id="versionList">
+          <li class="empty-state">加载中...</li>
+        </ul>
+      </div>
+    </div>
+
+    
+    <div class="tab-content" id="tab-add">
+      <div class="card">
+        <h2>添加新版本</h2>
+        <div class="form-group">
+          <label>版本号</label>
+          <input type="text" id="newVersion" placeholder="例如: 1.1.0, 2.0.0, 1.0.1">
+        <input type="text" id="newVersionSha" placeholder="可选：jar 的 SHA-256（64 位十六进制）"
+               style="font-family: monospace;">
+          <p style="margin-top: 6px; font-size: 12px; color: #888;">格式: 主版本.次版本.修订号 (语义化版本)</p>
+        </div>
+        <button class="btn btn-primary" onclick="addVersion()">添加版本</button>
+      </div>
+    </div>
+
+    
+    <div class="tab-content" id="tab-api">
+      <pre class="api-docs"><span class="comment"># MC Launcher 版本管理 API 文档</span>
+<span class="comment"># Base URL: http://localhost:5003</span>
+
+<span class="comment">## 1. 检查更新 (客户端调用)</span>
+<span class="method-post">POST</span> <span class="url">/api/check-update</span>
+<span class="comment"># Request Body:</span>
+{
+  <span class="string">"currentVersion"</span>: <span class="string">"1.0.0"</span>
+}
+
+<span class="comment"># Response (有更新):</span>
+{
+  <span class="string">"updateAvailable"</span>: <span class="keyword">true</span>,
+  <span class="string">"latestVersion"</span>: <span class="string">"1.1.0"</span>,
+  <span class="string">"allVersions"</span>: [<span class="string">"1.0.0"</span>, <span class="string">"1.1.0"</span>]
+}
+
+<span class="comment"># Response (无更新):</span>
+{
+  <span class="string">"updateAvailable"</span>: <span class="keyword">false</span>,
+  <span class="string">"latestVersion"</span>: <span class="keyword">null</span>,
+  <span class="string">"currentVersion"</span>: <span class="string">"1.1.0"</span>
+}
+
+<span class="comment">## 2. 获取所有版本信息</span>
+<span class="method-get">GET</span> <span class="url">/api/versions</span>
+<span class="comment"># Response:</span>
+{
+  <span class="string">"latest"</span>: <span class="string">"1.1.0"</span>,
+  <span class="string">"versions"</span>: [<span class="string">"1.0.0"</span>, <span class="string">"1.1.0"</span>]
+}
+
+<span class="comment">## 3. 添加新版本</span>
+<span class="method-post">POST</span> <span class="url">/api/versions</span>
+<span class="comment"># Request Body:</span>
+{
+  <span class="string">"version"</span>: <span class="string">"1.2.0"</span>
+}
+
+<span class="comment">## 4. 删除版本</span>
+<span class="method-delete">DELETE</span> <span class="url">/api/versions/:version</span>
+<span class="comment"># 例: DELETE /api/versions/1.0.0</span>
+
+<span class="comment">## 5. 设置最新版本</span>
+<span class="method-put">PUT</span> <span class="url">/api/versions/latest</span>
+<span class="comment"># Request Body:</span>
+{
+  <span class="string">"version"</span>: <span class="string">"1.2.0"</span>
+}
+
+<span class="comment">## 版本比较规则</span>
+<span class="comment">- 使用语义化版本比较 (Major.Minor.Patch)</span>
+<span class="comment">- 1.10.0 > 1.2.0 > 1.0.0</span>
+<span class="comment">- 支持任意位数: 1.0.0.0 > 1.0.0</span></pre>
+    </div>
+  </div>
+
+  <script>
+    // 显示提示
+    function showAlert(message, type = 'success') {
+      const alert = document.getElementById('alert');
+      alert.textContent = message;
+      alert.className = `alert ${type} show`;
+      setTimeout(() => {
+        alert.classList.remove('show');
+      }, 3000);
+    }
+
+    // Tab 切换
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+        tab.classList.add('active');
+        document.getElementById(`tab-${tab.dataset.tab}`).classList.add('active');
+        if (tab.dataset.tab === 'versions') loadVersions();
+      });
+    });
+
+    // 管理令牌：写接口（添加/删除/设为最新）必须携带。
+    // 服务端通过环境变量 ADMIN_TOKEN 设置；令牌只存在浏览器本地存储里。
+    function adminToken() {
+      return localStorage.getItem('nclAdminToken') || '';
+    }
+
+    function adminHeaders(extra) {
+      const h = Object.assign({}, extra || {});
+      const t = adminToken();
+      if (t) h['X-Admin-Token'] = t;
+      return h;
+    }
+
+    /** 写操作遇到 401/503 时提示并返回 true，调用方直接结束 */
+    async function handleAuthError(res, data) {
+      if (res.status === 401) {
+        const t = prompt('该操作需要管理令牌（由服务器 ADMIN_TOKEN 配置）：');
+        if (t) {
+          localStorage.setItem('nclAdminToken', t.trim());
+          showAlert('令牌已保存，请重新操作', 'error');
+        }
+        return true;
+      }
+      if (res.status === 503) {
+        showAlert(data && data.error ? data.error : '服务器未配置管理令牌，写接口已禁用', 'error');
+        return true;
+      }
+      return false;
+    }
+
+    // 加载版本列表
+    async function loadVersions() {
+      try {
+        const res = await fetch('/api/versions');
+        const data = await res.json();
+        renderVersionList(data);
+        updateLatestBadge(data.latest);
+      } catch (error) {
+        showAlert('加载版本列表失败: ' + error.message, 'error');
+      }
+    }
+
+    // 渲染版本列表
+    function renderVersionList(data) {
+      const list = document.getElementById('versionList');
+      const { latest, versions } = data;
+
+      if (versions.length === 0) {
+        list.innerHTML = '<li class="empty-state">暂无版本</li>';
+        return;
+      }
+
+      // 按版本号倒序显示
+      const sorted = [...versions].sort(compareVersions).reverse();
+
+      list.innerHTML = sorted.map(v => {
+        const isLatest = v === latest;
+        return `
+          <li class="version-item">
+            <div class="version-info">
+              <span class="version-number">${escapeHtml(v)}</span>
+              ${isLatest ? '<span class="version-badge version-latest">最新</span>' : '<span class="version-badge version-old">旧版本</span>'}
+            </div>
+            <div class="version-actions">
+              ${!isLatest ? `
+                <button class="btn btn-danger" onclick="deleteVersion('${escapeHtml(v)}')" style="padding: 6px 12px; font-size: 12px;">删除</button>
+              ` : ''}
+              ${!isLatest ? `
+                <button class="btn btn-primary" onclick="setLatest('${escapeHtml(v)}')" style="padding: 6px 12px; font-size: 12px;">设为最新</button>
+              ` : ''}
+            </div>
+          </li>
+        `;
+      }).join('');
+    }
+
+    // 更新最新版本徽章
+    function updateLatestBadge(version) {
+      document.getElementById('latestVersionBadge').textContent = version;
+    }
+
+    // 版本比较
+    function compareVersions(v1, v2) {
+      const parts1 = v1.split('.').map(Number);
+      const parts2 = v2.split('.').map(Number);
+      const maxLen = Math.max(parts1.length, parts2.length);
+      for (let i = 0; i < maxLen; i++) {
+        const p1 = parts1[i] || 0;
+        const p2 = parts2[i] || 0;
+        if (p1 > p2) return 1;
+        if (p1 < p2) return -1;
+      }
+      return 0;
+    }
+
+    // 转义 HTML
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // 添加版本
+    async function addVersion() {
+      const version = document.getElementById('newVersion').value.trim();
+      if (!version) {
+        showAlert('请输入版本号', 'error');
+        return;
+      }
+
+      try {
+        const res = await fetch('/api/versions', {
+          method: 'POST',
+          headers: adminHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify(Object.assign({ version },
+            (document.getElementById('newVersionSha').value || '').trim()
+              ? { sha256: document.getElementById('newVersionSha').value.trim() }
+              : {}))
+        });
+        const data = await res.json();
+        if (await handleAuthError(res, data)) return;
+        if (data.success) {
+          showAlert('版本添加成功');
+          document.getElementById('newVersion').value = '';
+          document.getElementById('newVersionSha').value = '';
+          loadVersions();
+        } else {
+          showAlert(data.error || '添加失败', 'error');
+        }
+      } catch (error) {
+        showAlert('请求失败: ' + error.message, 'error');
+      }
+    }
+
+    // 删除版本
+    async function deleteVersion(version) {
+      if (!confirm(`确定要删除版本 ${version} 吗？`)) return;
+
+      try {
+        const res = await fetch(`/api/versions/${encodeURIComponent(version)}`, {
+          method: 'DELETE',
+          headers: adminHeaders()
+        });
+        const data = await res.json();
+        if (await handleAuthError(res, data)) return;
+        if (data.success) {
+          showAlert('版本删除成功');
+          loadVersions();
+        } else {
+          showAlert(data.error || '删除失败', 'error');
+        }
+      } catch (error) {
+        showAlert('请求失败: ' + error.message, 'error');
+      }
+    }
+
+    // 设为最新版本
+    async function setLatest(version) {
+      try {
+        const res = await fetch('/api/versions/latest', {
+          method: 'PUT',
+          headers: adminHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ version })
+        });
+        const data = await res.json();
+        if (await handleAuthError(res, data)) return;
+        if (data.success) {
+          showAlert('已设为最新版本');
+          loadVersions();
+        } else {
+          showAlert(data.error || '设置失败', 'error');
+        }
+      } catch (error) {
+        showAlert('请求失败: ' + error.message, 'error');
+      }
+    }
+
+    // 从概览页设为最新
+    async function setLatestVersion() {
+      const version = document.getElementById('setLatestVersion').value.trim();
+      if (!version) {
+        showAlert('请输入版本号', 'error');
+        return;
+      }
+      await setLatest(version);
+      document.getElementById('setLatestVersion').value = '';
+    }
+
+    // 初始化
+    loadVersions();
+  </script>
+</body>
+</html>

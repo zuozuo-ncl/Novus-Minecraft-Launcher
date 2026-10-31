@@ -1,0 +1,32 @@
+服务器运行在 http://localhost:3000
+静态文件服务: /www/wwwroot/ncl-download-web/public
+引导器目录: /www/wwwroot/ncl-download-web/public/public/bootstrapper
+服务器运行在 http://localhost:3000
+静态文件服务: /www/wwwroot/ncl-download-web/public
+引导器目录: /www/wwwroot/ncl-download-web/public/public/bootstrapper
+服务器运行在 http://localhost:3000
+静态文件服务: /www/wwwroot/ncl-download-web/public
+引导器目录: /www/wwwroot/ncl-download-web/public/bootstrapper
+服务器运行在 http://localhost:5005
+静态文件服务: /www/wwwroot/ncl-download-web/public
+引导器目录: /www/wwwroot/ncl-download-web/public/bootstrapper
+服务器运行在 http://localhost:5005
+静态文件服务: /www/wwwroot/ncl-download-web/public
+引导器目录: /www/wwwroot/ncl-download-web/public/bootstrapper
+/www/wwwroot/ncl-download-web/server/server.js:10
+app.use(express.static(PUBLIC_DIR));
+                       ^
+
+ReferenceError: PUBLIC_DIR is not defined
+    at Object.<anonymous> (/www/wwwroot/ncl-download-web/server/server.js:10:24)
+    at Module._compile (node:internal/modules/cjs/loader:1854:14)
+    at Object..js (node:internal/modules/cjs/loader:1985:10)
+    at Module.load (node:internal/modules/cjs/loader:1577:32)
+    at Module._load (node:internal/modules/cjs/loader:1379:12)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:255:19)
+    at Module.executeUserEntryPoint [as runMain] (node:internal/modules/run_main:154:5)
+    at node:internal/main/run_main_module:33:47
+
+Node.js v24.16.0
+服务器运行在 http://localhost:5005
+服务器运行在 http://localhost:5005

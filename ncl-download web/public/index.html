@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="shortcut icon" href="favicon.png">
+  <title>NCL启动器下载</title>
+  <style>
+    * {margin: 0;padding: 0;box-sizing: border-box;}
+    body {background: #f2f4f8;font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;display: flex;align-items: center;justify-content: center;min-height: 100vh;padding: 1.5rem;}
+    .download-card {background: #ffffff;max-width: 560px;width: 100%;border-radius: 28px;box-shadow: 0 20px 35px -8px rgba(0, 0, 0, 0.1), 0 8px 20px -6px rgba(0, 0, 0, 0.05);padding: 2.5rem 2rem 2.8rem;transition: box-shadow 0.2s ease;}
+    .download-card:hover {box-shadow: 0 24px 42px -12px rgba(0, 0, 0, 0.15);}
+    h1 {font-size: 1.9rem;font-weight: 600;letter-spacing: -0.02em;color: #0b1a2f;margin-bottom: 0.4rem;display: flex;align-items: center;gap: 10px;}
+    .title-accent {display: inline-block;width: 6px;height: 26px;background: #1e5ef7;border-radius: 6px;margin-right: 12px;}
+    .subhead {font-size: 0.98rem;color: #5b6d89;margin-bottom: 2.2rem;line-height: 1.5;border-left: 3px solid #d0dae8;padding-left: 1rem;font-weight: 400;}
+    .options {display: flex;flex-direction: column;gap: 1.2rem;margin-bottom: 1.8rem;}
+    .download-row {display: flex;align-items: center;justify-content: space-between;background: #f9fbfe;border: 1px solid #e2e9f2;border-radius: 18px;padding: 1.2rem 1.5rem;transition: background 0.15s, border-color 0.15s;}
+    .download-row:hover {background: #ffffff;border-color: #b8cae0;}
+    .file-info {display: flex;flex-direction: column;gap: 0.2rem;}
+    .file-label {font-weight: 600;font-size: 1.15rem;color: #0e2238;letter-spacing: -0.01em;display: flex;align-items: center;gap: 8px;}
+    /* 新增：图标样式 */
+    .favicon-icon {width: 24px;height: 24px;object-fit: contain;display: inline-block;vertical-align: middle;}
+    .file-name {font-size: 0.85rem;color: #62758f;font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;background: #edf2f9;padding: 0.2rem 0.6rem;border-radius: 30px;display: inline-block;width: fit-content;letter-spacing: 0.01em;}
+    .download-btn {background: #ffffff;border: 1px solid #cfdcee;color: #1a3e6f;font-weight: 500;font-size: 0.95rem;padding: 0.7rem 1.6rem;border-radius: 40px;cursor: pointer;display: flex;align-items: center;justify-content: center;gap: 6px;transition: all 0.15s;white-space: nowrap;box-shadow: 0 2px 4px rgba(0, 0, 0, 0.02);font-family: inherit;line-height: 1;}
+    .download-btn:hover {background: #1e5ef7;border-color: #1e5ef7;color: #ffffff;box-shadow: 0 8px 14px -6px rgba(30, 94, 247, 0.3);}
+    .download-btn:active {transform: scale(0.97);background: #1549c4;border-color: #1549c4;}
+    .btn-arrow {display: inline-block;width: 16px;height: 16px;background: currentColor;mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpolyline points='7 10 12 15 17 10'/%3E%3Cline x1='12' y1='15' x2='12' y2='3'/%3E%3C/svg%3E") no-repeat center;mask-size: contain;-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpolyline points='7 10 12 15 17 10'/%3E%3Cline x1='12' y1='15' x2='12' y2='3'/%3E%3C/svg%3E") no-repeat center;-webkit-mask-size: contain;background: currentColor;}
+    .footnote {font-size: 0.8rem;color: #8a9bb0;border-top: 1px solid #e6ecf5;padding-top: 1.5rem;margin-top: 0.6rem;text-align: left;display: flex;align-items: center;justify-content: space-between;letter-spacing: 0.01em;}
+    .footnote span {display: flex;align-items: center;gap: 6px;}
+    .dot {width: 5px;height: 5px;background: #b7c8dd;border-radius: 50%;display: inline-block;}
+    @media (max-width: 480px) {
+      .download-card {padding: 1.8rem 1.2rem 2rem;}
+      .download-row {flex-direction: column;align-items: flex-start;gap: 1rem;padding: 1.2rem;}
+      .download-btn {width: 100%;padding: 0.8rem 1rem;justify-content: center;}
+      h1 {font-size: 1.6rem;}
+      .title-accent {height: 22px;width: 5px;}
+      .favicon-icon {width: 22px;height: 22px;}
+    }
+  </style>
+</head>
+<body>
+  <div class="download-card">
+    <h1>
+      <span class="title-accent"></span>
+      启动器下载
+    </h1>
+    <div class="subhead">
+      选择对应版本
+    </div>
+    <div class="options">
+      <div class="download-row">
+        <div class="file-info">
+          <div class="file-label">
+            <img src="favicon.png" alt="NCL icon" class="favicon-icon" onerror="this.style.display='none'">
+            NCL
+          </div>
+          <div class="file-name">NCL.exe</div>
+        </div>
+        <button class="download-btn" id="downloadNclBtn" type="button">
+          <span class="btn-arrow"></span>
+          下载
+        </button>
+      </div>
+      <div class="download-row">
+        <div class="file-info">
+          <div class="file-label">
+            <img src="favicon.png" alt="NCL icon" class="favicon-icon" onerror="this.style.display='none'">
+            NCL_x86
+          </div>
+          <div class="file-name">NCL_x86.exe</div>
+        </div>
+        <button class="download-btn" id="downloadX86Btn" type="button">
+          <span class="btn-arrow"></span>
+          下载
+        </button>
+      </div>
+    </div>
+  </div>
+  <script>
+    (function() {
+      'use strict';
+      function downloadFile(fileName) {
+        const link = document.createElement('a');
+        link.href = fileName;
+        link.download = fileName;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+      }
+      const nclBtn = document.getElementById('downloadNclBtn');
+      const x86Btn = document.getElementById('downloadX86Btn');
+      nclBtn.addEventListener('click', function(event) {
+        downloadFile('https://preview.ccwu.cc/NCL.exe');
+      });
+      x86Btn.addEventListener('click', function(event) {
+        event.preventDefault();
+        downloadFile('https://preview.ccwu.cc/NCL_x86.exe');
+      });
+    })();
+  </script>
+</body>
+</html>

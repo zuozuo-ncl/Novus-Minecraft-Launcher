@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    日志配置
+
+    日志目录由 Java 代码在启动时通过系统属性 "mc.launcher.logdir" 注入
+    （见 com.mclauncher.launcher.LoggingConfigurator）。
+
+    这里的 ${mc.launcher.logdir:-logs} 写法含义：
+      - 优先使用 Java 端设置的系统属性值
+      - 若未定义，则退回相对目录 logs（保证任何情况下日志功能都可用）
+
+    为什么不直接写相对路径：
+    相对路径会解析到**进程的工作目录**，用户以不同「起始位置」启动时
+    日志会散落各处。这与「启动器自身的东西都放在启动器目录下」的约定冲突。
+-->
+<configuration>
+
+    <!-- 读取系统属性；若不存在则用默认值 -->
+    <property name="LOG_DIR" value="${mc.launcher.logdir:-logs}"/>
+
+    <appender name="Console" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="File" class="ch.qos.logback.core.FileAppender">
+        <file>${LOG_DIR}/launcher.log</file>
+        <append>true</append>
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="Console"/>
+        <appender-ref ref="File"/>
+    </root>
+</configuration>
