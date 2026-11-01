@@ -1,22 +1,19 @@
 #!/bin/bash
 
-set -e  # 遇到错误立即退出
+set -e
 
-# ==================== 配置区域 ====================
-PROJECT_DIR="/www/wwwroot/ncl-download-web/server"
+PROJECT_DIR="Your project directory"
 SERVER_FILE="server.js"
 PORT=5005
-NODE_VERSION="18"  # 建议 Node.js 版本
+NODE_VERSION="18"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/server.pid"
-# ==================================================
 
-# 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -34,7 +31,6 @@ log_debug() {
     echo -e "${BLUE}[DEBUG]${NC} $1"
 }
 
-# 检查 Node.js 环境
 check_node() {
     if ! command -v node &> /dev/null; then
         log_error "未找到 Node.js，请先安装 Node.js ${NODE_VERSION}+"
@@ -59,7 +55,6 @@ check_node() {
     fi
 }
 
-# 检查项目目录
 check_project_dir() {
     if [[ ! -d "$PROJECT_DIR" ]]; then
         log_error "项目目录不存在: $PROJECT_DIR"
@@ -81,7 +76,6 @@ check_project_dir() {
     log_info "项目目录检查通过: $PROJECT_DIR"
 }
 
-# 安装依赖
 install_deps() {
     log_info "检查并安装依赖..."
     
@@ -93,13 +87,11 @@ install_deps() {
     fi
 }
 
-# 创建日志目录
 setup_logs() {
     mkdir -p "$LOG_DIR"
     log_info "日志目录: $LOG_DIR"
 }
 
-# 检查端口占用
 check_port() {
     if lsof -ti:$PORT &> /dev/null; then
         local pids=$(lsof -ti:$PORT)
@@ -109,11 +101,8 @@ check_port() {
     return 0
 }
 
-# 启动服务器
 start_server() {
     log_info "启动服务器..."
-    
-    # 检查是否已经在运行
     if [[ -f "$PID_FILE" ]]; then
         local old_pid=$(cat "$PID_FILE" 2>/dev/null)
         if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
@@ -124,25 +113,16 @@ start_server() {
             rm -f "$PID_FILE"
         fi
     fi
-    
-    # 检查端口
     if ! check_port; then
         log_error "端口 $PORT 被占用，无法启动"
         return 1
     fi
-    
-    # 启动服务器 (使用 nohup 后台运行)
     cd "$PROJECT_DIR"
     nohup node "$SERVER_FILE" >> "$LOG_DIR/server.log" 2>&1 &
     local pid=$!
-    
-    # 保存 PID
     echo $pid > "$PID_FILE"
-    
-    # 等待启动
     sleep 2
     
-    # 验证启动成功
     if kill -0 $pid 2>/dev/null; then
         if lsof -ti:$PORT | grep -q $pid; then
             log_info "服务器启动成功! PID: $pid"
@@ -157,7 +137,6 @@ start_server() {
     return 1
 }
 
-# 停止服务器
 stop_server() {
     log_info "停止服务器..."
     
@@ -185,7 +164,6 @@ stop_server() {
         kill $pid
         sleep 1
         
-        # 强制杀死
         if kill -0 $pid 2>/dev/null; then
             kill -9 $pid
             log_warn "强制终止进程: $pid"
@@ -199,7 +177,6 @@ stop_server() {
     rm -f "$PID_FILE"
 }
 
-# 重启服务器
 restart_server() {
     log_info "重启服务器..."
     stop_server
@@ -207,7 +184,6 @@ restart_server() {
     start_server
 }
 
-# 查看状态
 status_server() {
     echo "===================="
     echo "  服务器状态检查"
@@ -218,21 +194,18 @@ status_server() {
         if [[ -n "$pid" ]] && kill -0 $pid 2>/dev/null; then
             echo -e "状态: ${GREEN}运行中${NC} (PID: $pid)"
             
-            # 检查端口
             if lsof -ti:$PORT | grep -q $pid; then
                 echo -e "端口 $PORT: ${GREEN}监听中${NC}"
             else
                 echo -e "端口 $PORT: ${RED}未监听${NC}"
             fi
             
-            # 显示进程信息
             echo "进程信息:"
             ps -p $pid -o pid,ppid,cmd,etime,pcpu,pmem 2>/dev/null || true
         else
             echo -e "状态: ${RED}未运行${NC} (PID 文件存在但进程不存在)"
         fi
     else
-        # 尝试通过端口查找
         local pids=$(lsof -ti:$PORT)
         if [[ -n "$pids" ]]; then
             echo -e "状态: ${YELLOW}运行中 (无 PID 文件)${NC}"
@@ -241,17 +214,13 @@ status_server() {
             echo -e "状态: ${RED}未运行${NC}"
         fi
     fi
-    
     echo "===================="
-    
-    # 显示最近日志
     if [[ -f "$LOG_DIR/server.log" ]]; then
         echo "最近日志 (最后 10 行):"
         tail -10 "$LOG_DIR/server.log"
     fi
 }
 
-# 查看日志
 view_logs() {
     local lines=${1:-50}
     if [[ -f "$LOG_DIR/server.log" ]]; then
@@ -261,7 +230,6 @@ view_logs() {
     fi
 }
 
-# 显示帮助
 show_help() {
     cat << EOF
 MC Launcher Server 管理脚本
@@ -291,7 +259,6 @@ MC Launcher Server 管理脚本
 EOF
 }
 
-# 主函数
 main() {
     case "${1:-help}" in
         start)

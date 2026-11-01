@@ -346,8 +346,8 @@ public class MultiplayerPage implements Page {
                     public void onJoinFailed(int id, String from, String reason) {
                         Platform.runLater(() -> {
                             if ("timeout".equals(reason)) {
-                                setLog("✗ 玩家 " + from + " 等待确认太久（超过 25 秒），中转已断开，\n"
-                                        + "  对方看到的会是「连接已丢失」。请让对方重新连接，你在 30 秒内点「允许」。");
+                                setLog("✗ 玩家 " + from + " 等待确认太久（超过 20 秒），中转已断开，\n"
+                                        + "  对方看到的会是「连接已丢失」。请让对方重新连接，你在 20 秒内点「允许」。");
                             } else {
                                 setLog("✗ 已允许玩家 " + from + "，但连不上本地游戏（端口 "
                                         + tunnel.getLocalPort() + "）。\n"
@@ -395,7 +395,7 @@ public class MultiplayerPage implements Page {
                     }));
             try {
 
-                return answer.get(25, java.util.concurrent.TimeUnit.SECONDS);
+                return answer.get(20, java.util.concurrent.TimeUnit.SECONDS);
             } catch (Exception e) {
                 setLog("玩家接入确认超时，已拒绝（" + from + "）");
                 return false;
