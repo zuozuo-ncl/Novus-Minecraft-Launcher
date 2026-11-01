@@ -1,0 +1,188 @@
+name: Build
+
+# 每次 push 到 main/master、以及打 v* 标签时自动构建：
+#   · Java 启动器（Maven 打 shaded jar）
+#   · C++ 引导器（x64 / x86，CMake + MinGW）
+# 产物可在 Actions 运行页面的 Artifacts 里下载；打标签时还会自动发到 Release。
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:        # 手动触发
+
+permissions:
+  contents: write           # 打标签时创建 Release 需要
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------
+  #  Java 启动器
+  # ---------------------------------------------------------------
+  launcher:
+    name: Launcher (Java)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: 'MC launcher/pom.xml'
+
+      # Maven 会把依赖（含 JavaFX 的 win 分类 jar）缓存到 ~/.m2，后续构建快很多
+      - name: 构建 shaded jar
+        working-directory: MC launcher
+        run: mvn -B -ntp package
+
+      - name: 校验 jar 与版本
+        working-directory: MC launcher
+        shell: pwsh
+        run: |
+          $jar = Get-ChildItem target/*-shaded.jar | Select-Object -First 1
+          if (-not $jar) { throw '没有生成 shaded jar' }
+          $v = (Get-Item $jar.FullName).VersionInfo
+          Write-Host "产物: $($jar.Name)  $([math]::Round($jar.Length/1MB,1)) MB"
+          $hash = (Get-FileHash $jar.FullName -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SHA256: $hash"
+
+      - name: 上传 jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: launcher-jar
+          path: MC launcher/target/mc-launcher-*-shaded.jar
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  #  C++ 引导器 —— x64 / x86 各一份
+  # ---------------------------------------------------------------
+  bootstrapper:
+    name: Bootstrapper (${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            msystem: UCRT64
+            mingw: /ucrt64
+            artifact: MCLauncherBootstrap.exe
+          - arch: x86
+            msystem: MINGW32
+            mingw: /mingw32
+            artifact: MCLauncherBootstrap_x86.exe
+    defaults:
+      run:
+        working-directory: bootstrapper
+    steps:
+      - uses: actions/checkout@v4
+
+      # 一次装好对应架构的 gcc/cmake/ninja，后续都在这套 MSYS2 里跑
+      - name: 准备工具链（${{ matrix.msystem }}）
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: ${{ matrix.msystem }}
+          update: false
+          install: >-
+            ${{ (matrix.arch == 'x64' && 'mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja')
+                || 'mingw-w64-i686-gcc mingw-w64-i686-cmake mingw-w64-i686-ninja' }}
+
+      - name: 配置
+        shell: msys2 {0}
+        run: |
+          export PATH=${{ matrix.mingw }}/bin:$PATH
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release                 -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++                 -DCMAKE_RC_COMPILER=windres
+
+      - name: 编译
+        shell: msys2 {0}
+        run: |
+          export PATH=${{ matrix.mingw }}/bin:$PATH
+          cmake --build build --config Release
+          mkdir -p out
+          cp bin/MCLauncherBootstrap.exe "out/${{ matrix.artifact }}"
+
+      - name: 产物信息
+        shell: pwsh
+        run: |
+          $exe = "out/${{ matrix.artifact }}"
+          if (-not (Test-Path $exe)) { throw "没有生成 $exe" }
+          $f = Get-Item $exe
+          Write-Host "$($f.Name)  $([math]::Round($f.Length/1MB,1)) MB"
+          Write-Host "SHA256: $((Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower())"
+          Write-Host "版本信息: $($f.VersionInfo.FileDescription) $($f.VersionInfo.FileVersion)"
+
+      - name: 上传 exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrapper-${{ matrix.arch }}
+          path: bootstrapper/out/${{ matrix.artifact }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  #  Node 服务（可选）：只做语法检查，确认提交没把服务写坏
+  # ---------------------------------------------------------------
+  node-check:
+    name: Node syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 语法检查
+        run: |
+          for f in mc-relay/*.js "MC launcher-Server/server.js"; do
+            [ -f "$f" ] && node --check "$f" && echo "ok  $f"
+          done
+
+  # ---------------------------------------------------------------
+  #  打 v* 标签时：把产物打包发到 Release
+  # ---------------------------------------------------------------
+  release:
+    name: Release
+    needs: [launcher, bootstrapper]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载全部产物
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 生成 SHA256SUMS
+        run: |
+          cd dist
+          ls -la
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: 创建 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/mc-launcher-*-shaded.jar
+            dist/MCLauncherBootstrap.exe
+            dist/MCLauncherBootstrap_x86.exe
+            dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            ### 下载
+            - `mc-launcher-*-shaded.jar` — 启动器（需要 Java 17）
+            - `MCLauncherBootstrap.exe` — 引导器 x64（自带 Java 检测与下载）
+            - `MCLauncherBootstrap_x86.exe` — 引导器 32 位
+
+            校验：`sha256sum -c SHA256SUMS`
+
+            > 发布新版本后记得用 `tools/publish-jar.py` 更新哈希，
+            > 并把 jar 与 `.sha256` 上传到文件服务器。
