@@ -160,36 +160,10 @@ node server.js          # 默认 5005
 
 ## mc-relay —— 联机中继
 
-把无法直连的玩家通过公网服务器转接，实现联机。
+- 传统中继房主/玩家模型：房主申请房间 → 朋友连公网端口 → 双向转发
+- 新增 **虚拟局域网模式**（`vpn-room.js` + `vpn-tunnel.js`）：房主与玩家各一条长连接，服务器只做帧交换。每个连接有空闲 60 秒超时
 
-| 项目 | 说明 |
-|---|---|
-| 技术栈 | Node.js，仅用内置 `net` / `http` / `crypto` |
-| `relay-server.js` | 部署在公网服务器上 |
-| `relay-host.js` | 房主本地运行，连接中继并转发到本机服务 |
-
-**运行**
-
-```bash
-# 公网服务器
-API_KEY=<密钥> node relay-server.js
-
-# 房主本地
-node relay-host.js
-```
-
-主要环境变量：
-
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `HTTP_PORT` | `8080` | 中继 HTTP 端口 |
-| `HOST` | `0.0.0.0` | 监听地址 |
-| `RANGE` | `40000-40999` | 分配给房间的端口范围 |
-| `API_KEY` | 空 | 请求房间时的鉴权密钥 |
-| `MAX_PLAYERS` | `20` | 单房间人数上限 |
-| `MAX_ROOMS` | `100` | 房间总数上限 |
-
-部署脚本见 `deploy-relay.sh`。
+主要环境变量：`HTTP_PORT`（8080）、`RANGE`（40000-40999）、`API_KEY`、`MAX_PLAYERS`（20）、`MAX_ROOMS`（100）、`VPN_IDLE_TIMEOUT_MS`（60000）。
 
 ---
 
@@ -212,7 +186,7 @@ node relay-host.js
 ## 说明
 
 - `MC launcher-Server/version.json` 中的版本号是部署时的快照，与线上实际值可能不同，以服务器返回为准
-=======
+
 # Novus-Minecraft-Launcher
 一个由 C++ 引导器 + JavaFX 核心 + Node.js 联机中继组成的 Minecraft 全栈启动器。支持老旧系统、底层防篡改与一键联机。
 >>>>>>> 79e9bc11ce225bc8ac089d9701a3262ae004089d
