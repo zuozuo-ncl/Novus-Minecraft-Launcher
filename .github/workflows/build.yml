@@ -1,29 +1,20 @@
 name: Build
-
-# 每次 push 到 main/master、以及打 v* 标签时自动构建：
-#   · Java 启动器（Maven 打 shaded jar）
-#   · C++ 引导器（x64 / x86，CMake + MinGW）
-# 产物可在 Actions 运行页面的 Artifacts 里下载；打标签时还会自动发到 Release。
-
 on:
   push:
     branches: [main, master]
     tags: ['v*']
   pull_request:
     branches: [main, master]
-  workflow_dispatch:        # 手动触发
+  workflow_dispatch:
 
 permissions:
-  contents: write           # 打标签时创建 Release 需要
+  contents: write
 
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  # ---------------------------------------------------------------
-  #  Java 启动器
-  # ---------------------------------------------------------------
   launcher:
     name: Launcher (Java)
     runs-on: windows-latest
@@ -38,7 +29,6 @@ jobs:
           cache: maven
           cache-dependency-path: 'MC launcher/pom.xml'
 
-      # Maven 会把依赖（含 JavaFX 的 win 分类 jar）缓存到 ~/.m2，后续构建快很多
       - name: 构建 shaded jar
         working-directory: MC launcher
         run: mvn -B -ntp package
@@ -61,9 +51,6 @@ jobs:
           path: MC launcher/target/mc-launcher-*-shaded.jar
           if-no-files-found: error
 
-  # ---------------------------------------------------------------
-  #  C++ 引导器 —— x64 / x86 各一份
-  # ---------------------------------------------------------------
   bootstrapper:
     name: Bootstrapper (${{ matrix.arch }})
     runs-on: windows-latest
@@ -84,8 +71,6 @@ jobs:
         working-directory: bootstrapper
     steps:
       - uses: actions/checkout@v4
-
-      # 一次装好对应架构的 gcc/cmake/ninja，后续都在这套 MSYS2 里跑
       - name: 准备工具链（${{ matrix.msystem }}）
         uses: msys2/setup-msys2@v2
         with:
@@ -126,9 +111,6 @@ jobs:
           path: bootstrapper/out/${{ matrix.artifact }}
           if-no-files-found: error
 
-  # ---------------------------------------------------------------
-  #  Node 服务（可选）：只做语法检查，确认提交没把服务写坏
-  # ---------------------------------------------------------------
   node-check:
     name: Node syntax check
     runs-on: ubuntu-latest
@@ -142,10 +124,6 @@ jobs:
           for f in mc-relay/*.js "MC launcher-Server/server.js"; do
             [ -f "$f" ] && node --check "$f" && echo "ok  $f"
           done
-
-  # ---------------------------------------------------------------
-  #  打 v* 标签时：把产物打包发到 Release
-  # ---------------------------------------------------------------
   release:
     name: Release
     needs: [launcher, bootstrapper]
