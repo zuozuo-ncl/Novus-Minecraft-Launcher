@@ -9,6 +9,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -391,11 +392,29 @@ public class UpdateClient {
                 }
                 logger.info("下载内容 SHA-256 校验通过: {}", target.getFileName());
             } else {
-                logger.info("服务器未提供该版本哈希，下载后未做内容校验: {}", target.getFileName());
+                // 没有哈希时也不能盲信：CDN / 反代返回 404 页面或错误 JSON 时
+                // 状态码可能是 200，下载下来的其实是一段 HTML。至少校验 ZIP 魔数。
+                if (!isZipFile(target)) {
+                    Files.deleteIfExists(target);
+                    throw new IOException("下载到的文件不是有效的 jar（可能是错误页面），已删除");
+                }
+                logger.info("服务器未提供该版本哈希，已校验文件格式: {}", target.getFileName());
             }
             return target;
         } finally {
             downloader.shutdown();
+        }
+    }
+
+    /** 文件开头是否为 ZIP 魔数（PK / PK / PK） */
+    private static boolean isZipFile(Path f) {
+        try (InputStream in = Files.newInputStream(f)) {
+            byte[] h = in.readNBytes(4);
+            return h.length == 4 && h[0] == 'P' && h[1] == 'K'
+                    && ((h[2] == 3 && h[3] == 4) || (h[2] == 5 && h[3] == 6)
+                        || (h[2] == 7 && h[3] == 8));
+        } catch (IOException e) {
+            return false;
         }
     }
 

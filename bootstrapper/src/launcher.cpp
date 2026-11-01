@@ -347,8 +347,12 @@ StepResult LoadPreferredJar(const AppPaths& paths,
     //   { "version": "1.0.0", "file": "mc-launcher-1.0.0.jar",
     //     "usable": true, "failures": 0, ... }
     //
-    // 逐个定位 "usable": true，再向前找出同一对象里的 "version" 值。
+    // 解析方式：先定位每个 "usable"，再**向前找到所在对象的起始 '{'**
+    // 与对应结束 '}'，只在 [start, end) 这段里读 "version"。
+    // 早期版本直接向前扫 "version" 不看对象边界，会把上一个条目的版本号
+    // 误当成当前条目的，导致「版本 A 不可用」却把版本 B 排除掉。
     const std::wstring usableKey = L"\"usable\"";
+    const std::wstring versionKey = L"\"version\"";
     std::wstring bestVersion;
     std::wstring bestJar;
     size_t pos = 0;
@@ -360,41 +364,33 @@ StepResult LoadPreferredJar(const AppPaths& paths,
         }
         pos = up + usableKey.size();
 
-        // 取该键的值，必须是 true
-        size_t colon = json.find(L':', pos);
-        if (colon == std::wstring::npos) {
-            break;
+        // 本对象范围
+        size_t objStart = json.rfind(L'{', up);
+        size_t objEnd = json.find(L'}', up);
+        if (objStart == std::wstring::npos || objEnd == std::wstring::npos || objEnd < up) {
+            continue;
         }
-        size_t v = colon + 1;
-        while (v < json.size() && iswspace(json[v])) {
+        std::wstring obj = json.substr(objStart, objEnd - objStart + 1);
+
+        // usable 必须是 true
+        std::wstring usableVal = obj;
+        if (!ExtractJsonString(obj, L"version", usableVal)) {
+            continue;      // 没有 version 字段：不是版本条目
+        }
+        size_t u = obj.find(usableKey);
+        size_t uc = u == std::wstring::npos ? std::wstring::npos : obj.find(L':', u);
+        if (uc == std::wstring::npos) {
+            continue;
+        }
+        size_t v = uc + 1;
+        while (v < obj.size() && iswspace(obj[v])) {
             ++v;
         }
-        if (json.compare(v, 4, L"true") != 0) {
-            continue;       // usable=false，跳过
+        if (obj.compare(v, 4, L"true") != 0) {
+            continue;
         }
 
-        // 向前找本对象内的 "version" 键：取最后一个位于 up 之前的出现
-        size_t searchFrom = up;
-        std::wstring ver;
-        // 对象边界可近似为往前找到一个 '{'，在其之后找 "version"
-        size_t brace = json.rfind(L'{', up);
-        size_t from = (brace == std::wstring::npos) ? 0 : brace;
-        // 在 [from, up) 内可能有多个 "version"，取最靠后的那个
-        size_t scan = from;
-        while (scan < up) {
-            size_t hit = json.find(L"\"version\"", scan);
-            if (hit == std::wstring::npos || hit >= up) {
-                break;
-            }
-            std::wstring tmp;
-            if (ExtractJsonString(json.substr(hit, up - hit),
-                                  L"version", tmp)) {
-                ver = tmp;
-            }
-            scan = hit + 9;
-        }
-        (void)searchFrom;
-
+        std::wstring ver = usableVal;
         if (ver.empty() || !IsSafeVersionString(ver)) {
             continue;
         }
@@ -405,8 +401,7 @@ StepResult LoadPreferredJar(const AppPaths& paths,
             continue;
         }
 
-        if (bestVersion.empty()
-                || CompareVersions(ver, bestVersion) > 0) {
+        if (bestVersion.empty() || CompareVersions(ver, bestVersion) > 0) {
             bestVersion = ver;
             bestJar = jar;
         }
