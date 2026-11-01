@@ -1,9 +1,9 @@
 set -euo pipefail
 
-SERVER="${1:-39.106.60.15}"
+SERVER="${1:-Your public ip}"
 REMOTE_DIR="/opt/mc-relay"
-HTTP_PORT="${HTTP_PORT:-8080}"
-RANGE="${RANGE:-40000-40999}"
+HTTP_PORT="${HTTP_PORT:-Your port}"
+RANGE="${RANGE:Your port range}"
 
 echo "=== 部署到 $SERVER ==="
 
