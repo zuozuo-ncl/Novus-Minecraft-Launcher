@@ -1,5 +1,6 @@
 package com.mclauncher.ui;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.auth.Account;
 import com.mclauncher.auth.AccountManager;
@@ -32,6 +33,12 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * 主窗口
+ *
+ * 布局：侧边栏导航 + 中间页面区 + 底部状态栏
+ * 点击侧边栏切换整个内容区（不再使用弹窗）
+ */
 public class MainWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(MainWindow.class);
@@ -39,23 +46,26 @@ public class MainWindow {
     private Stage stage;
     private Scene scene;
 
+    // 核心组件
     private ConfigManager config;
     private AccountManager accountManager;
     private BMCLApiClient apiClient;
     private GameLauncher gameLauncher;
     private DependencyBootstrap bootstrap;
 
+    // UI
     private StackPane contentHost;
-
+    /** 内嵌弹窗宿主 */
     private com.mclauncher.ui.component.ModalHost modalHost;
     private Label statusLabel;
     private Label accountLabel;
     private VBox sidebarBox;
 
+    /** 侧边栏当前目录名（紧凑行） */
     private com.mclauncher.ui.component.SkinAvatar sidebarAvatar;
     private Label sidebarAccountName;
     private Label currentDirNameLabel;
-
+    // 页面与导航
     private final Map<String, Page> pages = new LinkedHashMap<>();
     private final Map<String, Button> navButtons = new LinkedHashMap<>();
     private String currentPageKey;
@@ -67,39 +77,49 @@ public class MainWindow {
 
         BorderPane root = buildUI();
 
+        // 应用保存的语言设置（默认：中文用户用中文，其它用英文）
         applyLanguage();
 
         scene = new Scene(root, config.getWindowWidth(), config.getWindowHeight());
-
+        // 按配置应用主题（深色 / 浅色）
         ThemeManager.applyFromConfig(scene, config);
 
         stage.setTitle(L.t("app.title") + " v" + config.getLauncherVersion());
-
+        // 窗口/任务栏图标（resources/ui/icon-*.png）
         com.mclauncher.ui.AppIcon.apply(stage);
         stage.setScene(scene);
-
-        
+        // 最小尺寸要小于默认尺寸，否则用户拖不小窗口。
+        // 早期 min(980x640) 与默认(1024x768)太接近，几乎没有缩小余地。
         stage.setMinWidth(760);
         stage.setMinHeight(520);
         stage.setOnCloseRequest(e -> onClose());
 
         stage.show();
 
+        // 默认进入主页
         switchPage("home");
 
-        
+        // 后台预热皮肤站连接：进程内第一条 HTTPS 请求有 ~1.5s 的
+        // JSSE 初始化开销，提前做掉，玩家切到账号页时头像能秒出。
         com.mclauncher.auth.SkinFetcher.warmUpAsync();
 
-        
-
+        // 启动时就预热模组中文简介表。
+        // 它之前只在打开「下载」页时才加载，导致第一次进下载页要等
+        // 3 秒下载 + 1 秒解析；提前跑的话，玩家点进下载页时通常已经就绪。
         com.mclauncher.mod.McmodIntroMap.prewarmAsync();
 
         runBootstrap();
 
+        // 窗口尺寸变化时记录
         stage.widthProperty().addListener((o, ov, nv) ->
                 config.setWindowSize(nv.intValue(), (int) stage.getHeight()));
     }
 
+    /**
+     * 应用界面语言
+     *
+     * 配置里没写过语言时按系统区域猜一次并记住，之后以配置为准。
+     */
     private void applyLanguage() {
         String saved = config.getString("language", "");
         com.mclauncher.i18n.L.Lang lang;
@@ -113,6 +133,12 @@ public class MainWindow {
         logger.info("界面语言: {}", lang.displayName);
     }
 
+    /**
+     * 语言切换后重建常驻界面
+     *
+     * 侧边栏、状态栏、窗口标题都是构建时取文案的，切换语言必须重建。
+     * 页面本身由各自的 rebuildAfterLanguageChange 处理。
+     */
     public void rebuildForLanguage() {
         if (stage == null || scene == null) {
             return;
@@ -121,6 +147,7 @@ public class MainWindow {
         scene.setRoot(fresh);
         stage.setTitle(L.t("app.title") + " v" + config.getLauncherVersion());
 
+        // 丢弃缓存的页面实例：它们内部全是旧语言的控件
         pages.clear();
         currentPageKey = null;
         navButtons.clear();
@@ -132,7 +159,7 @@ public class MainWindow {
         config = new ConfigManager();
         accountManager = new AccountManager();
         apiClient = new BMCLApiClient("bmcl".equals(config.getSourceType()));
-
+        // 启动器数据目录：与 C++ 引导器保持一致（%APPDATA%\NCL_Launcher）
         Path launcherDir = com.mclauncher.utils.AppPaths.appDataDir();
         bootstrap = new DependencyBootstrap(config);
         gameLauncher = new GameLauncher(config, launcherDir);
@@ -143,6 +170,8 @@ public class MainWindow {
         }
     }
 
+    // ==================== UI ====================
+
     private BorderPane buildUI() {
         BorderPane root = new BorderPane();
         root.getStyleClass().add("main-root");
@@ -152,11 +181,12 @@ public class MainWindow {
         contentHost = new StackPane();
         contentHost.getStyleClass().add("bg-main");
 
+        // 内嵌弹窗层：叠在页面内容之上，随主窗口一起移动
         modalHost = new com.mclauncher.ui.component.ModalHost();
 
         StackPane centerStack = new StackPane(contentHost, modalHost.getNode());
-
-        
+        // 关键：这一层也必须带背景样式。
+        // 之前漏了，导致切换到某些页面时外层露出默认白色背景。
         centerStack.getStyleClass().add("bg-main");
         root.setCenter(centerStack);
 
@@ -165,27 +195,39 @@ public class MainWindow {
         return root;
     }
 
+    /**
+     * 获取内嵌弹窗宿主（供各页面弹出面板）
+     */
     public com.mclauncher.ui.component.ModalHost getModalHost() {
         return modalHost;
     }
 
+    /**
+     * 获取主场景（供设置页即时切换主题）
+     */
     public Scene getScene() {
         return scene;
     }
 
+    /**
+     * 侧边栏：标题 + 导航按钮 + 底部信息
+     */
     private VBox buildSidebar() {
         sidebarBox = new VBox(8);
         sidebarBox.getStyleClass().add("sidebar");
 
-        
-
+        // 侧边栏只有 220px 宽，「Novus Minecraft Launcher」在这个字号下放不下，
+        // 会被截断。缩写 NCL 简短且与程序内的简称一致。
+        // 完整名称在窗口标题栏和「设置 → 详情」里都有。
         Label title = new Label("NCL");
         title.getStyleClass().add("sidebar-title");
 
+        // 导航按钮容器
         VBox navBox = new VBox(8);
         navBox.setFillWidth(true);
 
-        
+        // 账号入口只在底部那一行（带头像和用户名）—— 导航里再放一个「账号」
+        // 会重复，而且两处样式不同容易让人以为是两个功能。
         addNavButton(navBox, "home", L.t("s_32b5f63ebd"));
         addNavButton(navBox, "download", L.t("s_2b9d013177"));
         addNavButton(navBox, "multiplayer", L.t("multiplayer.title"));
@@ -199,12 +241,14 @@ public class MainWindow {
         version.getStyleClass().add("text-muted");
         version.setPadding(new Insets(8, 0, 0, 8));
 
+        // 目录管理：放在导航之后、底部版本号之前，紧凑一行
         sidebarBox.getChildren().addAll(title, navBox, spacer,
                 buildSidebarAccountRow(), buildCompactDirectoryRow(), version);
 
         return sidebarBox;
     }
 
+    /** 侧边栏底部的账号行（头像 + 名字，点击进账号页） */
     private HBox buildSidebarAccountRow() {
         sidebarAvatar = com.mclauncher.ui.component.SkinAvatar.circle(28);
         sidebarAccountName = new Label(L.t("s_e8041a8c93"));
@@ -213,7 +257,7 @@ public class MainWindow {
         HBox row = new HBox(10, sidebarAvatar.getNode(), sidebarAccountName);
         row.setAlignment(Pos.CENTER_LEFT);
         row.setPadding(new Insets(8, 8, 8, 8));
-        row.getStyleClass().add("dir-card");     
+        row.getStyleClass().add("dir-card");     // 复用卡片外观
         row.setOnMouseClicked(e -> switchPage("account"));
         row.setCursor(javafx.scene.Cursor.HAND);
 
@@ -230,6 +274,12 @@ public class MainWindow {
         sidebarAccountName.setText(a != null ? a.getUsername() : L.t("s_475a0b4c23"));
     }
 
+    /**
+     * 侧边栏的目录管理行（紧凑版）
+     *
+     * 只占一行：显示当前目录名，点击整行即打开目录管理窗口。
+     * 完整路径作为 tooltip 显示，不占布局空间。
+     */
     private VBox buildCompactDirectoryRow() {
         VBox box = new VBox(4);
         box.setPadding(new Insets(0, 0, 8, 0));
@@ -259,6 +309,9 @@ public class MainWindow {
         return box;
     }
 
+    /**
+     * 刷新侧边栏的当前目录显示（单行文本 + tooltip）
+     */
     private void updateDirectoryRow() {
         if (currentDirNameLabel == null) {
             return;
@@ -277,13 +330,16 @@ public class MainWindow {
         }
     }
 
+    /**
+     * 打开目录管理窗口
+     */
     private void openDirectoryManager() {
         DirectoryManagerWindow window = new DirectoryManagerWindow(
                 modalHost, config, msg -> {
                     setStatus(msg);
-
+                    // 目录变化后刷新侧边栏与当前页面
                     updateDirectoryRow();
-
+                    // 刷新当前页面（下载/游戏设置页依赖游戏目录）
                     Page p = pages.get(currentPageKey);
                     if (p != null) {
                         try {
@@ -306,6 +362,9 @@ public class MainWindow {
         container.getChildren().add(btn);
     }
 
+    /**
+     * 底部状态栏
+     */
     private HBox buildStatusBar() {
         HBox bar = new HBox(16);
         bar.getStyleClass().add("status-bar");
@@ -320,6 +379,7 @@ public class MainWindow {
         accountLabel = new Label(L.t("s_e8041a8c93"));
         accountLabel.getStyleClass().add("status-text");
 
+        // BMCLAPI 协议要求：标明资源来源
         Label source = new Label("bmcl".equals(config.getSourceType())
                 ? L.t("s_2920a7f87d")
                 : L.t("s_0e9ee7bfaf"));
@@ -331,11 +391,17 @@ public class MainWindow {
         return bar;
     }
 
+    // ==================== 页面切换 ====================
+
+    /**
+     * 切换页面：懒加载并缓存页面实例
+     */
     private void switchPage(String key) {
         if (key.equals(currentPageKey)) {
             return;
         }
 
+        // 通知旧页面离开
         Page old = pages.get(currentPageKey);
         if (old != null) {
             try {
@@ -350,6 +416,7 @@ public class MainWindow {
             return;
         }
 
+        // 更新导航按钮选中态
         navButtons.forEach((k, btn) -> {
             btn.getStyleClass().remove("nav-button-active");
             if (k.equals(key)) {
@@ -360,11 +427,13 @@ public class MainWindow {
         contentHost.getChildren().setAll(page.getContent());
         currentPageKey = key;
 
-        
+        // 关键：换了页面内容后，必须把弹窗遮罩重新提到最前。
+        // 之前漏了这一步，切页后遮罩会被新页面盖住 —— 看起来像界面卡死。
         if (modalHost != null && modalHost.isShowing()) {
             modalHost.bringToFront();
         }
 
+        // 每次切页都刷新顶栏账号 —— 用户可能刚在账号页切换了账号
         updateAccountLabel();
 
         try {
@@ -376,19 +445,22 @@ public class MainWindow {
         setStatus(page.getTitle());
     }
 
+    /**
+     * 创建页面实例
+     */
     private Page createPage(String key) {
         return switch (key) {
             case "home" -> {
                 HomePage p = new HomePage(config, accountManager, gameLauncher,
                         this::setStatus, null);
-
+                // 注入弹窗宿主，使其能弹出「发现新版本」面板
                 p.setModalHost(modalHost);
                 yield p;
             }
 
             case "download" -> {
                 DownloadPage p = new DownloadPage(config, apiClient, this::setStatus);
-
+                // 注入内嵌弹窗宿主，供版本选择/进度面板使用
                 p.setModalHost(modalHost);
                 yield p;
             }
@@ -401,27 +473,27 @@ public class MainWindow {
 
             case "settings" -> {
                 GameSettingsPage p = new GameSettingsPage(config, apiClient, this::setStatus);
-
+                // 注入内嵌弹窗宿主：确认删除/卸载、错误提示都用它
                 p.setModalHost(modalHost);
                 yield p;
             }
 
             case "account" -> {
                 AccountPage p = new AccountPage(accountManager, config, this::setStatus);
-
+                // 注入内嵌弹窗宿主：删除账号确认用
                 p.setModalHost(modalHost);
                 yield p;
             }
 
             case "launcher" -> {
-
+                // 使用与 C++ 引导器相同的数据目录：%APPDATA%\NCL_Launcher
                 Path launcherDir = com.mclauncher.utils.AppPaths.appDataDir();
                 LauncherSettingsPage p = new LauncherSettingsPage(config, launcherDir);
-
+                // 注入内嵌弹窗宿主，使其能弹出目录管理面板
                 p.setModalHost(modalHost);
-
+                // 注入主场景，使「外观」标签页能即时切换主题
                 p.setHostScene(scene);
-
+                // 切换语言后重建主窗口（侧边栏/状态栏/页面缓存）
                 p.setLanguageChangeListener(this::rebuildForLanguage);
                 yield p;
             }
@@ -430,6 +502,9 @@ public class MainWindow {
         };
     }
 
+    /**
+     * 外部可调用：刷新账号显示
+     */
     public void refreshAccount() {
         updateAccountLabel();
     }
@@ -442,6 +517,8 @@ public class MainWindow {
         accountLabel.setText(a != null ? "👤 " + a.getUsername() : L.t("s_e8041a8c93"));
         updateSidebarAccount();
     }
+
+    // ==================== 生命周期 ====================
 
     private void runBootstrap() {
         bootstrap.setStatusCallback(s -> Platform.runLater(() -> setStatus(s)));
@@ -460,7 +537,7 @@ public class MainWindow {
 
     private void onClose() {
         logger.info("启动器关闭中...");
-
+        // 联机隧道要在退出时主动断开，否则中转要等心跳超时（45 秒）才回收房间
         com.mclauncher.ui.page.Page mp = pages.get("multiplayer");
         if (mp instanceof com.mclauncher.ui.page.MultiplayerPage m) {
             m.shutdown();

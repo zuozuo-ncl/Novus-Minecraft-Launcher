@@ -4,7 +4,7 @@ set -e
 
 PROJECT_DIR="Your project directory"
 SERVER_FILE="server.js"
-PORT=5005
+PORT=Your port
 NODE_VERSION="18"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/server.pid"
@@ -131,7 +131,6 @@ start_server() {
             return 0
         fi
     fi
-    
     log_error "服务器启动失败"
     rm -f "$PID_FILE"
     return 1
@@ -163,7 +162,6 @@ stop_server() {
     if kill -0 $pid 2>/dev/null; then
         kill $pid
         sleep 1
-        
         if kill -0 $pid 2>/dev/null; then
             kill -9 $pid
             log_warn "强制终止进程: $pid"
@@ -173,7 +171,6 @@ stop_server() {
     else
         log_info "进程 $pid 已不存在"
     fi
-    
     rm -f "$PID_FILE"
 }
 
@@ -193,13 +190,11 @@ status_server() {
         local pid=$(cat "$PID_FILE" 2>/dev/null)
         if [[ -n "$pid" ]] && kill -0 $pid 2>/dev/null; then
             echo -e "状态: ${GREEN}运行中${NC} (PID: $pid)"
-            
             if lsof -ti:$PORT | grep -q $pid; then
                 echo -e "端口 $PORT: ${GREEN}监听中${NC}"
             else
                 echo -e "端口 $PORT: ${RED}未监听${NC}"
             fi
-            
             echo "进程信息:"
             ps -p $pid -o pid,ppid,cmd,etime,pcpu,pmem 2>/dev/null || true
         else

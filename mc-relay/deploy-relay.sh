@@ -1,16 +1,21 @@
+#!/usr/bin/env bash
+# MC 联机中转 —— 部署到 Ubuntu 服务器
+# 用法：bash deploy-relay.sh [server_ip]
 set -euo pipefail
 
-SERVER="${1:-Your public ip}"
+SERVER="${1:-39.106.60.15}"
 REMOTE_DIR="/opt/mc-relay"
-HTTP_PORT="${HTTP_PORT:-Your port}"
-RANGE="${RANGE:Your port range}"
+HTTP_PORT="${HTTP_PORT:-8080}"
+RANGE="${RANGE:-40000-40999}"
 
 echo "=== 部署到 $SERVER ==="
 
+# 1. 上传
 echo "[1/5] 上传文件"
 ssh "admin@$SERVER" "sudo mkdir -p $REMOTE_DIR && sudo chown \$USER:\$USER $REMOTE_DIR"
 scp relay-server.js "admin@$SERVER:$REMOTE_DIR/"
 
+# 2. systemd 服务
 echo "[2/5] 配置 systemd"
 ssh "admin@$SERVER" "sudo tee /etc/systemd/system/mc-relay.service > /dev/null" <<UNIT
 [Unit]
@@ -37,9 +42,11 @@ SyslogIdentifier=mc-relay
 WantedBy=multi-user.target
 UNIT
 
+# 3. 启动
 echo "[3/5] 启动服务"
 ssh "admin@$SERVER" "sudo systemctl daemon-reload && sudo systemctl enable --now mc-relay && sleep 2 && sudo systemctl --no-pager status mc-relay | head -12"
 
+# 4. 防火墙（有 ufw 才动）
 echo "[4/5] 防火墙"
 ssh "admin@$SERVER" "if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q active; then
   sudo ufw allow $HTTP_PORT/tcp comment 'mc-relay api' >/dev/null
@@ -51,6 +58,7 @@ else
   echo '    TCP $RANGE （端口池，玩家连这里）'
 fi"
 
+# 5. 自检
 echo "[5/5] 自检"
 sleep 1
 curl -s "http://$SERVER:$HTTP_PORT/health" || echo "  API 不可达（检查安全组）"

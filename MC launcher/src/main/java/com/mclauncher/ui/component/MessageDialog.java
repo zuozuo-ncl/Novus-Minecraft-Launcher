@@ -1,5 +1,6 @@
 package com.mclauncher.ui.component;
 
+
 import com.mclauncher.i18n.L;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -13,43 +14,119 @@ import javafx.scene.layout.VBox;
 
 import java.util.function.Consumer;
 
+/**
+ * 内嵌式消息对话框
+ *
+ * 用来替代 JavaFX 原生的 {@code Alert} / {@code TextInputDialog}。
+ *
+ * 为什么要自己写：
+ * - 原生 Alert 是**独立 Stage**，有自己的 DialogPane 和自己的 Scene，
+ *   不继承主窗口样式表，主题切换时要单独处理，还经常跟主窗口主题对不上
+ * - 原生 Alert 的按钮是系统风格的「确定/取消」，与本启动器的按钮样式不一致
+ * - 用户期望所有弹窗都长成「目录管理」那种内嵌卡片样式
+ *
+ * 本类基于 {@link ModalHost}，因此：
+ * - 内嵌在主窗口里，跟随主窗口移动
+ * - 自动继承当前主题
+ * - 样式与外层弹窗完全一致
+ *
+ * 用法（确认框，带回调）：
+ * <pre>
+ *   MessageDialog.confirm(modalHost, "确认删除", "删除「xxx」？", "此操作不可恢复！",
+ *                         () -&gt; doDelete());
+ * </pre>
+ * 用法（仅提示，一个「知道了」按钮）：
+ * <pre>
+ *   MessageDialog.info(modalHost, "提示", "设置已保存。");
+ * </pre>
+ * 用法（输入框）：
+ * <pre>
+ *   MessageDialog.prompt(modalHost, "重命名目录", "为这个目录设置一个便于识别的名称",
+ *                        "名称", 默认值, name -&gt; rename(name));
+ * </pre>
+ *
+ * 注意：回调在**弹窗关闭之后**执行，此时遮罩已经移除，
+ * 回调里可以安全地再弹新窗、或直接移除自身节点。
+ */
 public final class MessageDialog {
 
     private static final org.slf4j.Logger logger =
             org.slf4j.LoggerFactory.getLogger(MessageDialog.class);
 
+    /**
+     * 尺寸策略
+     *
+     * 消息框（提示/错误/确认）不用固定宽度 —— 让卡片按文字自适应，
+     * 一句话的提示就只占一小块，不要顶着一个 620 宽的大白框。
+     * 只给一个上限，避免长错误信息把窗口撑爆。
+     *
+     * 输入框（prompt）需要固定宽度，否则单行输入框会缩成一条。
+     */
     private static final double MESSAGE_MAX_WIDTH = 460;
     private static final double PROMPT_WIDTH = 420;
 
+    /**
+     * 消息框的最小宽度
+     *
+     * 太窄的卡片配上下方两个按钮会显得局促，也给一个下限保证观感。
+     */
     private static final double MESSAGE_MIN_WIDTH = 300;
 
     private MessageDialog() {}
 
+    // ==================== 提示 ====================
+
+    /**
+     * 提示框（只有「知道了」）
+     */
     public static void info(ModalHost host, String title, String message) {
         showSimple(host, title, message, Kind.INFO, null);
     }
 
+    /**
+     * 错误框（只有「知道了」）
+     */
     public static void error(ModalHost host, String title, String message) {
         showSimple(host, title, message, Kind.ERROR, null);
     }
 
+    /**
+     * 警告框（只有「知道了」）
+     */
     public static void warn(ModalHost host, String title, String message) {
         showSimple(host, title, message, Kind.WARN, null);
     }
 
+    /**
+     * 提示框，关闭后执行回调
+     */
     public static void info(ModalHost host, String title, String message, Runnable onClosed) {
         showSimple(host, title, message, Kind.INFO, onClosed);
     }
 
+    /**
+     * 错误框，关闭后执行回调
+     */
     public static void error(ModalHost host, String title, String message, Runnable onClosed) {
         showSimple(host, title, message, Kind.ERROR, onClosed);
     }
 
+    /**
+     * 确认框
+     *
+     * @param onConfirm 点「确定」后执行；点「取消」/关闭 / ESC / 点遮罩都不执行
+     */
     public static void confirm(ModalHost host, String title, String header,
                                String message, Runnable onConfirm) {
         confirm(host, title, header, message, null, L.t("s_f526c89937"), onConfirm);
     }
 
+    /**
+     * 确认框（自定义副标题说明与确认按钮文字）
+     *
+     * @param detail    次要说明，可为 null
+     * @param okText    确认按钮文字，如「删除」「卸载」
+     */
     public static void confirm(ModalHost host, String title, String header, String message,
                                String detail, String okText, Runnable onConfirm) {
         if (host == null) {
@@ -59,9 +136,9 @@ public final class MessageDialog {
         VBox content = buildBody(message, detail, Kind.QUESTION, header);
 
         HBox buttons = buildButtonRow(
-
-                
-
+                // 取消按钮必须绑定「关闭弹窗」，否则点击无任何反应。
+                // 早期这里传了 null，而 buildButtonRow 会跳过 null 动作，
+                // 导致 8 处确认框的取消按钮全是死的。
                 new ButtonSpec(L.t("s_4d0b4688c7"), "button", () -> host.close()),
                 new ButtonSpec(okText == null ? L.t("s_f526c89937") : okText, "button-primary", onConfirm));
 
@@ -70,6 +147,12 @@ public final class MessageDialog {
         host.show(title, content, null);
     }
 
+    /**
+     * 确认框，带「已确认」回调与「取消」回调
+     *
+     * 适合「点确定做 A，点取消做 B」的场景（例如关闭启动器时取消 = 不关闭）。
+     * 注意：按 ESC / 点遮罩 / 点标题栏 ✕ 都算「取消」，会走 onCancel。
+     */
     public static void confirmOrCancel(ModalHost host, String title, String header,
                                        String message, String okText, String cancelText,
                                        Runnable onConfirm, Runnable onCancel) {
@@ -77,6 +160,7 @@ public final class MessageDialog {
             return;
         }
 
+        // 用一个数组当可变标志位：弹窗关闭回调只能拿到最终结果
         final boolean[] confirmed = {false};
 
         VBox content = buildBody(message, null, Kind.QUESTION, header);
@@ -104,6 +188,14 @@ public final class MessageDialog {
         });
     }
 
+    // ==================== 输入 ====================
+
+    /**
+     * 输入框（替代 TextInputDialog）
+     *
+     * @param defaultValue 初始值，可为 null
+     * @param onOk         确定后执行，参数是用户输入的文本（已 trim，非空）
+     */
     public static void prompt(ModalHost host, String title, String header, String fieldLabel,
                               String defaultValue, Consumer<String> onOk) {
         if (host == null) {
@@ -154,7 +246,7 @@ public final class MessageDialog {
         Runnable submit = () -> {
             String v = field.getText() == null ? "" : field.getText().trim();
             if (v.isEmpty()) {
-
+                // 空值不关闭，并给出明确原因（只描红框用户不知道哪里错了）
                 if (!field.getStyleClass().contains("input-error")) {
                     field.getStyleClass().add("input-error");
                 }
@@ -169,18 +261,31 @@ public final class MessageDialog {
             }
         };
         okBtn.setOnAction(e -> submit.run());
-        field.setOnAction(e -> submit.run());   
+        field.setOnAction(e -> submit.run());   // 回车即确定
 
         content.getChildren().add(buttons);
 
         host.show(title, content, null);
 
+        // 弹出后自动聚焦并全选，用户可直接改写
         javafx.application.Platform.runLater(() -> {
             field.requestFocus();
             field.selectAll();
         });
     }
 
+    // ==================== 带链接的提示 ====================
+
+    /**
+     * 带「可点击链接」的提示框
+     *
+     * 用于引导用户去外部网站（如 Java 官网）自行下载。
+     * 链接在弹窗内以超链接形式呈现，点击直接打开系统浏览器 ——
+     * 比让用户手抄一长串 URL 现实得多。
+     *
+     * @param linkText 链接的显示文字（如「打开 Java 官网」）
+     * @param linkUrl  实际打开的地址
+     */
     public static void infoWithLink(ModalHost host, String title, String message,
                                     String linkText, String linkUrl) {
         if (host == null) {
@@ -189,6 +294,7 @@ public final class MessageDialog {
 
         VBox content = buildBody(message, null, Kind.INFO, null);
 
+        // 在按钮行上方插入链接
         javafx.scene.control.Hyperlink link =
                 new javafx.scene.control.Hyperlink(linkText);
         link.getStyleClass().add("link-button");
@@ -208,6 +314,9 @@ public final class MessageDialog {
         host.show(title, content, null);
     }
 
+    // ==================== 内部实现 ====================
+
+    /** 图标语义（仅用于选择左侧色条颜色，不用图片资源） */
     private enum Kind { INFO, WARN, ERROR, QUESTION }
 
     private static void showSimple(ModalHost host, String title, String message,
@@ -226,10 +335,16 @@ public final class MessageDialog {
         host.show(title, content, onClosed);
     }
 
+    /**
+     * 构建弹窗主体：标题 + 正文（+ 可选的次要说明）
+     *
+     * 左侧加一条语义色条，让「错误 / 警告 / 询问」一眼能区分，
+     * 弥补内嵌弹窗没有系统图标的问题。
+     */
     private static VBox buildBody(String message, String detail, Kind kind, String header) {
         VBox body = new VBox(8);
         body.setPadding(new Insets(16, 18, 14, 18));
-
+        // 不设 prefWidth：让卡片按实际文字宽度收缩
         body.setMinWidth(MESSAGE_MIN_WIDTH);
         body.setMaxWidth(MESSAGE_MAX_WIDTH);
 
@@ -257,6 +372,7 @@ public final class MessageDialog {
             body.getChildren().add(d);
         }
 
+        // 语义色条
         Region bar = new Region();
         bar.setMinWidth(4);
         bar.setPrefWidth(4);
@@ -266,6 +382,7 @@ public final class MessageDialog {
         HBox wrap = new HBox(0, bar, body);
         HBox.setHgrow(body, Priority.ALWAYS);
 
+        // 用 VBox 包一层，保证返回值类型统一（调用方要往里加按钮行）
         VBox outer = new VBox(wrap);
         return outer;
     }
@@ -280,6 +397,7 @@ public final class MessageDialog {
         }
     }
 
+    /** 一个按钮的描述 */
     private static final class ButtonSpec {
         final String text;
         final String styleClass;
@@ -292,6 +410,9 @@ public final class MessageDialog {
         }
     }
 
+    /**
+     * 右下角按钮行：取消在左、确认在右（符合桌面软件惯例）
+     */
     private static HBox buildButtonRow(ButtonSpec... specs) {
         HBox row = new HBox(10);
         row.setAlignment(Pos.CENTER_RIGHT);
@@ -306,11 +427,11 @@ public final class MessageDialog {
             if (spec.action != null) {
                 b.setOnAction(e -> spec.action.run());
             } else {
-
-                
-
-                
-
+                // 兜底：没给动作的按钮直接禁用。
+                //
+                // 绝不能留下一个「可点但没反应」的按钮 —— 早期 confirm() 的
+                // 取消按钮就是这样（action 传 null 被静默跳过），用户点了
+                // 弹窗不动，以为界面卡死。禁用至少是诚实的外观。
                 b.setDisable(true);
                 logger.warn("按钮「{}」没有绑定动作，已禁用", spec.text);
             }

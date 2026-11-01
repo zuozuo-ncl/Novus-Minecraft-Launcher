@@ -11,13 +11,13 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         PORT: 5003,
-
+        // 写接口令牌：务必在服务器上改成随机长串，未设置时增删版本接口会 503
         ADMIN_TOKEN: process.env.ADMIN_TOKEN || ''
       },
       env_production: {
         NODE_ENV: 'production',
         PORT: 5003,
-
+        // 写接口令牌：务必在服务器上改成随机长串，未设置时增删版本接口会 503
         ADMIN_TOKEN: process.env.ADMIN_TOKEN || ''
       },
       error_file: './logs/pm2-error.log',
@@ -31,16 +31,16 @@ module.exports = {
       restart_delay: 5000,
       kill_timeout: 5000,
       listen_timeout: 10000,
-
+      // 自动重启配置
       autorestart: true,
-
+      // 守护进程模式
       daemon: true,
-
+      // 实例 ID
       instance_var: 'INSTANCE_ID'
     }
   ],
-
   
+  // 部署配置 (可选)
   deploy: {
     production: {
       user: 'www',

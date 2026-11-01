@@ -1,5 +1,6 @@
 package com.mclauncher.ui.window;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.network.Downloader;
 import com.mclauncher.network.UpdateClient;
@@ -16,6 +17,20 @@ import org.slf4j.LoggerFactory;
 import java.nio.file.Path;
 import java.util.function.Consumer;
 
+/**
+ * 更新提示面板（内嵌弹窗）
+ *
+ * 用法：
+ *   - 主页启动时自动检测，有新版就弹出此面板询问
+ *   - 设置页「检查更新」也复用它
+ *
+ * 下载的新版 jar 会放到「启动器数据目录」（%APPDATA%\NCL_Launcher），
+ * **旧版本保留不删**。
+ *
+ * 下载完成后会询问是否**立即重启**到新版本 —— 因为当前进程没法把自己
+ * 换成新 jar（见 {@link com.mclauncher.utils.RestartUtils}），
+ * 不重启的话要等用户下次手动打开才会生效。
+ */
 public class UpdateDialog {
 
     private static final Logger logger = LoggerFactory.getLogger(UpdateDialog.class);
@@ -24,8 +39,15 @@ public class UpdateDialog {
     private final UpdateClient.UpdateInfo info;
     private final Consumer<String> statusConsumer;
 
+    /** 可选的「退出前收尾」回调（如保存配置），重启前调用 */
     private Runnable beforeRestart;
 
+    /**
+     * 可选的「游戏是否在运行」查询
+     *
+     * 游戏在跑时不能重启：新进程起来后当前进程退出，
+     * 会把游戏进程一起带走（游戏是本进程的子进程）。
+     */
     private java.util.function.BooleanSupplier gameRunningCheck;
 
     private Button downloadButton;
@@ -35,6 +57,7 @@ public class UpdateDialog {
     private Label progressLabel;
     private Label resultLabel;
 
+    /** 下载完成后的新 jar 路径 */
     private Path downloadedJar;
 
     public UpdateDialog(ModalHost modalHost,
@@ -45,16 +68,30 @@ public class UpdateDialog {
         this.statusConsumer = statusConsumer;
     }
 
+    /**
+     * 设置重启前的收尾动作（可选）
+     *
+     * 重启会直接结束当前进程，此回调用来把配置落盘、
+     * 避免用户刚改的设置丢掉。
+     */
     public UpdateDialog setBeforeRestart(Runnable r) {
         this.beforeRestart = r;
         return this;
     }
 
+    /**
+     * 设置「游戏是否在运行」的查询（可选）
+     *
+     * 传入后，游戏运行期间点「立即重启」会被拦下并提示先关游戏。
+     */
     public UpdateDialog setGameRunningCheck(java.util.function.BooleanSupplier check) {
         this.gameRunningCheck = check;
         return this;
     }
 
+    /**
+     * 显示更新面板
+     */
     public void show() {
         BorderPane content = buildUI();
         modalHost.show(L.t("s_01047404ef"), content, null, true);
@@ -65,12 +102,14 @@ public class UpdateDialog {
         root.getStyleClass().add("bg-main");
         root.setPrefSize(560, 340);
 
+        // ---- 顶部：版本信息 ----
         VBox header = new VBox(10);
         header.setPadding(new Insets(18, 20, 10, 20));
 
         Label title = new Label(L.t("s_d5be7ecb43"));
         title.getStyleClass().add("page-title");
 
+        // 版本对比
         HBox verRow = new HBox(12);
         verRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -98,6 +137,7 @@ public class UpdateDialog {
 
         header.getChildren().addAll(title, verRow, note);
 
+        // ---- 中部：进度 ----
         VBox center = new VBox(10);
         center.setPadding(new Insets(0, 20, 10, 20));
 
@@ -115,6 +155,7 @@ public class UpdateDialog {
 
         center.getChildren().addAll(progressBar, progressLabel, resultLabel);
 
+        // ---- 底部按钮 ----
         HBox footer = new HBox(10);
         footer.setPadding(new Insets(10, 20, 18, 20));
         footer.setAlignment(Pos.CENTER_RIGHT);
@@ -123,6 +164,7 @@ public class UpdateDialog {
         laterButton.getStyleClass().add("button");
         laterButton.setOnAction(e -> modalHost.close());
 
+        // 「立即重启」：下载完成后才显示（见 onDownloadFinished）
         restartButton = new Button(L.t("s_c4b0582a9b"));
         restartButton.getStyleClass().add("button-primary");
         restartButton.setVisible(false);
@@ -141,6 +183,9 @@ public class UpdateDialog {
         return root;
     }
 
+    /**
+     * 开始下载新版
+     */
     private void startDownload() {
         downloadButton.setDisable(true);
         downloadButton.setText(L.t("s_a0ef0da255"));
@@ -160,11 +205,12 @@ public class UpdateDialog {
                 Path appData = UpdateClient.getAppDataDir();
                 UpdateClient client = new UpdateClient();
 
+                // 服务器给出的官方哈希（只有 HTTPS 接口的才会被 UpdateClient 接受）
                 String expected = info.latestSha256;
                 if (expected == null && info.sha256ByVersion != null) {
                     expected = info.sha256ByVersion.get(targetVersion);
                 }
-
+                // 事务式安装：下载+校验，再把「清单登记 + 信任表登记」一次性写好
                 com.mclauncher.update.VersionManifest manifest =
                         com.mclauncher.update.VersionManifest.load();
                 Path jar = client.installVersion(appData, targetVersion, expected, manifest,
@@ -190,7 +236,7 @@ public class UpdateDialog {
 
                             @Override
                             public void onSpeed(long bytesPerSecond) {
-
+                                // 速度可选展示，这里不占用界面空间
                             }
 
                             @Override
@@ -208,13 +254,16 @@ public class UpdateDialog {
                     resultLabel.setText(L.t("s_09055c783a") + jar + L.t("s_96db721f7a"));
                     resultLabel.getStyleClass().add("text-accent");
 
+                    // 记下新 jar，供「立即重启」使用
                     downloadedJar = jar;
 
-                    
-
+                    // 登记到版本清单：新版本尚未验证可用（usable=false），
+                    // 要等它真正跑起来、界面显示成功后才由 LauncherApp 标为可用。
+                    // 这样「下载完但一启动就崩」的坏版本能被自动回退掉。
                     registerInManifest(targetVersion, jar,
                             com.mclauncher.config.ConfigManager.staticLauncherVersion());
 
+                    // 按钮切换：下载按钮退场，换成「立即重启」
                     downloadButton.setVisible(false);
                     downloadButton.setManaged(false);
 
@@ -224,7 +273,8 @@ public class UpdateDialog {
                     restartButton.setVisible(true);
                     restartButton.setManaged(true);
 
-                    
+                    // 更新已落地，此后面板不该再被误关 ——
+                    // 否则用户点一下遮罩就看不到「重启」这个选项了
                     modalHost.setClosable(false);
 
                     if (statusConsumer != null) {
@@ -251,8 +301,19 @@ public class UpdateDialog {
         }, "update-downloader").start();
     }
 
+    /**
+     * 点击「立即重启」
+     *
+     * 流程：
+     *   1. 定位新 jar（优先用刚下载的那个；拿不到就从数据目录挑最新的）
+     *   2. 拉起新进程
+     *   3. 成功 -> 收尾后退出当前进程；失败 -> 就地提示，**不退出**
+     *
+     * 第 3 步的失败分支很关键：如果新进程起不来又退了当前进程，
+     * 用户手上就什么都没有了。宁可让他手动重启。
+     */
     private void onRestartClicked() {
-
+        // 游戏在跑时不能直接退出 —— 会把游戏进程一起带走
         if (gameRunningCheck != null && gameRunningCheck.getAsBoolean()) {
             showRestartError(L.t("s_cace03dc38"));
             return;
@@ -275,7 +336,7 @@ public class UpdateDialog {
                 com.mclauncher.utils.RestartUtils.restartWith(target);
 
         if (r.ok) {
-
+            // 先落盘再退出，避免用户刚改的设置丢失
             if (beforeRestart != null) {
                 try {
                     beforeRestart.run();
@@ -289,6 +350,9 @@ public class UpdateDialog {
         }
     }
 
+    /**
+     * 重启失败的提示（就地显示，不关面板）
+     */
     private void showRestartError(String text) {
         resultLabel.setText(L.t("s_8703d7ba63") + text);
         resultLabel.getStyleClass().clear();
@@ -299,6 +363,16 @@ public class UpdateDialog {
         laterButton.setDisable(false);
     }
 
+    /**
+     * 把刚下载的版本登记进版本清单
+     *
+     * 只登记、不标记可用 —— 它还没被实际运行验证过。
+     * 同时把 current 指向它，这样重启后会优先跑新版本。
+     *
+     * 不向上抛异常：清单写入失败不该阻止用户使用刚下好的版本，
+     * 最坏情况只是回退机制少了这条记录。
+     */
+    /** 当前版本（清单里的 current）：登记时保留它，避免把 current 覆盖成未验证的新版本 */
     private void registerInManifest(String version, Path jar, String keepCurrent) {
         try {
             com.mclauncher.update.VersionManifest m =
@@ -307,15 +381,16 @@ public class UpdateDialog {
 
             com.mclauncher.update.VersionManifest.Entry e =
                     m.findOrCreate(version, jar.getFileName().toString());
-            e.usable = false;       
+            e.usable = false;       // 待验证
             e.failures = 0;
 
-            
-
-            
-
-            
-
+            // 这里**不设** pendingSince —— 真正的「试用开始」由 LauncherApp
+            // 在下次启动时记录；否则用户选了「稍后重启」，标记会一直挂着，
+            // 下次启动被误判成「上次崩溃了」。
+            //
+            // 也**不改** current：新版本还没跑过，不能让引导器下次直接拉它。
+            // 下一轮启动会先做「上次是否崩溃」检查：正常 -> LauncherApp
+            // 把 current 切到运行中的版本；崩溃 -> 回退到旧版本。
             if (keepCurrent != null && !keepCurrent.isBlank()) {
                 m.current = keepCurrent;
             }

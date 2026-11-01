@@ -1,5 +1,6 @@
 package com.mclauncher.utils;
 
+
 import com.mclauncher.i18n.L;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,12 +14,23 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.Set;
 
+/**
+ * 目录工具类
+ *
+ * 主要负责创建「隐藏文件夹」并保证跨平台行为正确。
+ */
 public final class DirectoryUtils {
 
     private static final Logger logger = LoggerFactory.getLogger(DirectoryUtils.class);
 
     private DirectoryUtils() {}
 
+    /**
+     * 确保目录存在，并尝试将其标记为隐藏
+     *
+     * @param dir 目标目录
+     * @return 创建后的目录
+     */
     public static Path ensureHiddenDirectory(Path dir) throws IOException {
         if (!Files.isDirectory(dir)) {
             Files.createDirectories(dir);
@@ -27,6 +39,9 @@ public final class DirectoryUtils {
         return dir;
     }
 
+    /**
+     * 确保目录存在（不隐藏）
+     */
     public static Path ensureDirectory(Path dir) throws IOException {
         if (!Files.isDirectory(dir)) {
             Files.createDirectories(dir);
@@ -34,6 +49,15 @@ public final class DirectoryUtils {
         return dir;
     }
 
+    /**
+     * 把目录标记为隐藏
+     *
+     * - Windows：设置 dos:hidden 属性（资源管理器里才会真正看不见）
+     * - macOS / Linux：以 "." 开头的目录本身就是隐藏的，
+     *   无需额外处理（POSIX 属性里没有「隐藏」概念）
+     *
+     * 失败时不抛异常 —— 隐藏只是「体面」，不影响功能。
+     */
     public static boolean hide(Path path) {
         if (path == null || !Files.exists(path)) {
             return false;
@@ -52,17 +76,20 @@ public final class DirectoryUtils {
                     return true;
                 }
             } else {
-
+                // Unix 系：用文件名以 "." 开头实现隐藏即可
                 String name = path.getFileName() != null ? path.getFileName().toString() : "";
                 return name.startsWith(".");
             }
         } catch (Exception e) {
-
+            // 某些文件系统（如部分网络盘、FAT）不支持该属性
             logger.debug("设置隐藏属性失败（不影响功能）: {} - {}", path, e.getMessage());
         }
         return false;
     }
 
+    /**
+     * 取消隐藏
+     */
     public static boolean unhide(Path path) {
         if (path == null || !Files.exists(path)) {
             return false;
@@ -82,6 +109,11 @@ public final class DirectoryUtils {
         return false;
     }
 
+    /**
+     * 递归确保目录树存在，并把「最外层」标记为隐藏
+     *
+     * 适用于一次性准备 versions / libraries / assets 等结构。
+     */
     public static void ensureHiddenTree(Path base, String... subDirs) throws IOException {
         ensureHiddenDirectory(base);
         for (String sub : subDirs) {
@@ -90,6 +122,9 @@ public final class DirectoryUtils {
         }
     }
 
+    /**
+     * 检查目录是否被标记为隐藏
+     */
     public static boolean isHidden(Path path) {
         if (path == null || !Files.exists(path)) {
             return false;
@@ -106,6 +141,9 @@ public final class DirectoryUtils {
         }
     }
 
+    /**
+     * 目录是否可写（用于校验用户选的目录是否可用）
+     */
     public static boolean isWritable(Path dir) {
         if (dir == null) {
             return false;
@@ -114,7 +152,7 @@ public final class DirectoryUtils {
             if (!Files.isDirectory(dir)) {
                 return false;
             }
-
+            // 尝试创建一个临时文件来验证可写性
             Path probe = dir.resolve(".mc_write_test_" + System.nanoTime());
             Files.createFile(probe);
             Files.delete(probe);
@@ -124,6 +162,11 @@ public final class DirectoryUtils {
         }
     }
 
+    /**
+     * 统计目录占用空间（字节）
+     *
+     * 用于在目录管理界面展示各目录的大小。
+     */
     public static long calculateSize(Path dir) {
         if (dir == null || !Files.isDirectory(dir)) {
             return 0;
@@ -150,6 +193,11 @@ public final class DirectoryUtils {
         return total[0];
     }
 
+    /**
+     * 校验用户选择的路径是否可作为游戏根目录
+     *
+     * @return null 表示可用；否则返回错误说明
+     */
     public static String validateRootDirectory(Path root) {
         if (root == null) {
             return L.t("s_255b9d09fc");
@@ -169,6 +217,9 @@ public final class DirectoryUtils {
         return null;
     }
 
+    /**
+     * 判断给定目录是否为某个游戏根目录的数据文件夹
+     */
     public static boolean isDataFolder(Path p) {
         if (p == null || p.getFileName() == null) {
             return false;

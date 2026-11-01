@@ -1,10 +1,23 @@
 #!/usr/bin/env node
-
+/**
+ * MC 联机 —— 房主端（原型）
+ *
+ * 用法：
+ *     node relay-host.js --server 39.106.60.15 --local 25565 [--name "我的世界"]
+ *
+ * 做的事：
+ *   1. 向中转申请房间，拿到端口
+ *   2. 建立控制通道（保活 + 接收新玩家通知）
+ *   3. 每来一个新玩家，就新建一条数据通道并接到本地 MC
+ *
+ * 这个脚本先用来验证链路；跑通后同样的逻辑会移植进 Java 启动器。
+ */
 'use strict';
 
 const net = require('net');
 const http = require('http');
 
+// ---------- 参数 ----------
 const argv = process.argv.slice(2);
 const arg = (k, d) => {
   const i = argv.indexOf('--' + k);
@@ -19,8 +32,10 @@ const ROOM_NAME = arg('name', '我的联机房间');
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
+// 隧道握手魔数：与 relay-server.js 中的 MAGIC 必须一致
 const MAGIC = 'MCRELAY';
 
+// ---------- 1. 申请房间 ----------
 function requestRoom() {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify({ name: ROOM_NAME, maxPlayers: 5 });
@@ -46,6 +61,7 @@ function requestRoom() {
   });
 }
 
+// ---------- 2. 建立到本地的连接 ----------
 function connectLocal() {
   return new Promise((resolve, reject) => {
     const s = net.connect(LOCAL_PORT, LOCAL_HOST);
@@ -55,6 +71,7 @@ function connectLocal() {
   });
 }
 
+// ---------- 3. 数据通道 ----------
 function openDataChannel(info, id) {
   const s = net.connect(info.port, SERVER);
   s.setNoDelay(true);
@@ -65,6 +82,7 @@ function openDataChannel(info, id) {
       const local = await connectLocal();
       local.setNoDelay(true);
 
+      // 双向转发
       s.pipe(local);
       local.pipe(s);
 
@@ -81,8 +99,15 @@ function openDataChannel(info, id) {
   s.on('error', (e) => log(`数据通道 #${id} 错误: ${e.message}`));
 }
 
+// ---------- 4. 主流程 ----------
 let heartbeat = null;
 
+/**
+ * 用**同一个房间**重连控制通道
+ *
+ * 之前的做法是重新调用 main()：会申请到新端口，旧房间里的玩家
+ * 全部掉线，而且旧房间要等心跳超时才被回收。
+ */
 async function reconnect(info) {
   log(`重连房间 ${info.room} ...`);
   await openControl(info);
@@ -101,6 +126,11 @@ async function main() {
   await openControl(info);
 }
 
+/**
+ * 建立/重建控制通道
+ *
+ * 房间信息（room + token + port）不变，所以重连后朋友用的地址依然有效。
+ */
 function openControl(info) {
   return new Promise((resolve, reject) => {
     const ctrl = net.connect(info.port, SERVER);
@@ -146,6 +176,7 @@ function openControl(info) {
       }), 5000);
     });
 
+    // 心跳，防止中转把房间当成死房间；重连时要清掉，否则每重连一次多一个定时器
     heartbeat = setInterval(() => {
       if (!ctrl.destroyed) ctrl.write(JSON.stringify({ type: 'ping' }) + '\n');
     }, 10000);

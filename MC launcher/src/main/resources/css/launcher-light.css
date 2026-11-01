@@ -1,10 +1,27 @@
-.root {
+/* ============================================
+   Minecraft Launcher — 浅色主题
+   ============================================
+   配色：
+     主背景   #1E1E1E     侧边栏   #191919
+     卡片面板 #2D2D2D     输入框   #262626
+     hover    #3A3A3A     边框     #333333
+     强调蓝   #3B82F6     侧边栏标题绿 #4DCF7A
+     正文     #E5E5E5     次文本   #A0A0A0     弱文本 #6B7280
+     危险红   #EF4444
+   字体 Microsoft YaHei，正文 14px，标题 20px，圆角 8px
+   ============================================ */
 
+/* ============== 根与兜底 ============== */
+.root {
+    /* 同深色主题：雅黑缺 ▼ ▶ ★ ⬇ 字形，需显式回退到 Segoe UI Symbol */
     -fx-font-family: "Microsoft YaHei", "Segoe UI", "Segoe UI Symbol", sans-serif;
     -fx-font-size: 14px;
     -fx-background-color: #F5F5F5;
 }
 
+/* ============== 背景工具类 ============== */
+/* ScrollPane 的背景：JavaFX 的 ScrollPane 需要 -fx-background 而非
+   -fx-background-color，否则会露出默认白色/灰色底 */
 .bg-main {
     -fx-background: #F5F5F5;
     -fx-background-color: #F5F5F5;
@@ -13,13 +30,16 @@
 .bg-surface { -fx-background-color: #F5F5F5; }
 .bg-input   { -fx-background-color: #FFFFFF; }
 
+/* ============== 文本工具类 ============== */
 .text-primary   { -fx-text-fill: #1F1F1F; }
 .text-secondary { -fx-text-fill: #6B6B6B; }
 .text-muted     { -fx-text-fill: #8A8A8A; }
 .text-accent    { -fx-text-fill: #3B82F6; }
 
+/* ============== 主窗口 ============== */
 .main-root { -fx-background-color: #F5F5F5; }
 
+/* ============== 顶部栏 ============== */
 .top-bar {
     -fx-background-color: #EAEAEA;
     -fx-border-color: transparent transparent #DDDDDD transparent;
@@ -34,6 +54,7 @@
 .top-bar-username { -fx-text-fill: #1F1F1F; -fx-font-size: 14px; -fx-font-weight: bold; }
 .top-bar-account-type { -fx-text-fill: #6B6B6B; -fx-font-size: 11px; }
 
+/* ============== 侧边栏 ============== */
 .sidebar {
     -fx-background-color: #EAEAEA;
     -fx-padding: 18 14 18 14;
@@ -70,6 +91,7 @@
 }
 .nav-button-active:hover { -fx-background-color: #2563EB; }
 
+/* 目录管理（紧凑一行） */
 .sidebar-caption { -fx-font-size: 12px; -fx-text-fill: #8A8A8A; -fx-padding: 0 0 2 8; }
 .dir-card {
     -fx-background-color: #FFFFFF;
@@ -90,6 +112,7 @@
 }
 .dir-manage-button:hover { -fx-text-fill: #3B82F6; }
 
+/* ============== 内容区 ============== */
 .content-area { -fx-background-color: #F5F5F5; -fx-padding: 15; }
 
 .page-title { -fx-font-size: 20px; -fx-font-weight: bold; -fx-text-fill: #1F1F1F; }
@@ -101,6 +124,7 @@
     -fx-padding: 0 0 6 0;
 }
 
+/* ============== 按钮 ============== */
 .button {
     -fx-background-color: #FFFFFF;
     -fx-text-fill: #1F1F1F;
@@ -138,6 +162,7 @@
 
 .button-sm { -fx-padding: 5 12 5 12; -fx-font-size: 12px; -fx-background-radius: 6; }
 
+/* ============== 列表 ============== */
 .list-view {
     -fx-background-color: #FFFFFF;
     -fx-background-radius: 8;
@@ -156,6 +181,7 @@
 .list-view .list-cell:filled:selected { -fx-background-color: #3B82F6; -fx-text-fill: #1F1F1F; }
 .list-view .list-cell:empty { -fx-background-color: transparent; }
 
+/* ============== 输入控件 ============== */
 .text-field, .password-field {
     -fx-background-color: #FFFFFF;
     -fx-text-fill: #1F1F1F;
@@ -181,11 +207,13 @@
 .combo-box-popup .list-cell:filled:hover { -fx-background-color: #E8E8E8; }
 .combo-box-popup .list-cell:filled:selected { -fx-background-color: #3B82F6; }
 
+/* ============== 进度条 ============== */
 .progress-bar { -fx-background-color: #FFFFFF; -fx-background-radius: 8; -fx-pref-height: 14; }
 .progress-bar .track { -fx-background-color: #FFFFFF; -fx-background-radius: 8; }
 .progress-bar .bar { -fx-background-color: #3B82F6; -fx-background-radius: 8; }
 .progress-indicator { -fx-progress-color: #3B82F6; }
 
+/* ============== 日志 ============== */
 .log-area {
     -fx-control-inner-background: #F0F0F0;
     -fx-background-color: #F0F0F0;
@@ -200,6 +228,7 @@
 .log-area .content { -fx-background-color: #F0F0F0; }
 .log-area .viewport { -fx-background-color: #F0F0F0; }
 
+/* ============== 状态栏 ============== */
 .status-bar {
     -fx-background-color: #EAEAEA;
     -fx-padding: 6 15 6 15;
@@ -208,6 +237,7 @@
 }
 .status-text { -fx-text-fill: #8A8A8A; -fx-font-size: 12px; }
 
+/* ============== 选项卡 ============== */
 .tab-pane { -fx-background-color: transparent; -fx-tab-min-height: 34; }
 .tab-header-area { -fx-background-color: transparent; -fx-padding: 0 0 10 0; }
 .tab-header-background { -fx-background-color: transparent; }
@@ -221,6 +251,7 @@
     -fx-padding: 15;
 }
 
+/* ============== 滚动条 ============== */
 .scroll-bar { -fx-background-color: transparent; }
 .scroll-bar .track { -fx-background-color: #EAEAEA; -fx-background-radius: 4; }
 .scroll-bar .thumb { -fx-background-color: #E8E8E8; -fx-background-radius: 4; }
@@ -230,6 +261,7 @@
 }
 .scroll-bar .increment-arrow, .scroll-bar .decrement-arrow { -fx-shape: " "; -fx-padding: 0; }
 
+/* ============== 工具提示 ============== */
 .tooltip {
     -fx-background-color: #FFFFFF;
     -fx-text-fill: #1F1F1F;
@@ -238,6 +270,7 @@
     -fx-padding: 6 10 6 10;
 }
 
+/* ============== 卡片 ============== */
 .card {
     -fx-background-color: #FFFFFF;
     -fx-background-radius: 8;
@@ -248,8 +281,10 @@
 }
 .card-title { -fx-font-size: 14px; -fx-font-weight: bold; -fx-text-fill: #1F1F1F; }
 
+/* ============== 分隔线 ============== */
 .separator .line { -fx-border-color: #CCCCCC; }
 
+/* ============== 复选框 / 单选 ============== */
 .check-box { -fx-text-fill: #333333; }
 .check-box .box {
     -fx-background-color: #FFFFFF;
@@ -261,10 +296,12 @@
 .check-box:selected .mark { -fx-background-color: #FFFFFF; }
 .radio-button { -fx-text-fill: #333333; }
 
+/* ============== 文件行 ============== */
 .filerow { -fx-padding: 6 10 6 10; -fx-background-radius: 4; }
 .filerow:hover { -fx-background-color: #FFFFFF; -fx-cursor: hand; }
 .filerow-label { -fx-text-fill: #333333; -fx-font-size: 14px; }
 
+/* ============== 公告 ============== */
 .announcement-box {
     -fx-background-color: #FFFFFF;
     -fx-background-radius: 8;
@@ -278,6 +315,7 @@
     -fx-wrap-text: true;
 }
 
+/* ============== 过滤栏 ============== */
 .filter-bar {
     -fx-background-color: #FFFFFF;
     -fx-background-radius: 8;
@@ -285,15 +323,16 @@
 }
 .filter-bar .check-box { -fx-text-fill: #1F1F1F; -fx-font-size: 13px; }
 
+/* ============== 模组列表 ============== */
 .mod-list {
     -fx-background-color: transparent;
     -fx-background-insets: 0;
     -fx-padding: 0;
     -fx-border-color: transparent;
 }
-
+/* 卡片间距压到 2px：每屏能多显示 2 条 */
 .mod-list .list-cell { -fx-background-color: transparent; -fx-padding: 2 2 2 2; }
-
+/* 卡片自带背景会盖住 ListCell 的选中底色，补一圈高亮边，鼠标悬停时也能分清当前行 */
 .mod-list .list-cell:filled:hover .mod-card { -fx-border-color: #4B5563; }
 .mod-list .list-cell:filled:hover .mod-card { -fx-background-color: #E8E8E8; }
 .mod-list .list-cell:filled:selected .mod-card {
@@ -309,7 +348,7 @@
     -fx-border-radius: 8;
     -fx-border-color: transparent;
     -fx-border-width: 1;
-
+    /* 透明边框也占 1px：卡片尺寸在悬停/选中时不跳动 */
     -fx-border-insets: 0;
     -fx-background-insets: 0;
     -fx-padding: 7 10 7 10;
@@ -327,6 +366,7 @@
 }
 .mod-icon-letter { -fx-text-fill: #FFFFFF; -fx-font-size: 17px; -fx-font-weight: bold; }
 
+/* ============== 内嵌弹窗 ============== */
 .modal-overlay { -fx-background-color: rgba(0, 0, 0, 0.45); }
 .modal-card {
     -fx-background-color: #FFFFFF;
@@ -354,6 +394,7 @@
 .modal-close-button:hover { -fx-background-color: #EF4444; -fx-text-fill: #FFFFFF; }
 .modal-content { -fx-background-color: transparent; -fx-padding: 0; }
 
+/* ============== 版本选择窗口 ============== */
 .version-dialog-root { -fx-background-color: #F5F5F5; }
 
 .recommend-card {
@@ -390,18 +431,21 @@
     -fx-cursor: hand;
 }
 .version-group-header:hover { -fx-background-color: #E8E8E8; }
-
+/* ============== 版本列表单元（主题感知）============== */
+/* 版本号：深色主题白字，浅色主题黑字 —— 由主题 CSS 决定，不要内联硬编码 */
 .version-id {
     -fx-font-size: 14px;
     -fx-font-weight: bold;
     -fx-text-fill: #1F1F1F;
 }
 
+/* 日期等次要信息 */
 .version-date {
     -fx-font-size: 11px;
     -fx-text-fill: #8A8A8A;
 }
 
+/* 类型徽标 */
 .version-type-badge {
     -fx-font-size: 11px;
     -fx-padding: 1 8 1 8;
@@ -411,16 +455,21 @@
 .version-type-snapshot { -fx-background-color: #FEF3C7; -fx-text-fill: #B45309; }
 .version-type-other    { -fx-background-color: #E5E5E5; -fx-text-fill: #6B6B6B; }
 
+/* 目录管理行的小齿轮图标 */
 .dir-edit-icon { -fx-text-fill: #8A8A8A; -fx-font-size: 13px; }
 
+/* 提示性状态文字（跟随主题） */
 .status-warn { -fx-text-fill: #F59E0B; }
 
+/* 警告框（浅色下也要可读） */
 .warn-box {
     -fx-background-color: #FEF3C7;
     -fx-text-fill: #B45309;
     -fx-background-radius: 6;
 }
 
+/* ============== 状态色（浅色主题覆盖）============== */
+/* 浅背景上必须用深绿，亮绿 #4DCF7A 对比度不足（约 1.9:1） */
 .status-ok   { -fx-text-fill: #16A34A; }
 .status-fail { -fx-text-fill: #DC2626; }
 .device-code {
@@ -429,6 +478,7 @@
     -fx-text-fill: #16A34A;
 }
 
+/* 设置页「当前游戏目录」的只读展示框 */
 .dir-display {
     -fx-background-color: #F0F0F0;
     -fx-text-fill: #1F1F1F;
@@ -440,6 +490,9 @@
     -fx-font-size: 13px;
 }
 
+/* ============== 原生对话框（Alert / TextInputDialog）============== */
+/* 同深色主题：必须显式覆盖 modena 的 .dialog-pane 默认底色，
+   否则弹框不会跟随主题（见 launcher.css 中的同类说明）。 */
 .dialog-pane {
     -fx-background-color: #FFFFFF;
 }
@@ -477,6 +530,7 @@
 }
 .dialog-pane .combo-box .list-cell { -fx-text-fill: #1F1F1F; }
 
+/* ============== 内嵌消息对话框（MessageDialog）============== */
 .dialog-accent        { -fx-background-radius: 3 0 0 3; }
 .dialog-accent-info   { -fx-background-color: #3B82F6; }
 .dialog-accent-question { -fx-background-color: #3B82F6; }
@@ -488,6 +542,7 @@
 
 .input-error { -fx-border-color: #EF4444; }
 
+/* ============== 超链接按钮（用于外部下载引导）============== */
 .link-button {
     -fx-text-fill: #3B82F6;
     -fx-font-size: 14px;
@@ -500,6 +555,7 @@
 .link-button:hover { -fx-text-fill: #2563EB; }
 .link-button:visited { -fx-text-fill: #3B82F6; }
 
+/* ============== 目录行的「⋮」操作菜单 ============== */
 .menu-dots {
     -fx-background-color: transparent;
     -fx-text-fill: #6B6B6B;
@@ -532,6 +588,7 @@
 .context-menu .separator { -fx-padding: 3 8 3 8; }
 .context-menu .separator .line { -fx-border-color: #DDDDDD; }
 
+/* ============== 皮肤头像 & 账号卡 ============== */
 .skin-avatar {
     -fx-background-color: #E5E5E5;
 }
@@ -556,14 +613,20 @@
 .account-cell-type { -fx-font-size: 11px; -fx-text-fill: #9CA3AF; }
 .sidebar-account-name { -fx-font-size: 13px; -fx-font-weight: bold; -fx-text-fill: #1F1F1F; }
 
+/* ============== 列表底部信息行 ============== */
+/* 原来标题和状态各占一行，光这两行就吃掉 ~48px 的列表高度 */
 .list-footer { -fx-text-fill: #6B7280; -fx-font-size: 11px; -fx-padding: 0 2 0 2; }
 
+/* ============== Java 检测结果 ============== */
+/* 之前只套了 .card（白底），没设文字颜色，浅色主题下是白底白字，
+   看起来就像「没检测到任何 Java」 */
 .java-status {
     -fx-text-fill: #1F1F1F;
     -fx-font-size: 12px;
     -fx-line-spacing: 3;
 }
 
+/* ============== 联机地址 ============== */
 .relay-address {
     -fx-font-family: "Consolas", "Courier New", monospace;
     -fx-font-size: 22px;
@@ -571,7 +634,7 @@
     -fx-text-fill: #2563EB;
     -fx-padding: 8 0 8 0;
 }
-
+/* 账号页：外层与标签页的滚动容器背景透明 */
 .account-scroll, .tab-scroll { -fx-background-color: transparent; -fx-background-insets: 0; -fx-padding: 0; }
 .account-scroll > .viewport, .tab-scroll > .viewport { -fx-background-color: transparent; }
 .account-scroll > .corner, .tab-scroll > .corner { -fx-background-color: transparent; }

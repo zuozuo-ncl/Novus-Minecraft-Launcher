@@ -1,3 +1,12 @@
+// ============================================================================
+//  launcher.cpp —— 主程序（jar）的获取与启动
+//
+//  流程：
+//    1. GET 版本 API 拿最新版本号
+//    2. 拼出 jar 下载地址，检查本地是否已有
+//    3. 缺失则下载
+//    4. 用 javaw -jar <jar> 静默拉起，父进程退出
+// ============================================================================
 #include "common.h"
 
 #include <shellapi.h>
@@ -6,6 +15,9 @@
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// 从 {"latest":"1.1.0","versions":[...]} 中抽出 latest 的值
+// ---------------------------------------------------------------------------
 bool ExtractJsonString(const std::wstring& json,
                        const std::wstring& key,
                        std::wstring& outValue) {
@@ -22,6 +34,7 @@ bool ExtractJsonString(const std::wstring& json,
         return false;
     }
 
+    // 跳过空白
     size_t p = colon + 1;
     while (p < json.size() && (json[p] == L' ' || json[p] == L'\t'
                                || json[p] == L'\r' || json[p] == L'\n')) {
@@ -29,7 +42,7 @@ bool ExtractJsonString(const std::wstring& json,
     }
 
     if (p >= json.size() || json[p] != L'"') {
-        return false;   
+        return false;   // 值为 null 或非字符串
     }
 
     size_t q1 = p;
@@ -42,6 +55,10 @@ bool ExtractJsonString(const std::wstring& json,
     return !outValue.empty();
 }
 
+// ---------------------------------------------------------------------------
+// 判断字符串是否是安全的版本号（防止路径穿越/非法字符）
+// 只允许数字、点、连字符
+// ---------------------------------------------------------------------------
 bool IsSafeVersionString(const std::wstring& v) {
     if (v.empty() || v.size() > 64) {
         return false;
@@ -54,10 +71,16 @@ bool IsSafeVersionString(const std::wstring& v) {
     return true;
 }
 
-} 
+} // namespace
 
+// ============================================================================
+//  Launcher 命名空间实现
+// ============================================================================
 namespace Launcher {
 
+// ---------------------------------------------------------------------------
+// 查询最新版本号
+// ---------------------------------------------------------------------------
 StepResult QueryLatestVersion(std::wstring& outVersion) {
     outVersion.clear();
 
@@ -104,6 +127,24 @@ StepResult QueryLatestVersion(std::wstring& outVersion) {
     return lastError;
 }
 
+// ---------------------------------------------------------------------------
+// 查询官方 SHA-256
+//
+//  文件服务器（HTTPS）上与 jar 同名的哈希文件，格式与 sha256sum 相同
+//  （只有哈希，或「哈希 + 文件名」都可以）。
+//
+//  两种文件名都试，顺序是：
+//    1) mc-launcher-<版本>.jar.sha256  —— 发布脚本 publish.py 上传的名字
+//    2) mc-launcher-<版本>.sha256      —— 早期约定，兼容手工上传
+//  早期只查第 2 种，而 publish.py 传的是第 1 种，导致这个接口永远 404，
+//  每次发版都只能靠内置表 —— 等于「换个 jar 就得重编引导器」。
+//
+//  拿不到（404 / 断网 / 格式不对）一律返回空串 —— 调用方退回内置表，
+//  「拿不到哈希」不等于「不是官方文件」。
+//
+//  为什么不走版本 API：版本 API 有明文 HTTP 备用地址，哈希从那里拿就等于
+//  可以被中间人替换；文件服务器固定是 https://。
+// ---------------------------------------------------------------------------
 std::string QueryOfficialSha256(const std::wstring& version) {
     if (!IsSafeVersionString(version)) {
         return std::string();
@@ -134,6 +175,9 @@ std::string QueryOfficialSha256(const std::wstring& version) {
     return std::string();
 }
 
+// ---------------------------------------------------------------------------
+// 内置的已知版本哈希（信任锚，编进 exe）
+// ---------------------------------------------------------------------------
 std::string KnownJarHash(const std::wstring& version) {
     static const std::pair<std::wstring, std::wstring> kTable[] = {
         KNOWN_JAR_SHA256_LIST
@@ -146,6 +190,12 @@ std::string KnownJarHash(const std::wstring& version) {
     return std::string();
 }
 
+// ---------------------------------------------------------------------------
+// 语义化版本比较
+//
+//   支持任意位数：1.0.0.1 > 1.0.0
+//   段内非数字后缀先截断（如 "1.0.0-beta" 当作 1.0.0 处理）
+// ---------------------------------------------------------------------------
 int CompareVersions(const std::wstring& a, const std::wstring& b) {
     auto parse = [](const std::wstring& v) {
         std::vector<long> parts;
@@ -159,7 +209,7 @@ int CompareVersions(const std::wstring& a, const std::wstring& b) {
                     parts.push_back(wcstol(cur.c_str(), nullptr, 10));
                     cur.clear();
                 }
-
+                // 遇到 '-' 或非数字结束（如 1.0.0-beta）
                 if (c == L'-') {
                     break;
                 }
@@ -185,6 +235,22 @@ int CompareVersions(const std::wstring& a, const std::wstring& b) {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// 读取版本清单，取出「应当启动的版本」
+//
+//  versions.json 由 Java 启动器维护。这里只做最朴素的解析 ——
+//  提取顶层 current 字段，以及逐个扫描 usable=true 的条目。
+//
+//  为什么不引第三方 JSON 库：引导器要静态链接、体积尽量小，
+//  而这个文件的结构是我们自己写的、格式可控，够用即可。
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 清单里该版本是否被标记为可用（usable=true）
+//
+// 找不到该版本的条目时视为可用（清单可能是旧格式 / 引导器自己刚写的）。
+// 不能一律视为不可用：否则「先删 jar+标记不可用、再找候选」的顺序一变，
+// 就会把本轮该启动的版本也排除掉。
+// ---------------------------------------------------------------------------
 static bool IsVersionUsableInManifest(const std::wstring& json,
                                       const std::wstring& version) {
     static const std::wstring versionKey = L"\"version\"";
@@ -248,19 +314,21 @@ StepResult LoadPreferredJar(const AppPaths& paths,
         return StepResult::FileError;
     }
 
+    // 清单是 UTF-8，转成宽字符方便用现有工具函数处理
     std::wstring json = Util::Utf8ToWide(raw);
     if (json.empty()) {
         Log::Write(L"版本清单内容为空");
         return StepResult::FileError;
     }
 
+    // ---- 1) 优先 current ----
     std::wstring current;
     if (ExtractJsonString(json, L"current", current)
             && IsSafeVersionString(current)) {
         std::wstring jar = Util::JoinPath(
                 paths.appData, L"mc-launcher-" + current + L".jar");
-
-        
+        // usable=false 的版本（Java 端或引导器自己标过）绝不能再被拉起，
+        // 否则会形成「启动失败 -> 回退 -> 又被 current 拉回去」的死循环
         if (!IsVersionUsableInManifest(json, current)) {
             Log::WriteF(L"清单里 current=%s 已被标记为不可用，跳过", current.c_str());
         } else if (Util::IsFile(jar) && Util::FileSize(jar) > 0) {
@@ -273,12 +341,13 @@ StepResult LoadPreferredJar(const AppPaths& paths,
                     current.c_str());
     }
 
-    
-
-    
-
-    
-
+    // ---- 2) 退而求其次：扫 usable=true 的条目，取版本号最高的 ----
+    //
+    // 条目形如：
+    //   { "version": "1.0.0", "file": "mc-launcher-1.0.0.jar",
+    //     "usable": true, "failures": 0, ... }
+    //
+    // 逐个定位 "usable": true，再向前找出同一对象里的 "version" 值。
     const std::wstring usableKey = L"\"usable\"";
     std::wstring bestVersion;
     std::wstring bestJar;
@@ -291,6 +360,7 @@ StepResult LoadPreferredJar(const AppPaths& paths,
         }
         pos = up + usableKey.size();
 
+        // 取该键的值，必须是 true
         size_t colon = json.find(L':', pos);
         if (colon == std::wstring::npos) {
             break;
@@ -300,15 +370,16 @@ StepResult LoadPreferredJar(const AppPaths& paths,
             ++v;
         }
         if (json.compare(v, 4, L"true") != 0) {
-            continue;       
+            continue;       // usable=false，跳过
         }
 
+        // 向前找本对象内的 "version" 键：取最后一个位于 up 之前的出现
         size_t searchFrom = up;
         std::wstring ver;
-
+        // 对象边界可近似为往前找到一个 '{'，在其之后找 "version"
         size_t brace = json.rfind(L'{', up);
         size_t from = (brace == std::wstring::npos) ? 0 : brace;
-
+        // 在 [from, up) 内可能有多个 "version"，取最靠后的那个
         size_t scan = from;
         while (scan < up) {
             size_t hit = json.find(L"\"version\"", scan);
@@ -352,6 +423,12 @@ StepResult LoadPreferredJar(const AppPaths& paths,
     return StepResult::FileError;
 }
 
+// ---------------------------------------------------------------------------
+// 扫描本地已有的最新版本
+//
+//  文件名格式：mc-launcher-<版本>.jar
+//  逐个解析版本号，取最大的那个。
+// ---------------------------------------------------------------------------
 StepResult FindLatestLocalJar(const AppPaths& paths,
                               std::wstring& outVersion,
                               std::wstring& outJarPath) {
@@ -381,6 +458,7 @@ StepResult FindLatestLocalJar(const AppPaths& paths,
 
         std::wstring name = fd.cFileName;
 
+        // 提取中间那段版本号
         if (name.size() <= prefix.size() + suffix.size()) {
             continue;
         }
@@ -396,18 +474,20 @@ StepResult FindLatestLocalJar(const AppPaths& paths,
         if (!IsSafeVersionString(ver)) {
             continue;
         }
-
-        
+        // 旧版用 CompareVersions 截断连字符后缀（1.0.2-x 当成 1.0.2），
+        // 删掉 1.0.3 后残留的 1.0.2-x 会被当成「1.0.2 还在」，导致反复启动坏 jar
         if (ver.find(L'-') != std::wstring::npos) {
             continue;
         }
 
+        // 跳过 .part 之类的残留
         if (Util::EndsWithNoCase(name, L".part")) {
             continue;
         }
 
         std::wstring full = Util::JoinPath(paths.appData, name);
 
+        // 文件要真的非空
         if (Util::FileSize(full) == 0) {
             continue;
         }
@@ -436,6 +516,9 @@ StepResult FindLatestLocalJar(const AppPaths& paths,
     return StepResult::Ok;
 }
 
+// ---------------------------------------------------------------------------
+// 确保 jar 存在
+// ---------------------------------------------------------------------------
 StepResult EnsureJar(const AppPaths& paths,
                      const std::wstring& version,
                      ProgressFn progress,
@@ -452,20 +535,22 @@ StepResult EnsureJar(const AppPaths& paths,
 
     std::wstring jarName = L"mc-launcher-" + version + L".jar";
 
-    
-
-    
-
-    
-
+    // 先写 .part，下载+校验都通过后再改名为正式文件。
+    //
+    // 早期直接写正式文件名：下载被 CDN 给了旧文件时哈希不符，文件被删，
+    // 接着 VerifyJar 又按「没有文件」报一个与真实原因无关的错误；
+    // 更糟的是下载中途被杀会留下一个「看起来完整」的坏文件。
+    // 用 .part 的好处：失败时正式文件从没出现过，用户删掉它重跑即可；
+    // 下次启动扫描本地版本时也不会看到一个校验不过的文件。
     std::wstring jarPath = Util::JoinPath(paths.appData, jarName);
     std::wstring partPath = jarPath + L".part";
     Util::DeleteFileQuiet(partPath);
 
+    // 已存在且非空 -> 直接使用
     uint64_t existingSize = Util::FileSize(jarPath);
     if (existingSize > 0) {
-
-        
+        // 首次安装路径（verifyExisting=true）不能盲信「非空即好」：
+        // 上次下载到一半被杀 / 被镜像替换过的文件必须删掉重下。
         if (verifyExisting) {
             std::string expected = QueryOfficialSha256(version);
             if (expected.empty()) {
@@ -489,8 +574,9 @@ StepResult EnsureJar(const AppPaths& paths,
         return StepResult::Ok;
     }
 
-    
-
+    // ---- 下载前检查磁盘空间 ----
+    // 与 EnsureJava 同理：宁可提前拒绝，也不要下到一半才失败。
+    // jar 本身约 45MB，这里给足余量。
     {
         uint64_t freeBytes = 0;
         if (!Util::HasFreeSpace(paths.appData, MIN_FREE_SPACE_BYTES, freeBytes)) {
@@ -499,12 +585,13 @@ StepResult EnsureJar(const AppPaths& paths,
                         Util::HumanSize(freeBytes).c_str());
             return StepResult::FileError;
         }
-
-        
+        // 充足时也记一笔：排查"为什么明明有空间却失败了"时，
+        // 能看到检查确实执行过、当时的数值是多少
         Log::WriteF(L"磁盘空间检查通过：剩余 %s",
                     Util::HumanSize(freeBytes).c_str());
     }
 
+    // 构造下载地址
     std::wstring url = JAR_DOWNLOAD_PREFIX;
     url += jarName;
 
@@ -513,8 +600,8 @@ StepResult EnsureJar(const AppPaths& paths,
     StepResult r = Http::DownloadFile(url, partPath,
                                       [&](const std::wstring& detail, uint64_t done, uint64_t total) {
                                           if (progress) {
-
-                                              
+                                              // detail 由 DownloadFile 拼好，含文件名/大小/速度/剩余时间。
+                                              // 早期这里用固定文字覆盖，用户看不出在下什么。
                                               progress(L"正在下载启动器主程序\n" + detail,
                                                        done, total);
                                           }
@@ -522,23 +609,25 @@ StepResult EnsureJar(const AppPaths& paths,
                                       cancelFlag);
     if (r != StepResult::Ok) {
         Log::WriteF(L"启动器下载失败: %s", StepResultText(r));
-
+        // 明确提示服务器上还没有该文件的情况
         if (r == StepResult::HttpError) {
             Log::WriteF(L"提示：服务器返回非 2xx，可能该版本的 jar 尚未上传");
         }
         return r;
     }
 
+    // 二次确认文件确实写好了（下到的是 .part）
     if (Util::FileSize(partPath) == 0) {
         Log::Write(L"下载后文件为空");
         Util::DeleteFileQuiet(partPath);
         return StepResult::FileError;
     }
 
-    
-
-    
-
+    // 下载后立即按「官方哈希（HTTPS）优先，内置表兜底」校验。
+    // 这一步挡的是「下载过程中被镜像/中间人替换」：
+    //   - 官方 .sha256 走 HTTPS，中间人拿不到也改不了；
+    //   - 服务器漏传 .sha256 时退回内置表。
+    // 两边都拿不到就保留文件，交给启动前 VerifyJar 统一判断（不在下载阶段误杀）。
     std::string expected = QueryOfficialSha256(version);
     const bool knownOfficial = !expected.empty();
     if (!knownOfficial) {
@@ -554,15 +643,15 @@ StepResult EnsureJar(const AppPaths& paths,
             Log::Write(L"下载后哈希计算失败，保留文件交由启动前校验");
         } else if (!Hs::EqualsIgnoreCase(actual, expected)) {
             Log::WriteUtf8("下载内容哈希不符！期望 %s，实际 %s", expected.c_str(), actual.c_str());
-
-            
-
+            // 带上大小与下载地址：CDN 节点缓存了旧文件时，响应头里的
+            // Content-Length 是新文件的大小，但下下来的字节数是旧的 ——
+            // 这两种情况排查方向完全不同，日志里带上大小一眼就能分辨。
             Log::WriteF(L"下载文件大小: %llu 字节（应等于期望哈希对应文件的大小）",
                         static_cast<unsigned long long>(Util::FileSize(partPath)));
             Log::WriteF(L"下载地址: %s", url.c_str());
             Log::WriteF(L"可信哈希来源: %s", knownOfficial ? L"官方 .sha256" : L"引导器内置表");
             Util::DeleteFileQuiet(partPath);
-
+            // 给用户的提示要和真实原因对上
             std::wstring detail =
                     L"下载到的启动器文件与官方哈希不一致，已删除。\n"
                     L"期望：" + Hs::ShortHash(expected) + L"\n"
@@ -580,6 +669,7 @@ if (outDetail) {
         Log::Write(L"没有可用的官方哈希（.sha256 不存在且不在内置表），跳过下载后校验");
     }
 
+    // 校验通过（或没有锚点）才把 .part 改名成正式文件
     Util::DeleteFileQuiet(jarPath);
     if (!MoveFileExW(partPath.c_str(), jarPath.c_str(), MOVEFILE_REPLACE_EXISTING)) {
         Log::WriteF(L"重命名下载文件失败: %s -> %s (err=%lu)",
@@ -588,17 +678,25 @@ if (outDetail) {
         return StepResult::FileError;
     }
 
-    
+    // 本次会话内这份文件是「刚从固定 HTTPS 地址下载下来」的，
+    // 记下来：即使没有哈希锚点，VerifyJar 也允许它启动一次（否则新版本永远装不上）。
     MarkSelfDownloaded(jarPath);
 
     outJarPath = jarPath;
     return StepResult::Ok;
 }
 
+// ---------------------------------------------------------------------------
+// 本机已信任清单（%APPDATA%\NCL_Launcher\trusted-hashes.json）
+//
+//  由 Java 启动器在「启动成功后」写入：{ "1.0.2": "<sha256>", ... }
+//  只认「版本 + 哈希」双匹配，按版本去重、不限条数（几十字节一条）。
+//  与 config.json 分开存放，避免用户重置设置 / 配置损坏时被一并清掉。
+// ---------------------------------------------------------------------------
 static std::string ReadTrustedHash(const AppPaths& paths, const std::wstring& version) {
-
-    
-
+    // 文件格式：{ "1.0.2": "<64 位十六进制>", ... }
+    // 不用通用 JSON 解析：只要「版本号 + 64 位哈希」双匹配，
+    // 避免 extract-string 类朴素解析在嵌套结构上误抓。
     std::wstring p = Util::JoinPath(paths.appData, L"trusted-hashes.json");
     std::string raw;
     if (!Util::ReadSmallFile(p, raw, 256 * 1024)) {
@@ -634,6 +732,7 @@ static std::string ReadTrustedHash(const AppPaths& paths, const std::wstring& ve
     return std::string();
 }
 
+// 本次运行中自己下载并（尽可能）校验过的 jar
 static std::vector<std::wstring> g_selfDownloaded;
 
 void MarkSelfDownloaded(const std::wstring& jarPath) {
@@ -674,7 +773,7 @@ bool SelectedFileIsOurs(const AppPaths& paths, const std::wstring& jarPath) {
     if (FullPathNorm(self) != FullPathNorm(jarPath)) {
         return false;
     }
-
+    // 反查版本：文件大小必须与记录一致（防止记录指向的文件后来被换掉）
     std::wstring name = Util::FileName(self);
     std::wstring suffix = L".jar";
     std::wstring stem = name;
@@ -709,6 +808,13 @@ bool IsSelfDownloaded(const std::wstring& jarPath) {
     return std::find(g_selfDownloaded.begin(), g_selfDownloaded.end(), norm) != g_selfDownloaded.end();
 }
 
+// ---------------------------------------------------------------------------
+// 校验 jar（信任锚）
+//
+//  原则：宁可「无法判定时放行并记日志」，也不能因为服务器没传哈希、
+//  用户换了目录、内置表还没收录新版本，就把人锁在启动器外面。
+//  但一旦任何可信锚点与文件内容**不一致**，立即拒绝 —— 这一定是篡改或损坏。
+// ---------------------------------------------------------------------------
 StepResult VerifyJar(const AppPaths& paths,
                      const std::wstring& jarPath,
                      ProgressFn progress,
@@ -728,11 +834,11 @@ StepResult VerifyJar(const AppPaths& paths,
     }
 
     if (version.empty()) {
-
-        
-
+        // 文件名不完全是 mc-launcher-<ver>.jar（自己编译的、带 -shaded 后缀等）：
+        // 内置器读不到正确版本号就查不到任何锚点，会白白把文件判成「无锚点」。
+        // 做两次大小探测来反查版本，探测到就用它的版本号继续校验。
         {
-
+            // 先查内置表：按文件大小可比时直接确认
             static const std::pair<std::wstring, std::wstring> kTable[] = {KNOWN_JAR_SHA256_LIST};
             for (const auto& row : kTable) {
                 std::wstring p = Util::JoinPath(paths.appData, L"mc-launcher-" + row.first + L".jar");
@@ -750,12 +856,13 @@ StepResult VerifyJar(const AppPaths& paths,
 
     std::string actual;
     if (!Hs::Sha256File(jarPath, actual, cancelFlag)) {
-
+        // 算不出来（文件被锁/读失败）：不阻断启动，交给 Java 进程自己报错
         Log::WriteF(L"无法计算 jar 哈希，跳过校验: %s", jarPath.c_str());
         return StepResult::Ok;
     }
     Log::WriteUtf8("jar 哈希: %s = %s", version.c_str(), actual.c_str());
 
+    // 1) 官方 .sha256（HTTPS）
     std::string official = QueryOfficialSha256(version);
     if (!official.empty()) {
         if (Hs::EqualsIgnoreCase(actual, official)) {
@@ -771,6 +878,7 @@ StepResult VerifyJar(const AppPaths& paths,
         return StepResult::ChecksumMismatch;
     }
 
+    // 2) 内置已知表
     std::string builtin = KnownJarHash(version);
     if (!builtin.empty()) {
         if (Hs::EqualsIgnoreCase(actual, builtin)) {
@@ -786,6 +894,7 @@ StepResult VerifyJar(const AppPaths& paths,
         return StepResult::ChecksumMismatch;
     }
 
+    // 3) 本机已信任清单（Java 启动器登记过）
     std::string trusted = ReadTrustedHash(paths, version);
     if (!trusted.empty()) {
         if (Hs::EqualsIgnoreCase(actual, trusted)) {
@@ -801,11 +910,13 @@ StepResult VerifyJar(const AppPaths& paths,
         return StepResult::ChecksumMismatch;
     }
 
+    // 3.5) 本机启动器登记过「这是我自己」的 jar（用户手动拷贝/离线安装时唯一的锚点）
     if (SelectedFileIsOurs(paths, jarPath)) {
         Log::Write(L"校验放行：该文件是本机启动器登记的当前运行文件");
         return StepResult::Ok;
     }
 
+    // 4) 本次会话内自己从固定 HTTPS 地址下载的 —— 放行一次（由 Java 启动后自行登记）
     if (IsSelfDownloaded(jarPath)) {
         Log::Write(L"没有可信锚点，但文件是本次运行从官方地址下载的，放行并等待启动器自行登记");
         return StepResult::Ok;
@@ -816,6 +927,7 @@ StepResult VerifyJar(const AppPaths& paths,
         return StepResult::Ok;
     }
 
+    // 4) 本次会话内自己从固定 HTTPS 地址下载的 —— 放行一次（由 Java 启动后自行登记）
     if (IsSelfDownloaded(jarPath)) {
         Log::Write(L"没有可信锚点，但文件是本次运行从官方地址下载的，放行并等待启动器自行登记");
         return StepResult::Ok;
@@ -829,13 +941,23 @@ StepResult VerifyJar(const AppPaths& paths,
     return StepResult::UntrustedJar;
 }
 
+// ---------------------------------------------------------------------------
+// 拉起主程序
+//
+// 关键点：
+//   - 用 CreateProcessW（宽字符），路径含空格/中文都能正确处理
+//   - 命令行是「拼接成单个字符串」传给 CreateProcessW —— 这是 Win32 的要求；
+//     但每个路径都用双引号包住，且不做 shell 解析，因此空格安全
+//   - 设置工作目录为 appData，让主程序读写自己的文件
+//   - 创建后立即关闭句柄，不等待：引导器退出，主程序继续跑
+// ---------------------------------------------------------------------------
 StepResult Launch(const std::wstring& javawPath,
                   const std::wstring& jarPath,
                   const std::wstring& workDir,
                   ProgressFn progress,
                   DWORD* outChildPid,
                   HANDLE* outChildProcess) {
-
+    // 参数保留是为了接口稳定；启动阶段已改为静默，不再需要进度反馈
     (void)progress;
 
     if (!Util::IsFile(javawPath)) {
@@ -847,6 +969,7 @@ StepResult Launch(const std::wstring& javawPath,
         return StepResult::FileError;
     }
 
+    // 组装命令行（每个路径加引号，防止空格问题）
     std::wstring cmd = L"\"";
     cmd += javawPath;
     cmd += L"\" -jar \"";
@@ -855,10 +978,11 @@ StepResult Launch(const std::wstring& javawPath,
 
     Log::WriteF(L"启动命令: %s", cmd.c_str());
 
-    
-
-    
-
+    // 关键：把子进程的标准输出/错误重定向到日志文件。
+    //
+    // 若不给 javaw 任何输出目标，它在没有控制台的情况下写 stdout/stderr
+    // 可能阻塞（JavaFX 启动时会打印警告）。重定向到文件既解决这个问题，
+    // 又让主程序的输出可追溯，便于排查。
     std::wstring childLogPath = Util::JoinPath(workDir, L"launcher-stdout.log");
 
     SECURITY_ATTRIBUTES sa;
@@ -874,7 +998,7 @@ StepResult Launch(const std::wstring& javawPath,
                                    FILE_ATTRIBUTE_NORMAL,
                                    nullptr);
     if (hChildOut == INVALID_HANDLE_VALUE) {
-        hChildOut = nullptr;    
+        hChildOut = nullptr;    // 打不开就退回不重定向
         Log::Write(L"无法创建子进程输出文件，改为不重定向");
     }
 
@@ -884,7 +1008,7 @@ StepResult Launch(const std::wstring& javawPath,
     ZeroMemory(&pi, sizeof(pi));
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_SHOWDEFAULT;  
+    si.wShowWindow = SW_SHOWDEFAULT;  // 使用默认显示状态，避免 JavaFX 窗口初始隐藏
 
     if (hChildOut) {
         si.dwFlags |= STARTF_USESTDHANDLES;
@@ -893,17 +1017,18 @@ StepResult Launch(const std::wstring& javawPath,
         si.hStdInput  = nullptr;
     }
 
-    
+    // CreateProcessW 的 lpCommandLine 需要非 const 指针，且字符串必须可修改
+    // 使用 &mutableCmd[0] 获取非 const 指针（C++11 保证连续存储）
     std::wstring mutableCmd = cmd;
     wchar_t* cmdLine = &mutableCmd[0];
 
     BOOL ok = CreateProcessW(
-            javawPath.c_str(),                  
-            cmdLine,                            
-            nullptr, nullptr,                   
-            hChildOut ? TRUE : FALSE,           
-            0,                                  
-            nullptr,                            
+            javawPath.c_str(),                  // 应用程序路径
+            cmdLine,                            // 命令行（可修改缓冲区）
+            nullptr, nullptr,                   // 进程/线程安全属性
+            hChildOut ? TRUE : FALSE,           // 有重定向句柄时必须允许继承
+            0,                                  // 无特殊标志
+            nullptr,                            // 环境块（继承父进程）
             workDir.empty() ? nullptr : workDir.c_str(),
             &si, &pi);
 
@@ -921,6 +1046,7 @@ StepResult Launch(const std::wstring& javawPath,
         }
     }
 
+    // 父进程不再需要这个写句柄（子进程已持有自己的副本）
     if (hChildOut) {
         CloseHandle(hChildOut);
         hChildOut = nullptr;
@@ -930,11 +1056,13 @@ StepResult Launch(const std::wstring& javawPath,
 
     CloseHandle(pi.hThread);
 
+    // 记录本次期望出现在 startup.ok 里的 PID，供等待判定使用
     if (outChildPid) {
         *outChildPid = pi.dwProcessId;
     }
 
-    
+    // 进程句柄交给调用方（等待判定要用它查是否已退出）；
+    // 若调用方不需要，这里直接关掉避免泄漏。
     if (outChildProcess) {
         *outChildProcess = pi.hProcess;
     } else {
@@ -944,6 +1072,16 @@ StepResult Launch(const std::wstring& javawPath,
     return StepResult::Ok;
 }
 
+// ---- 等待主程序「正常起来」—— 双重判定 ----
+//
+//  判定 A：进程仍存活（检测到退出时再分「异常退出」与「正常退出但没写标记」）
+//  判定 B：startup.ok 里的 PID == childPid —— 真正的成功信号，
+//          由 Java 启动器主窗口显示成功后主动写入。
+//
+//  等满时间仍未就绪且进程还活着 -> TimedOut（很可能只是慢，不代表失败）。
+//
+//  waitMs / pollMs：总等待时长与轮询间隔。
+//  outWhy：失败原因。
 WaitResult WaitForStartupEx(const std::wstring& appData,
                                 HANDLE childProcess,
                                 DWORD childPid,
@@ -975,6 +1113,7 @@ WaitResult WaitForStartupEx(const std::wstring& appData,
             return WaitResult::Cancelled;
         }
 
+        // --- 判定 B（主判据）：startup.ok 是否匹配本次 PID ---
         std::string raw;
         if (Util::ReadTextFileUtf8(okPath, raw)) {
             std::wstring text = Util::Trim(Util::Utf8ToWide(raw));
@@ -987,6 +1126,7 @@ WaitResult WaitForStartupEx(const std::wstring& appData,
             }
         }
 
+        // --- 判定 A：进程是否已退出 ---
         DWORD exitCode = 0;
         if (GetExitCodeProcess(childProcess, &exitCode) && exitCode != STILL_ACTIVE) {
             if (exitCode != 0) {
@@ -994,7 +1134,7 @@ WaitResult WaitForStartupEx(const std::wstring& appData,
                 setWhy(L"启动器进程异常退出");
                 return WaitResult::Crashed;
             }
-
+            // exit=0：要么界面起来过、用户主动关闭；要么界面根本没出现。
             Log::Write(L"子进程正常退出 (exit=0)，退出码无异常");
             std::string raw2;
             if (Util::ReadTextFileUtf8(okPath, raw2)) {
@@ -1032,6 +1172,15 @@ bool WaitForStartup(const std::wstring& appData,
                             cancelFlag, outWhy) == WaitResult::Started;
 }
 
+// ---------------------------------------------------------------------------
+// 找出可回退的下一个版本
+//
+//  规则：在清单里「已验证可用（usable=true）」的版本中，取版本号**低于**
+//  current 且最高的那个。找不到更低的就返回 false。
+//
+//  只退到验证过可用的版本：退到一个同样没验证过的版本没有意义，
+//  很可能一起崩。
+// ---------------------------------------------------------------------------
 bool FindRollbackCandidate(const AppPaths& paths,
                            const std::wstring& currentVersion,
                            std::wstring& outVersion,
@@ -1050,6 +1199,7 @@ bool FindRollbackCandidate(const AppPaths& paths,
         return false;
     }
 
+    // 扫描所有 usable=true 的对象，收集其版本号
     const std::wstring usableKey = L"\"usable\"";
     std::wstring best;
     size_t pos = 0;
@@ -1073,6 +1223,7 @@ bool FindRollbackCandidate(const AppPaths& paths,
             continue;
         }
 
+        // 在本对象内向前找 version 字段
         size_t brace = json.rfind(L'{', up);
         size_t from = (brace == std::wstring::npos) ? 0 : brace;
         std::wstring ver;
@@ -1093,6 +1244,7 @@ bool FindRollbackCandidate(const AppPaths& paths,
             continue;
         }
 
+        // 必须是「比当前低」的版本
         if (CompareVersions(ver, currentVersion) >= 0) {
             continue;
         }
@@ -1120,6 +1272,12 @@ bool FindRollbackCandidate(const AppPaths& paths,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// 把清单里的 current 改成指定版本（回退后写回）
+//
+//  朴素文本替换：找 "current" 后的字符串值并替换。
+//  清单是我们自己写的，格式可控，不引 JSON 库。
+// ---------------------------------------------------------------------------
 bool UpdateManifestCurrent(const AppPaths& paths,
                            const std::wstring& newVersion) {
     std::wstring path = Util::JoinPath(paths.appData, VERSION_MANIFEST_NAME);
@@ -1152,7 +1310,8 @@ bool UpdateManifestCurrent(const AppPaths& paths,
                          + newVersion
                          + json.substr(q2);
 
-    
+    // pendingSince 不清零的话，Java 端下一次启动会认为「先去向 0 已确认」，
+    // 把回退选的版本重新改写回刚失败的那个，回退等于没做
     {
         static const std::wstring pendingKey = L"\"pendingSince\"";
         size_t pk = updated.find(pendingKey);
@@ -1175,6 +1334,7 @@ bool UpdateManifestCurrent(const AppPaths& paths,
         }
     }
 
+    // 原子写：先临时文件再替换，避免写一半损坏清单
     std::wstring tmp = path + L".tmp";
     if (!Util::WriteTextFileUtf8(tmp, Util::WideToUtf8(updated))) {
         Log::Write(L"回退写入失败：无法写临时文件");
@@ -1191,6 +1351,17 @@ bool UpdateManifestCurrent(const AppPaths& paths,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// 把某个版本标记为不可用（回退时调用）
+//
+//  同样用朴素文本处理：找到该版本的对象，把其 usable 改成 false。
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// 删除指定失败版本的 jar 文件
+//
+// 调用时机：回退前把当前版本的 jar 删掉，避免下次引导器从磁盘
+// 扫描时又把它当成候选。删除失败（权限不足等）不阻断流程。
+// ---------------------------------------------------------------------------
 void DeleteFailedJar(const AppPaths& paths, const std::wstring& version) {
     std::wstring jar = Util::JoinPath(paths.appData, L"mc-launcher-" + version + L".jar");
     if (Util::IsFile(jar)) {
@@ -1214,8 +1385,9 @@ bool MarkVersionUnusable(const AppPaths& paths,
     }
     std::wstring json = Util::Utf8ToWide(raw);
 
-    
-
+    // 定位这个版本所在的条目。
+    // Gson 缩进输出是 "version": "1.0.2"，但空格数量随版本/配置可变，
+    // 以前用带空格的精确字符串匹配，匹配不上就静默失败 —— 改按值解析。
     size_t vp = std::wstring::npos;
     {
         size_t scan = 0;
@@ -1240,6 +1412,7 @@ bool MarkVersionUnusable(const AppPaths& paths,
         return false;
     }
 
+    // 在该对象范围内（到下一个 '{' 或 '}' 为止）找 usable 并改为 false
     size_t objEnd = json.find(L'}', vp);
     if (objEnd == std::wstring::npos) {
         return false;
@@ -1258,7 +1431,7 @@ bool MarkVersionUnusable(const AppPaths& paths,
         ++t;
     }
     if (json.compare(t, 4, L"true") != 0) {
-        return true;    
+        return true;    // 已经是 false，无需修改
     }
     json.replace(t, 4, L"false");
 
@@ -1276,4 +1449,4 @@ bool MarkVersionUnusable(const AppPaths& paths,
     return true;
 }
 
-} 
+} // namespace Launcher

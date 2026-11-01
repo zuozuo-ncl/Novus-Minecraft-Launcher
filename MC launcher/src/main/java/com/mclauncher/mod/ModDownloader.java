@@ -1,5 +1,6 @@
 package com.mclauncher.mod;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.network.Downloader;
 import com.mclauncher.utils.FileUtils;
@@ -10,15 +11,32 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
+/**
+ * 模组下载器
+ *
+ * 职责：把 Modrinth 的版本文件下载到游戏目录的 mods 文件夹。
+ *
+ * 复用现有的 {@link Downloader}，因此自动获得
+ * 断点续传、重试、退避等能力。
+ *
+ * 注意：本阶段不处理模组依赖。要装前置模组请手动安装。
+ */
 public class ModDownloader {
 
     private static final Logger logger = LoggerFactory.getLogger(ModDownloader.class);
 
+    /** Modrinth 文件的连接超时。
+     * 部分网络环境下 cdn.modrinth.com 不可达，用较短超时可快速失败并回退，
+     * 而不是让用户等上几分钟。 */
     private static final int CONNECT_TIMEOUT_MS = 15_000;
 
     private final Downloader downloader;
     private final ModrinthClient modrinthClient;
 
+    /**
+     * @param modrinthClient 用于把 cdn.modrinth.com 的文件 URL 改写到国内镜像；
+     *                       传 null 则直接使用原始 URL
+     */
     public ModDownloader(ModrinthClient modrinthClient) {
         this.downloader = new Downloader(CONNECT_TIMEOUT_MS);
         this.modrinthClient = modrinthClient;
@@ -28,6 +46,14 @@ public class ModDownloader {
         this(null);
     }
 
+    /**
+     * 下载模组文件
+     *
+     * @param gameDir   游戏目录（mods 会建在此目录下）
+     * @param version   选定的模组版本
+     * @param listener  进度回调（可为 null）
+     * @return 下载结果
+     */
     public DownloadResult downloadMod(Path gameDir, ModrinthClient.ModVersion version,
                                       ProgressListener listener) {
         ModrinthClient.ModFile file = version.getPrimaryFile();
@@ -41,6 +67,7 @@ public class ModDownloader {
             return new DownloadResult(false, null, msg);
         }
 
+        // 确保 mods 目录存在
         Path modsDir = gameDir.resolve("mods");
         try {
             Files.createDirectories(modsDir);
@@ -53,6 +80,7 @@ public class ModDownloader {
             return new DownloadResult(false, null, msg);
         }
 
+        // 文件名可能包含 URL 编码字符（如 +），这里做个安全化处理
         String filename = sanitizeFilename(file.getFilename());
         if (filename.isBlank()) {
             filename = "mod-" + version.getId() + ".jar";
@@ -60,6 +88,7 @@ public class ModDownloader {
 
         Path target = modsDir.resolve(filename);
 
+        // 决定下载地址：优先走镜像，失败后回退到原始 URL
         String originalUrl = file.getUrl();
         String mirrorUrl = modrinthClient != null
                 ? modrinthClient.toMirrorFileUrl(originalUrl)
@@ -72,6 +101,7 @@ public class ModDownloader {
             listener.onStart(filename);
         }
 
+        // 已存在且校验通过 -> 直接当作成功
         boolean alreadyExists;
         long existingSize;
         try {
@@ -99,6 +129,7 @@ public class ModDownloader {
             }
         }
 
+        // 执行下载（Downloader 自带重试与断点续传）
         Downloader.DownloadResult result = downloader.download(mirrorUrl, target,
                 new Downloader.DownloadListener() {
                     @Override
@@ -121,6 +152,7 @@ public class ModDownloader {
                     }
                 });
 
+        // 镜像失败时回退到原始 URL（例如镜像未代理该文件）
         if (!result.isSuccess() && !mirrorUrl.equals(originalUrl)) {
             logger.warn("镜像下载失败，回退原始地址: {}", originalUrl);
             try {
@@ -161,6 +193,7 @@ public class ModDownloader {
             return new DownloadResult(false, target, msg);
         }
 
+        // SHA-1 校验（Modrinth 同时提供 sha1 / sha512，这里用 sha1 与现有工具对齐）
         if (file.getSha1() != null && !file.getSha1().isBlank()) {
             try {
                 String actual = FileUtils.sha1(target);
@@ -186,23 +219,33 @@ public class ModDownloader {
         return new DownloadResult(true, target, null);
     }
 
+    /**
+     * 安全化文件名，去掉路径分隔符等非法字符
+     * （Modrinth 的文件名一般没问题，但做防御性处理）
+     */
     private String sanitizeFilename(String name) {
         if (name == null) {
             return "";
         }
-
+        // 去掉可能被用于路径穿越的字符
         String cleaned = name.replaceAll("[\\\\/:*?\"<>|]", "_").trim();
-
+        // 防止 ../ 之类的相对路径
         if (cleaned.contains("..")) {
             cleaned = cleaned.replace("..", "_");
         }
         return cleaned;
     }
 
+    /**
+     * 关闭下载器
+     */
     public void shutdown() {
         downloader.shutdown();
     }
 
+    /**
+     * 进度回调
+     */
     public interface ProgressListener {
         void onStart(String filename);
         void onProgress(long downloaded, long total, double percent);
@@ -210,6 +253,9 @@ public class ModDownloader {
         void onError(String message);
     }
 
+    /**
+     * 下载结果
+     */
     public static class DownloadResult {
         private final boolean success;
         private final Path path;

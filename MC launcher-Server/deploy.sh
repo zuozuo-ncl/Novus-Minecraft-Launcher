@@ -1,10 +1,17 @@
+#!/bin/bash
+# MC Launcher Server 部署脚本
+# 用于在 Ubuntu 服务器上快速部署
+
 set -e
 
-REMOTE_USER="www"
-REMOTE_HOST="your-server-ip"
-REMOTE_DIR="/www/wwwroot/MC launcher-Server"
-LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"
+# ==================== 配置 ====================
+REMOTE_USER="www"           # 服务器用户
+REMOTE_HOST="your-server-ip" # 服务器 IP 或域名
+REMOTE_DIR="/www/wwwroot/MC launcher-Server"  # 远程目录
+LOCAL_DIR="$(cd "$(dirname "$0")" && pwd)"    # 本地项目目录
+# ==============================================
 
+# 颜色
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
@@ -29,16 +36,19 @@ show_help() {
   --status             查看远程状态
 
 示例:
-
+  # 首次部署
   $0 --setup -h 192.168.1.100 -u www
-
+  
+  # 更新代码
   $0 --update -h 192.168.1.100
-
+  
+  # 查看日志
   $0 --logs -h 192.168.1.100
 
 EOF
 }
 
+# 检查 SSH 连接
 check_ssh() {
     log_info "检查 SSH 连接: $REMOTE_USER@$REMOTE_HOST"
     if ! ssh -o ConnectTimeout=10 -o BatchMode=yes "$REMOTE_USER@$REMOTE_HOST" "echo 'SSH OK'" 2>/dev/null; then
@@ -52,9 +62,11 @@ check_ssh() {
     log_info "SSH 连接正常"
 }
 
+# 同步文件
 sync_files() {
     log_info "同步文件到服务器..."
-
+    
+    # 排除不需要的文件
     rsync -avz --delete \
         --exclude 'node_modules' \
         --exclude '.git' \
@@ -64,57 +76,65 @@ sync_files() {
         --exclude '*.sh' \
         --exclude '*.service' \
         "$LOCAL_DIR/" "$REMOTE_USER@$REMOTE_HOST:$REMOTE_DIR/"
-
+    
     log_info "文件同步完成"
 }
 
+# 远程安装依赖
 remote_install() {
     log_info "远程安装依赖..."
     ssh "$REMOTE_USER@$REMOTE_HOST" "cd '$REMOTE_DIR' && npm install --production"
     log_info "依赖安装完成"
 }
 
+# 远程配置 systemd
 remote_setup_systemd() {
     log_info "配置 systemd 服务..."
-
+    
+    # 上传 service 文件
     scp "$LOCAL_DIR/mc-launcher-server.service" "$REMOTE_USER@$REMOTE_HOST:/tmp/"
-
+    
+    # 修改 service 文件中的用户和路径
     ssh "$REMOTE_USER@$REMOTE_HOST" "
         sed -i 's/User=www/User=$REMOTE_USER/' /tmp/mc-launcher-server.service
         sed -i 's/Group=www/Group=$(id -gn)/' /tmp/mc-launcher-server.service
         sed -i \"s|WorkingDirectory=.*|WorkingDirectory=$REMOTE_DIR|\" /tmp/mc-launcher-server.service
         sed -i \"s|ReadWritePaths=.*|ReadWritePaths=$REMOTE_DIR\\nReadWritePaths=$REMOTE_DIR/logs|\" /tmp/mc-launcher-server.service
-
+        
         sudo mv /tmp/mc-launcher-server.service /etc/systemd/system/
         sudo systemctl daemon-reload
         sudo systemctl enable mc-launcher-server
         sudo systemctl start mc-launcher-server
         sudo systemctl status mc-launcher-server --no-pager
     "
-
+    
     log_info "systemd 服务配置完成"
 }
 
+# 远程重启服务
 remote_restart() {
     log_info "重启远程服务..."
     ssh "$REMOTE_USER@$REMOTE_HOST" "sudo systemctl restart mc-launcher-server && sleep 2 && sudo systemctl status mc-launcher-server --no-pager"
     log_info "服务重启完成"
 }
 
+# 远程查看日志
 remote_logs() {
     log_info "查看远程日志 (Ctrl+C 退出)..."
     ssh -t "$REMOTE_USER@$REMOTE_HOST" "sudo journalctl -u mc-launcher-server -f"
 }
 
+# 远程查看状态
 remote_status() {
     log_info "查看远程服务状态..."
     ssh "$REMOTE_USER@$REMOTE_HOST" "sudo systemctl status mc-launcher-server --no-pager"
 }
 
+# 主函数
 main() {
     local action=""
-
-    while [[ $
+    
+    while [[ $# -gt 0 ]]; do
         case $1 in
             -h|--host)
                 REMOTE_HOST="$2"
@@ -155,20 +175,20 @@ main() {
                 ;;
         esac
     done
-
+    
     if [[ -z "$action" ]]; then
         log_error "请指定操作: --setup, --update, --logs, 或 --status"
         show_help
         exit 1
     fi
-
+    
     if [[ "$REMOTE_HOST" == "your-server-ip" ]]; then
         log_error "请指定服务器地址: -h 或 --host"
         exit 1
     fi
-
+    
     check_ssh
-
+    
     case $action in
         setup)
             sync_files

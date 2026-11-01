@@ -1,16 +1,22 @@
 package com.mclauncher.auth;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.utils.UUIDUtils;
 
 import java.util.UUID;
 
+/**
+ * 账号信息
+ * 支持离线账号和正版账号
+ */
 public class Account {
 
     public enum Type {
         OFFLINE("s_c1c38438c5"),
         MICROSOFT("s_51ac065f18");
 
+        /** 文案键；在 getDisplayName() 里才解析，避免枚举初始化早于文案加载 */
         private final String labelKey;
 
         Type(String labelKey) {
@@ -30,12 +36,22 @@ public class Account {
     private String xuid;
     private String clientId;
 
+    /**
+     * 皮肤站
+     *
+     * null / "" / "auto"   = 按默认顺序（LittleSkin → Blessing Skin → Mojang）
+     * "mojang"             = 只查 Mojang 官方（正版账号）
+     * 其它（URL 或域名）     = 该站点的 Yggdrasil API，例如 https://littleskin.cn
+     */
     private String skinSite;
 
     public Account() {
         this.id = UUIDUtils.randomUUID().toString();
     }
 
+    /**
+     * 创建离线账号
+     */
     public static Account createOffline(String username) {
         Account account = new Account();
         account.username = username;
@@ -46,6 +62,9 @@ public class Account {
         return account;
     }
 
+    /**
+     * 创建微软账号
+     */
     public static Account createMicrosoft(String username, String uuid, String accessToken,
                                           String refreshToken, long expiresAt) {
         Account account = new Account();
@@ -58,10 +77,16 @@ public class Account {
         return account;
     }
 
+    /**
+     * 检查 Token 是否过期
+     */
     public boolean isTokenExpired() {
         return type == Type.MICROSOFT && System.currentTimeMillis() > expiresAt;
     }
 
+    /**
+     * 检查账号是否有效
+     */
     public boolean isValid() {
         if (type == Type.OFFLINE) {
             return username != null && !username.isEmpty();
@@ -69,6 +94,9 @@ public class Account {
         return accessToken != null && !accessToken.isEmpty() && !isTokenExpired();
     }
 
+    /**
+     * 获取格式化的 UUID（带连字符）
+     */
     public String getFormattedUuid() {
         if (uuid == null || uuid.isEmpty()) {
             return "";
@@ -81,6 +109,7 @@ public class Account {
                 "$1-$2-$3-$4-$5");
     }
 
+    // Getters and Setters
     public String getId() { return id; }
     public void setId(String id) { this.id = id; }
 

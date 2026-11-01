@@ -7,6 +7,16 @@ import com.google.gson.annotations.SerializedName;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * 版本信息数据模型
+ * 对应 Minecraft 版本的 JSON 结构
+ *
+ * 设计说明：
+ * arguments 字段在真实版本 JSON 里是对象（{"game":[...], "jvm":[...]}），
+ * 而且更关键的是 —— 下载和启动流程其实只需要「原样保留」它，
+ * 不需要解析成强类型。因此这里直接保存为 JsonObject，
+ * 避免 Gson 因结构变化而抛 JsonSyntaxException。
+ */
 public class VersionInfo {
 
     private String id;
@@ -19,13 +29,16 @@ public class VersionInfo {
     private Downloads downloads;
     private List<Library> libraries;
 
+    /** 原样保留的 arguments 对象 */
     private JsonObject arguments;
 
+    /** 老版本（1.12 及以前）的启动参数字符串 */
     private String minecraftArguments;
 
     private JavaVersion javaVersion;
     private String inheritsFrom;
 
+    /** Forge/Fabric 需要的 jar 字段（指向父版本 JAR） */
     private String jar;
 
     public String getId() { return id; }
@@ -70,6 +83,11 @@ public class VersionInfo {
     public String getJar() { return jar; }
     public void setJar(String jar) { this.jar = jar; }
 
+    // ==================== 内部类 ====================
+
+    /**
+     * 资源索引
+     */
     public static class AssetIndex {
         private String id;
         private String sha1;
@@ -89,6 +107,9 @@ public class VersionInfo {
         public void setUrl(String url) { this.url = url; }
     }
 
+    /**
+     * 版本级下载信息（client / server 等）
+     */
     public static class Downloads {
         private DownloadInfo client;
         private DownloadInfo server;
@@ -109,6 +130,9 @@ public class VersionInfo {
         public void setServerMappings(DownloadInfo v) { this.serverMappings = v; }
     }
 
+    /**
+     * 下载信息详情
+     */
     public static class DownloadInfo {
         private String sha1;
         private long size;
@@ -125,6 +149,9 @@ public class VersionInfo {
         public void setPath(String path) { this.path = path; }
     }
 
+    /**
+     * 库文件信息
+     */
     public static class Library {
         private String name;
         private LibraryDownloads downloads;
@@ -146,6 +173,14 @@ public class VersionInfo {
         public String getUrl() { return url; }
         public void setUrl(String url) { this.url = url; }
 
+        /**
+         * 获取库文件的 Maven 路径
+         *
+         * 优先使用 downloads.artifact.path（官方 JSON 里就是这个），
+         * 否则根据 Maven 坐标 name 推导。
+         *
+         * 路径来自远程 JSON，视为不可信：非法路径返回 null，调用方必须跳过。
+         */
         public String getMavenPath() {
             String path = null;
             if (downloads != null && downloads.getArtifact() != null
@@ -158,6 +193,12 @@ public class VersionInfo {
             return safeRelativePath(path);
         }
 
+        /**
+         * 校验并返回安全的相对路径（拒绝绝对路径、反斜杠、":" 盘符与 ".." 段）。
+         *
+         * 版本 JSON 来自远程服务，artifact.path / name 被直接拼到本地
+         * libraries/ 或 versions/ 目录下；不校验就存在目录穿越风险。
+         */
         public static String safeRelativePath(String path) {
             if (path == null || path.isBlank()) {
                 return null;
@@ -171,7 +212,7 @@ public class VersionInfo {
                     return null;
                 }
             }
-
+            // 只允许常规字符，杜绝 @、空格、通配符等被后续解析误用
             if (!p.matches("[A-Za-z0-9._\\-/+]+")) {
                 return null;
             }
@@ -179,6 +220,9 @@ public class VersionInfo {
         }
     }
 
+    /**
+     * 库文件下载信息
+     */
     public static class LibraryDownloads {
         private DownloadInfo artifact;
         private Map<String, DownloadInfo> classifiers;
@@ -189,8 +233,11 @@ public class VersionInfo {
         public void setClassifiers(Map<String, DownloadInfo> classifiers) { this.classifiers = classifiers; }
     }
 
+    /**
+     * 规则（用于判断库文件是否适用于当前平台）
+     */
     public static class Rule {
-        private String action;  
+        private String action;  // "allow" 或 "disallow"
         private Os os;
         private Map<String, Boolean> features;
 
@@ -215,6 +262,9 @@ public class VersionInfo {
         }
     }
 
+    /**
+     * Natives 解压规则
+     */
     public static class Extract {
         private List<String> exclude;
 
@@ -222,6 +272,9 @@ public class VersionInfo {
         public void setExclude(List<String> exclude) { this.exclude = exclude; }
     }
 
+    /**
+     * Java 版本要求
+     */
     public static class JavaVersion {
         private String component;
         private int majorVersion;
@@ -232,11 +285,18 @@ public class VersionInfo {
         public void setMajorVersion(int majorVersion) { this.majorVersion = majorVersion; }
     }
 
+    // ==================== 静态工具方法 ====================
+
+    /**
+     * 根据 Maven 坐标推导库文件路径
+     * 例如 net.minecraftforge:forge:1.20.1-47.0.1 -> net/minecraftforge/forge/1.20.1-47.0.1/forge-1.20.1-47.0.1.jar
+     */
     public static String mavenPathFromName(String name) {
         if (name == null) {
             return "";
         }
 
+        // 处理 name 里可能带 @extension 的情况，例如 "foo:bar:1.0@zip"
         String extension = "jar";
         String coord = name;
 

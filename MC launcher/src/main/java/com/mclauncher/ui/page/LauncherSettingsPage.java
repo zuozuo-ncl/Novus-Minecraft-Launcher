@@ -1,5 +1,6 @@
 package com.mclauncher.ui.page;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.config.ConfigManager;
 import com.mclauncher.config.GameDirectory;
@@ -22,6 +23,11 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
+/**
+ * 启动器设置页
+ *
+ * 包含：目录设置、下载源、内存、Java 环境、微软登录配置。
+ */
 public class LauncherSettingsPage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(LauncherSettingsPage.class);
@@ -30,15 +36,19 @@ public class LauncherSettingsPage implements Page {
     private final Path launcherDir;
 
     private BorderPane root;
-
+    /** 语言切换后通知主窗口重建（由 MainWindow 注入） */
     private Runnable languageChangeListener;
 
+    /** 内嵌弹窗宿主（由 MainWindow 注入） */
     private com.mclauncher.ui.component.ModalHost modalHost;
 
+    /** 主场景（由 MainWindow 注入，用于即时切换主题） */
     private javafx.scene.Scene hostScene;
 
+    /** 外观页的主题下拉框 */
     private ComboBox<String> themeCombo;
 
+    /** 常规页的「检查更新」按钮与结果标签 */
     private Button updateCheckButton;
     private Label updateResultLabel;
 
@@ -49,8 +59,10 @@ public class LauncherSettingsPage implements Page {
     private ComboBox<String> javaCombo;
     private CheckBox autoDownloadJavaCheck;
 
+    /** 手动安装 Java：版本选择 */
     private ComboBox<String> javaVersionCombo;
 
+    /** 显示启动器已安装的 Java 版本 */
     private Label installedJavaLabel;
     private Label javaStatusLabel;
     private TextField clientIdField;
@@ -60,6 +72,7 @@ public class LauncherSettingsPage implements Page {
         this.launcherDir = launcherDir;
     }
 
+    /** 由 MainWindow 注入内嵌弹窗宿主 */
     public void setLanguageChangeListener(Runnable r) {
         this.languageChangeListener = r;
     }
@@ -68,6 +81,7 @@ public class LauncherSettingsPage implements Page {
         this.modalHost = host;
     }
 
+    /** 由 MainWindow 注入主场景 */
     public void setHostScene(javafx.scene.Scene scene) {
         this.hostScene = scene;
     }
@@ -85,6 +99,12 @@ public class LauncherSettingsPage implements Page {
         return root;
     }
 
+    /**
+     * 语言切换后重建整个设置页
+     *
+     * JavaFX 的控件不会因为文案变化自己刷新，必须重新构建。
+     * 这里把根节点换掉，并通知主窗口重建侧边栏等常驻界面。
+     */
     private void rebuildAfterLanguageChange() {
         if (root == null) {
             return;
@@ -101,7 +121,7 @@ public class LauncherSettingsPage implements Page {
             }
         }
         root = fresh;
-
+        // 通知主窗口（侧边栏、状态栏等）一起重建
         if (languageChangeListener != null) {
             languageChangeListener.run();
         }
@@ -161,6 +181,16 @@ public class LauncherSettingsPage implements Page {
         return pane;
     }
 
+    // ---------- 常规 ----------
+
+    // ---------- 版本更新 ----------
+
+    /**
+     * 手动检查更新
+     *
+     * 在后台线程请求接口，避免阻塞界面；
+     * 有新版则弹出更新面板（与主页自动检测共用同一套 UI）。
+     */
     private void onCheckUpdate() {
         if (updateCheckButton == null) {
             return;
@@ -189,11 +219,12 @@ public class LauncherSettingsPage implements Page {
                         updateResultLabel.setText(L.t("s_bdeaca9059") + info.latestVersion);
                         updateResultLabel.getStyleClass().add("text-accent");
 
+                        // 弹出更新面板
                         if (modalHost != null) {
                             com.mclauncher.ui.window.UpdateDialog dialog =
                                     new com.mclauncher.ui.window.UpdateDialog(
                                             modalHost, info, null)
-
+                                            // 重启前落盘，保证刚保存的设置不丢
                                             .setBeforeRestart(() -> config.forceSave());
                             dialog.show();
                         } else {
@@ -218,6 +249,14 @@ public class LauncherSettingsPage implements Page {
         }, "update-check-manual").start();
     }
 
+    // ---------- 外观 ----------
+
+    /**
+     * 外观设置：明/暗主题切换
+     *
+     * 切换即时生效（不需重启）—— 直接替换主场景的 stylesheet。
+     * 内嵌弹窗是主场景内的节点，因此也自动跟随主题。
+     */
     private VBox buildAppearanceTab() {
         VBox box = new VBox(14);
         box.setPadding(new Insets(16));
@@ -244,6 +283,7 @@ public class LauncherSettingsPage implements Page {
         hint.getStyleClass().add("text-muted");
         hint.setWrapText(true);
 
+        // 预览色块，让用户直观看到两套主题的主色
         HBox preview = new HBox(10);
         preview.setPadding(new Insets(10, 0, 0, 0));
 
@@ -259,7 +299,7 @@ public class LauncherSettingsPage implements Page {
         ScrollPane scroll = new ScrollPane(box);
         scroll.setFitToWidth(true);
         scroll.setStyle("-fx-background: transparent; -fx-background-color: transparent;");
-
+        // 滚轮滚动幅度：调大默认增量（JavaFX 默认过小）
         scroll.setPannable(true);
         installScrollTuning(scroll);
 
@@ -267,6 +307,8 @@ public class LauncherSettingsPage implements Page {
         VBox.setVgrow(scroll, Priority.ALWAYS);
         return wrapper;
     }
+
+    // ==================== 详情 ====================
 
     private VBox buildAboutTab() {
         VBox box = new VBox(14);
@@ -351,9 +393,11 @@ public class LauncherSettingsPage implements Page {
         return wrapper;
     }
 
-    
+    // ---- 构建日期 ----
+    /** 构建日期（编译期常量，用占位符或当前日期） */
     private static final String BUILD_DATE = "2026-10-26";
 
+    /** 主题色小圆块（仅用于预览展示） */
     private HBox colorChip(String color, String label) {
         javafx.scene.shape.Rectangle rect = new javafx.scene.shape.Rectangle(26, 26);
         rect.setArcWidth(8);
@@ -374,6 +418,9 @@ public class LauncherSettingsPage implements Page {
         return holder;
     }
 
+    /**
+     * 主题切换：保存配置 + 立即应用到主场景
+     */
     private void onThemeChanged() {
         boolean light = themeCombo.getSelectionModel().getSelectedIndex() == 1;
         String theme = light
@@ -389,12 +436,18 @@ public class LauncherSettingsPage implements Page {
         logger.info("主题已切换为: {}", theme);
     }
 
+    /**
+     * 调大 ScrollPane 的滚轮滚动幅度
+     *
+     * JavaFX 默认的滚动增量偏小，滚一格几乎看不出移动。
+     * 这里拦截 SCROLL 事件，按比例手动调整 vvalue。
+     */
     private void installScrollTuning(ScrollPane scroll) {
         scroll.addEventFilter(javafx.scene.input.ScrollEvent.SCROLL, e -> {
             if (e.getDeltaY() == 0) {
                 return;
             }
-
+            // 每次滚动移动视口的比例（0.12 比默认手感明显更快）
             double delta = -e.getDeltaY() / 40.0 * 0.12;
             double target = scroll.getVvalue() + delta;
             scroll.setVvalue(Math.max(0, Math.min(1, target)));
@@ -407,7 +460,8 @@ public class LauncherSettingsPage implements Page {
         box.setPadding(new Insets(16));
         box.getStyleClass().add("bg-surface");
 
-        
+        // ---- 语言 ----
+        // 放在常规页最上面：这是最常改的一次性设置
         box.getChildren().add(sectionLabel(L.t("lang.section")));
 
         Label langLabel = new Label(L.t("lang.label"));
@@ -430,7 +484,7 @@ public class LauncherSettingsPage implements Page {
             if (picked != null && picked != com.mclauncher.i18n.L.lang()) {
                 config.setString("language", picked.code);
                 config.forceSave();
-
+                // 切换后整页重建（已经构建好的控件不会自己更新文案）
                 com.mclauncher.i18n.L.setLang(picked);
                 rebuildAfterLanguageChange();
             }
@@ -442,6 +496,7 @@ public class LauncherSettingsPage implements Page {
 
         box.getChildren().addAll(langLabel, langCombo, langHint, new Separator());
 
+        // 下载目录
         box.getChildren().add(sectionLabel(L.t("s_2e186f04e9")));
 
         Label dl = new Label(L.t("s_28bc5d1641"));
@@ -454,6 +509,7 @@ public class LauncherSettingsPage implements Page {
         HBox dlRow = new HBox(8, downloadDirField, dlBrowse);
         HBox.setHgrow(downloadDirField, Priority.ALWAYS);
 
+        // 游戏目录（只读显示 + 跳转管理）
         Label gl = new Label(L.t("s_bc013dae7e"));
         gl.getStyleClass().add("text-secondary");
 
@@ -461,8 +517,8 @@ public class LauncherSettingsPage implements Page {
         String dirText = active != null
                 ? active.getRootPathString() : L.t("s_045286a79f");
         Label dirDisplay = new Label(dirText);
-
-        
+        // 用「可读的输入框样式」呈现路径：dir-display 在主题 CSS 里定义，
+        // 保证浅色/深色下文字都清晰（此前误用 .card，文字颜色未被定义）
         dirDisplay.getStyleClass().add("dir-display");
         dirDisplay.setWrapText(true);
         dirDisplay.setMaxWidth(Double.MAX_VALUE);
@@ -478,7 +534,7 @@ public class LauncherSettingsPage implements Page {
             com.mclauncher.ui.window.DirectoryManagerWindow w =
                     new com.mclauncher.ui.window.DirectoryManagerWindow(
                             modalHost, config, msg -> {
-
+                                // 刷新显示
                                 GameDirectory updated = config.getActiveDirectory();
                                 dirDisplay.setText(updated != null
                                         ? updated.getRootPathString()
@@ -491,6 +547,7 @@ public class LauncherSettingsPage implements Page {
 
         box.getChildren().addAll(dl, dlRow, gl, dirDisplay, dirHint, dirBtn, new Separator());
 
+        // 下载源
         box.getChildren().add(sectionLabel(L.t("s_abdb438fc5")));
 
         Label sl = new Label(L.t("s_d582d4de13"));
@@ -511,6 +568,7 @@ public class LauncherSettingsPage implements Page {
 
         box.getChildren().addAll(sl, sourceCombo, sHint, new Separator());
 
+        // 内存
         box.getChildren().add(sectionLabel(L.t("s_7b02c8eec8")));
 
         HBox memRow = new HBox(12);
@@ -534,6 +592,7 @@ public class LauncherSettingsPage implements Page {
 
         box.getChildren().addAll(memRow, memHint);
 
+        // ---------- 版本更新 ----------
         box.getChildren().addAll(new Separator(), sectionLabel(L.t("s_ca95761a28")));
 
         Label verLabel = new Label(L.t("s_9578061aaf") + config.getLauncherVersion());
@@ -566,6 +625,8 @@ public class LauncherSettingsPage implements Page {
         VBox.setVgrow(scroll, Priority.ALWAYS);
         return wrapper;
     }
+
+    // ---------- Java ----------
 
     private VBox buildJavaTab() {
         VBox box = new VBox(14);
@@ -610,14 +671,15 @@ public class LauncherSettingsPage implements Page {
 
         box.getChildren().add(sectionLabel(L.t("s_b6ee98a995")));
 
-        
-
-        
-
-        
-
-        
-
+        // ---- 版本选择 ----
+        //
+        // Minecraft 各代需要的 Java 版本不同：
+        //   1.12 及以下 -> Java 8
+        //   1.16.5     -> Java 8（也可用 11/16）
+        //   1.17~1.20.4 -> Java 17
+        //   1.20.5+    -> Java 21
+        // 之前只能下「配置里那一个版本」，换成别的游戏版本就得手改配置，
+        // 这里直接让用户选。
         HBox verRow = new HBox(10);
         verRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -630,12 +692,13 @@ public class LauncherSettingsPage implements Page {
                 L.t("s_f836d820f1"),
                 "Java 17  （MC 1.17 ~ 1.20.4）",
                 L.t("s_7a22a1d602"));
-
+        // 默认选中配置里要求的版本，省得用户再选一次
         javaVersionCombo.getSelectionModel().select(versionIndexFor(config.getJavaVersion()));
         javaVersionCombo.setPrefWidth(280);
 
         verRow.getChildren().addAll(verLabel, javaVersionCombo);
 
+        // ---- 已安装的启动器 Java ----
         installedJavaLabel = new Label(L.t("s_d3c8f2ef02"));
         installedJavaLabel.getStyleClass().add("text-muted");
         installedJavaLabel.setWrapText(true);
@@ -677,6 +740,8 @@ public class LauncherSettingsPage implements Page {
         return wrapper;
     }
 
+    // ---------- 账号 ----------
+
     private VBox buildAccountTab() {
         VBox box = new VBox(14);
         box.setPadding(new Insets(16));
@@ -714,6 +779,8 @@ public class LauncherSettingsPage implements Page {
         VBox.setVgrow(scroll, Priority.ALWAYS);
         return wrapper;
     }
+
+    // ==================== 逻辑 ====================
 
     private Label sectionLabel(String text) {
         Label l = new Label(text);
@@ -800,8 +867,8 @@ public class LauncherSettingsPage implements Page {
     }
 
     private void downloadJava() {
-
-        
+        // 用下拉框里选的版本（而不是配置里那个），
+        // 这样用户能按游戏版本需要自由安装不同 Java
         final int javaVersion = selectedJavaVersion();
 
         ProgressPanel progress = new ProgressPanel(modalHost, javaVersion);
@@ -824,7 +891,7 @@ public class LauncherSettingsPage implements Page {
                         }
                     });
                 } finally {
-
+                    // 关闭线程池/连接池，避免每次下载泄漏约 20 个非守护线程
                     mgr.shutdown();
                 }
 
@@ -839,11 +906,12 @@ public class LauncherSettingsPage implements Page {
             } catch (Exception e) {
                 logger.error("下载 Java 失败", e);
 
-                
+                // 先收起进度面板，再弹带链接的提示 ——
+                // 否则提示会被进度面板盖住
                 progress.finishWithError(L.t("s_9767bac218") + e.getMessage());
 
                 Platform.runLater(() -> {
-
+                    // 关掉进度面板（它是不可关闭的，需要显式收起）
                     if (modalHost != null) {
                         modalHost.close();
                     }
@@ -862,11 +930,14 @@ public class LauncherSettingsPage implements Page {
         });
     }
 
+    /** Java 官方下载页（下载失败时引导用户自行下载） */
     private static final String JAVA_DOWNLOAD_SITE =
             "https://adoptium.net/zh-CN/temurin/releases/?os=windows&arch=x64&package=jre";
 
+    /** 下拉框里可安装的 Java 主版本（与选项顺序一一对应） */
     private static final int[] JAVA_CHOICES = {8, 17, 21};
 
+    /** 把配置里的版本号映射到下拉框下标 */
     private int versionIndexFor(String version) {
         if (version != null) {
             try {
@@ -879,9 +950,10 @@ public class LauncherSettingsPage implements Page {
             } catch (NumberFormatException ignored) {
             }
         }
-        return 1;   
+        return 1;   // 默认 Java 17
     }
 
+    /** 取下拉框当前选中的主版本号 */
     private int selectedJavaVersion() {
         if (javaVersionCombo == null) {
             return 17;
@@ -893,6 +965,9 @@ public class LauncherSettingsPage implements Page {
         return JAVA_CHOICES[idx];
     }
 
+    /**
+     * 刷新「启动器已安装的 Java」提示
+     */
     private void refreshInstalledJava() {
         if (installedJavaLabel == null) {
             return;
@@ -903,7 +978,7 @@ public class LauncherSettingsPage implements Page {
                 List<JavaDetector.JavaInfo> all = mgr.detectInstalledJava();
                 StringBuilder sb = new StringBuilder();
                 for (JavaDetector.JavaInfo info : all) {
-
+                    // 只列启动器自己装的（路径在 java 目录下）
                     if (info.getPath() != null
                             && info.getPath().startsWith(launcherDir.toString())) {
                         if (sb.length() > 0) {
@@ -934,7 +1009,7 @@ public class LauncherSettingsPage implements Page {
                 L.t("s_3d81345303"),
                 () -> {
                     config.reset();
-
+                    // 重建界面以反映默认值
                     root = buildUI();
                     onShow();
                 });
@@ -978,6 +1053,15 @@ public class LauncherSettingsPage implements Page {
         com.mclauncher.ui.component.MessageDialog.info(modalHost, L.t("s_ab3656a956"), msg);
     }
 
+    /**
+     * 内嵌式进度面板（用于 Java 下载）
+     *
+     * 原来是独立 Stage，改成挂在 ModalHost 上，与其它弹窗统一样式，
+     * 也自动跟随主窗口与主题。
+     *
+     * 下载中不允许关闭（closable=false），只能等它跑完自动收起；
+     * 若下载失败，会在面板上显示错误并给出「关闭」按钮。
+     */
     private static class ProgressPanel {
         private final com.mclauncher.ui.component.ModalHost host;
         private final int javaVersion;
@@ -1018,7 +1102,8 @@ public class LauncherSettingsPage implements Page {
 
                 box.getChildren().addAll(title, bar, label, footer);
 
-                
+                // closable=false：下载途中不能点 ✕ 或遮罩关掉，
+                // 避免用户以为「关掉就等于取消」而实际下载还在跑
                 host.show(L.t("s_732c2382fe") + javaVersion, box, null, false);
             });
         }
@@ -1036,6 +1121,7 @@ public class LauncherSettingsPage implements Page {
             });
         }
 
+        /** 成功结束：显示提示，2 秒后自动收起 */
         void finish(String text) {
             Platform.runLater(() -> {
                 if (bar != null) bar.setProgress(1.0);
@@ -1049,6 +1135,7 @@ public class LauncherSettingsPage implements Page {
             });
         }
 
+        /** 失败结束：不自动关闭，等用户点「关闭」 */
         void finishWithError(String text) {
             Platform.runLater(() -> {
                 if (bar != null) bar.setProgress(0);
@@ -1057,7 +1144,7 @@ public class LauncherSettingsPage implements Page {
                     closeBtn.setVisible(true);
                     closeBtn.setManaged(true);
                 }
-
+                // 失败时允许用户自行关闭（包括点遮罩 / ESC）
                 host.setClosable(true);
             });
         }

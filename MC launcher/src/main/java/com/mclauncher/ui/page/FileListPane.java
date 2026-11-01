@@ -1,5 +1,6 @@
 package com.mclauncher.ui.page;
 
+
 import com.mclauncher.i18n.L;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
@@ -21,6 +22,12 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
+/**
+ * 可复用的文件列表组件
+ *
+ * 用于「世界管理」「原理图管理」「光影管理」「本地文件浏览」等模块：
+ * 列出目录内容，支持双击打开文件夹、删除、进入子目录。
+ */
 public class FileListPane {
 
     private static final Logger logger = LoggerFactory.getLogger(FileListPane.class);
@@ -31,10 +38,13 @@ public class FileListPane {
     private final String emptyHint;
     private final Consumer<String> statusConsumer;
 
+    /** 是否允许进入子目录（世界/光影按目录展示时不需要） */
     private final boolean allowNavigate;
 
+    /** 只显示目录（如世界、光影包） */
     private final boolean dirsOnly;
 
+    /** 只显示指定扩展名的文件；null 表示不过滤 */
     private final String[] extensions;
 
     private VBox root;
@@ -42,6 +52,7 @@ public class FileListPane {
     private Label pathLabel;
     private Path currentDir;
 
+    /** 内嵌弹窗宿主（由 GameSettingsPage 注入）；为空时降级不做确认 */
     private com.mclauncher.ui.component.ModalHost modalHost;
 
     public void setModalHost(com.mclauncher.ui.component.ModalHost host) {
@@ -76,6 +87,7 @@ public class FileListPane {
     private VBox build() {
         VBox box = new VBox(10);
 
+        // 顶部：当前路径 + 操作按钮
         HBox top = new HBox(8);
         top.setAlignment(Pos.CENTER_LEFT);
 
@@ -106,6 +118,9 @@ public class FileListPane {
         return box;
     }
 
+    /**
+     * 列出文件
+     */
     private void listFiles() {
         Path dir = currentDir;
         pathLabel.setText(L.t("s_7eb0b0f759") + dir.toString());
@@ -154,6 +169,7 @@ public class FileListPane {
                 }
             }
 
+            // 目录在前，然后按名称排序
             entries.sort((a, b) -> {
                 if (a.directory != b.directory) {
                     return a.directory ? -1 : 1;
@@ -167,6 +183,7 @@ public class FileListPane {
     private void renderEntries(List<FileEntry> entries) {
         listContainer.getChildren().clear();
 
+        // 返回上级
         if (allowNavigate && currentDir != null && baseDir != null
                 && !currentDir.equals(baseDir)) {
             listContainer.getChildren().add(buildRow("⬆  ..", L.t("s_2b0dc6143c"), null,
@@ -211,6 +228,9 @@ public class FileListPane {
         }
     }
 
+    /**
+     * 构造一行
+     */
     private HBox buildRow(String title, String meta, FileEntry entry,
                           Runnable onDoubleClick, boolean showActions) {
         HBox row = new HBox(10);
@@ -234,6 +254,7 @@ public class FileListPane {
 
         row.getChildren().add(textBox);
 
+        // 双击打开
         row.setOnMouseClicked(ev -> {
             if (ev.getClickCount() == 2) {
                 onDoubleClick.run();
@@ -251,6 +272,9 @@ public class FileListPane {
         return row;
     }
 
+    /**
+     * 确认删除
+     */
     private void confirmDelete(FileEntry entry) {
         com.mclauncher.ui.component.MessageDialog.confirm(
                 modalHost,
@@ -281,6 +305,9 @@ public class FileListPane {
                 });
     }
 
+    /**
+     * 递归删除
+     */
     private void deleteRecursively(Path path) throws IOException {
         if (Files.isDirectory(path)) {
             try (DirectoryStream<Path> s = Files.newDirectoryStream(path)) {
@@ -292,6 +319,9 @@ public class FileListPane {
         Files.delete(path);
     }
 
+    /**
+     * 在系统文件管理器中打开
+     */
     private void openInExplorer(Path path) {
         if (path == null || !Files.exists(path)) {
             return;
@@ -302,7 +332,7 @@ public class FileListPane {
                         && Desktop.getDesktop().isSupported(Desktop.Action.OPEN)) {
                     Desktop.getDesktop().open(path.toFile());
                 } else {
-
+                    // 后备方案
                     String os = System.getProperty("os.name").toLowerCase();
                     if (os.contains("win")) {
                         Runtime.getRuntime().exec(new String[]{"explorer", path.toString()});
@@ -318,6 +348,7 @@ public class FileListPane {
         });
     }
 
+    /** 文件条目 */
     private static class FileEntry {
         Path path;
         String name;

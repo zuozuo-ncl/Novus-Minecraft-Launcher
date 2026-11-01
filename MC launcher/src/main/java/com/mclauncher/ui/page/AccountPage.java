@@ -1,5 +1,6 @@
 package com.mclauncher.ui.page;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.auth.Account;
 import com.mclauncher.auth.AccountManager;
@@ -28,12 +29,19 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
+/**
+ * 账号页
+ *
+ * 支持离线账号与微软正版登录（设备代码流）。
+ */
 public class AccountPage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(AccountPage.class);
 
+    /** 皮肤来源（静态方法类，但缓存是实例/静态混合的，这里统一用实例） */
     private static final SkinFetcher SKINS = new SkinFetcher();
 
+    /** 内嵌弹窗宿主（由 MainWindow 注入） */
     private com.mclauncher.ui.component.ModalHost modalHost;
 
     @Override
@@ -47,15 +55,15 @@ public class AccountPage implements Page {
 
     private BorderPane root;
     private ListView<Account> accountList;
-
+    /** 当前账号卡片上的头像与皮肤预览 */
     private SkinAvatar currentAvatar;
     private StackPane currentSkinView;
     private Label currentNameLabel;
     private Label currentTypeLabel;
     private Label currentSkinHint;
-
+    /** 皮肤站选择（每个账号各自记住） */
     private ComboBox<SkinOption> skinSiteCombo;
-
+    /** 防止程序设置下拉框时触发保存 */
     private boolean suppressSiteChange = false;
     private TextField offlineNameField;
     private Label offlineStatus;
@@ -92,7 +100,7 @@ public class AccountPage implements Page {
     private BorderPane buildUI() {
         BorderPane pane = new BorderPane();
         pane.getStyleClass().add("bg-main");
-
+        // 会作为 ScrollPane 的内容，必须允许被压到比内容还小
         pane.setMinHeight(0);
 
         VBox header = new VBox(4);
@@ -111,8 +119,9 @@ public class AccountPage implements Page {
         contentBox.setMinHeight(0);
         installTabs();
 
-        
-
+        // 整个页面放进 ScrollPane：窗口矮一点或系统缩放较大时，
+        // 账号卡 + 标签页会超出可视区域。以前没有任何滚动条，
+        // 下面的账号列表根本够不着
         ScrollPane scroll = new ScrollPane(contentBox);
         scroll.setFitToWidth(true);
         scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
@@ -125,23 +134,31 @@ public class AccountPage implements Page {
         return pane;
     }
 
+    /** 账号卡 + 标签页的容器，重建标签页时只替换其中一项 */
     private VBox contentBox;
 
+    /**
+     * 创建标签页（列表 / 离线 / 微软 / 皮肤）。
+     *
+     * 每次都新建：皮肤页的控件是懒创建的，重建后 currentSkinView 等字段
+     * 必须指向当前真正显示的那一份，否则会去更新已被替换掉的节点。
+     */
     private TabPane createTabs() {
         TabPane tabs = new TabPane();
         tabs.setTabClosingPolicy(TabPane.TabClosingPolicy.UNAVAILABLE);
-
+        // 标签页内容各自可滚动：内容不高时不出滚动条，超出时能滚
         tabs.getTabs().addAll(
                 new Tab(L.t("s_56c18f8733"), buildListTab()),
                 new Tab(L.t("s_c1c38438c5"), buildOfflineTab()),
                 new Tab(L.t("s_172f1237ed"), buildMicrosoftTab()),
-
+                // 皮肤从「当前账号卡」里拆出来单独一栏
                 new Tab(L.t("s_acct_skin_tab"), buildSkinTab())
         );
         tabs.setMinHeight(0);
         return tabs;
     }
 
+    /** 创建并换上新的标签页（首次构建 / 语言切换） */
     private TabPane installTabs() {
         TabPane tabs = createTabs();
         tabs.getSelectionModel().select(0);
@@ -154,11 +171,12 @@ public class AccountPage implements Page {
             contentBox.getChildren().add(tabs);
             VBox.setVgrow(tabs, Priority.ALWAYS);
         }
-
+        // 皮肤页刚建好：把当前账号的皮肤状态同步过去
         updateCurrentCard(accountManager.getCurrentAccount());
         return tabs;
     }
 
+    /** 标签页内容统一包一层滚动容器（内容不高时不出滚动条） */
     private ScrollPane scrollable(javafx.scene.Node content) {
         ScrollPane sp = new ScrollPane(content);
         sp.setFitToWidth(true);
@@ -168,6 +186,8 @@ public class AccountPage implements Page {
         sp.setMinHeight(0);
         return sp;
     }
+
+    // ---------- 账号列表 ----------
 
     private ScrollPane buildListTab() {
         VBox box = new VBox(12);
@@ -210,7 +230,7 @@ public class AccountPage implements Page {
         actions.getChildren().addAll(refresh, remove);
 
         box.getChildren().addAll(hint, accountList, actions);
-
+        // 列表给一个最小高度，外层 ScrollPane 滚动时不会把它压成一条缝
         accountList.setMinHeight(240);
         box.setPrefHeight(Region.USE_COMPUTED_SIZE);
         return scrollable(box);
@@ -233,7 +253,7 @@ public class AccountPage implements Page {
                 break;
             }
         }
-
+        // 当前账号不在列表里（刚被删掉）时，保留用户原来的选择
         if (selected == null && keep != null) {
             int i = accounts.indexOf(keep);
             if (i >= 0) {
@@ -263,13 +283,18 @@ public class AccountPage implements Page {
                 });
     }
 
+    /**
+     * 列表单元格：头像 + 用户名 + 账号类型
+     *
+     * 头像是真实皮肤（异步加载），取不到时显示首字母占位。
+     */
     private class AccountCell extends ListCell<Account> {
         private final SkinAvatar avatar = SkinAvatar.circle(34);
         private final Label name = new Label();
         private final Label type = new Label();
         private final VBox text;
         private final HBox box;
-
+        /** 这一格当前绑定的是哪个账号，避免列表复用导致头像串号 */
         private Account bound;
 
         AccountCell() {
@@ -307,6 +332,20 @@ public class AccountPage implements Page {
         }
     }
 
+    // ---------- 当前账号卡 ----------
+
+    /**
+     * 当前账号卡：大号皮肤预览 + 名字
+     *
+     * 预览显示的是皮肤原图的放大版（含外层/帽子），
+     * 点击「更换头像」会清缓存重新拉取 —— 玩家刚在皮肤站换了皮肤时用得上。
+     */
+    /**
+     * 当前账号卡（顶部）：头像 + 名字 + 刷新皮肤
+     *
+     * 皮肤相关设置（来源、上传、全身预览）已移到「皮肤设置」标签页，
+     * 这里只留一眼能看到的身份信息，避免把下面的标签页挤出可视区。
+     */
     private Region buildCurrentAccountCard() {
         currentAvatar = SkinAvatar.square(56);
         currentNameLabel = new Label(L.t("s_e8041a8c93"));
@@ -340,6 +379,9 @@ public class AccountPage implements Page {
         return card;
     }
 
+    /**
+     * 皮肤设置标签页：账号提示 / 来源选择 / 上传 / 刷新 / 全身预览
+     */
     private ScrollPane buildSkinTab() {
         VBox box = new VBox(12);
         box.setPadding(new Insets(16));
@@ -352,9 +394,10 @@ public class AccountPage implements Page {
         Label who = new Label(L.t("s_acct_current") + "：" + currentAccountName());
         who.getStyleClass().add("text-secondary");
 
-        
-
-        
+        // ---- 皮肤来源 ----
+        // 选项包含：自动 / 9 个内置基础皮肤 / Mojang 官方 / LittleSkin / Blessing Skin，
+        // 也可以手动填写任意 Blessing Skin 站点的地址。
+        // 注意要用 ComboBox<SkinOption> 声明，否则得到 ComboBox<String>，装不进自定义选项
         ComboBox<SkinOption> combo = new ComboBox<>();
         combo.setPrefWidth(260);
         combo.setEditable(true);
@@ -375,7 +418,7 @@ public class AccountPage implements Page {
                         applySkinOption(a, opt);
                     }
                 });
-
+        // 手填 URL：回车提交
         skinSiteCombo.addEventHandler(javafx.scene.input.KeyEvent.KEY_PRESSED, e -> {
             if (e.getCode() == javafx.scene.input.KeyCode.ENTER
                     && skinSiteCombo.getEditor() != null) {
@@ -412,6 +455,7 @@ public class AccountPage implements Page {
         siteNote.getStyleClass().add("text-muted");
         siteNote.setWrapText(true);
 
+        // 全身像预览
         currentSkinView = new StackPane();
         currentSkinView.setPrefSize(Region.USE_COMPUTED_SIZE, Region.USE_COMPUTED_SIZE);
         currentSkinView.getStyleClass().add("skin-preview");
@@ -430,11 +474,15 @@ public class AccountPage implements Page {
         return scrollable(box);
     }
 
+    /** 当前账号名（没有账号时显示「未登录」） */
     private String currentAccountName() {
         Account a = accountManager.getCurrentAccount();
         return a == null || a.getUsername() == null ? L.t("s_e8041a8c93") : a.getUsername();
     }
 
+    /**
+     * 刷新当前账号卡
+     */
     private void updateCurrentCard(Account account) {
         if (currentAvatar == null) {
             return;
@@ -452,6 +500,7 @@ public class AccountPage implements Page {
         currentTypeLabel.setText(account.getType() != null
                 ? account.getType().getDisplayName() : "");
 
+        // 皮肤设置标签页懒加载：没打开过时控件为空，跳过即可
         if (skinSiteCombo != null) {
             suppressSiteChange = true;
             try {
@@ -471,7 +520,7 @@ public class AccountPage implements Page {
         if (currentSkinView == null) {
             return;
         }
-
+        // 缓存命中时直接显示皮肤预览；没命中等头像组件加载完成后回调
         Image cached = SKINS.peekSkin(account);
         if (cached != null) {
             showSkinPreview(cached, account);
@@ -492,6 +541,7 @@ public class AccountPage implements Page {
         }
     }
 
+    /** 轮询等皮肤进入缓存（最多约 6 秒；也没必要更长） */
     private void pollSkinPreview(Account account, int attempt) {
         if (attempt > 24) {
             return;
@@ -507,7 +557,7 @@ public class AccountPage implements Page {
         }
         CompletableFuture.delayedExecutor(250, java.util.concurrent.TimeUnit.MILLISECONDS)
                 .execute(() ->
-
+                        // 必须回到 FX 线程：后面会改 ImageView / 可见性
                         Platform.runLater(() -> {
                             Account cur = accountManager.getCurrentAccount();
                             if (cur != null && cur.getId().equals(account.getId())) {
@@ -516,20 +566,27 @@ public class AccountPage implements Page {
                         }));
     }
 
+    /**
+     * 显示全身像
+     *
+     * 皮肤图是人物的展开图（头/身体/手臂/腿分开摊着），
+     * 直接放大整张图玩家看到的是一堆碎片 —— 必须拼成正面站立的形象。
+     * 拼接逻辑见 {@link com.mclauncher.ui.component.SkinRenderer}。
+     */
     private void showSkinPreview(Image skin, Account account) {
         if (skin == null || skin.getPixelReader() == null || currentSkinView == null) {
             return;
         }
 
         boolean slim = "slim".equals(SKINS.peekModel(account));
-        int px = 5;      
+        int px = 5;      // 每皮肤像素放大 5 倍：全身约 70~80px 宽、160px 高
         Image full = com.mclauncher.ui.component.SkinRenderer.fullBody(skin, px, slim);
         if (full == null) {
             return;
         }
 
         ImageView iv = new ImageView(full);
-        iv.setSmooth(false);        
+        iv.setSmooth(false);        // 像素风：不要插值模糊
 
         currentSkinView.getChildren().setAll(iv);
         currentSkinView.setPrefSize(full.getWidth(), full.getHeight());
@@ -544,10 +601,21 @@ public class AccountPage implements Page {
         currentSkinHint.setManaged(true);
     }
 
+// ---------- 皮肤来源选项 ----------
+
+    /**
+     * 皮肤来源下拉框的一个选项
+     *
+     * value 是存到账号上的 skinSite 值：
+     *   null       -> <自动>
+     *   default:xx -> 内置基础皮肤
+     *   mojang     -> Mojang 官方
+     *   其它 URL   -> 皮肤站的 API 根
+     */
     static final class SkinOption {
         final String value;
         final String label;
-
+        /** 内置皮肤时非空（用于显示缩略图） */
         final DefaultSkins.Preset preset;
 
         SkinOption(String value, String label, DefaultSkins.Preset preset) {
@@ -567,6 +635,7 @@ public class AccountPage implements Page {
         }
     }
 
+    /** 构建选项列表：自动 / 9 个内置皮肤 / Mojang / 两个常用站点 */
     private List<SkinOption> buildSkinOptions() {
         List<SkinOption> opts = new ArrayList<>();
         opts.add(new SkinOption(null, L.t("s_a16f1edbe4"), null));
@@ -581,6 +650,11 @@ public class AccountPage implements Page {
         return opts;
     }
 
+    /**
+     * 按存储值找回选项（兼容旧数据里的大小写、末尾斜杠差异）
+     *
+     * @return 匹配的选项；不在列表里（用户手填的新地址）返回 null
+     */
     private SkinOption findOption(String value) {
         if (value == null || value.isBlank() || "auto".equalsIgnoreCase(value)) {
             return skinSiteCombo.getItems().get(0);
@@ -590,7 +664,7 @@ public class AccountPage implements Page {
                 return o;
             }
         }
-
+        // 历史数据里微软账号可能存成 "microsoft"
         if ("microsoft".equalsIgnoreCase(value)) {
             for (SkinOption o : skinSiteCombo.getItems()) {
                 if ("mojang".equals(o.value)) {
@@ -598,7 +672,7 @@ public class AccountPage implements Page {
                 }
             }
         }
-
+        // URL：按推导出的 API 根比较，https://a.com 与 https://a.com/ 视为同一个
         String norm = SkinSites.guessApiRoot(value);
         if (norm != null) {
             for (SkinOption o : skinSiteCombo.getItems()) {
@@ -610,6 +684,7 @@ public class AccountPage implements Page {
         return null;
     }
 
+    /** 把用户的选择写到当前账号并刷新显示 */
     private void applySkinOption(Account a, SkinOption opt) {
         a.setSkinSite(opt.value);
         accountManager.save();
@@ -624,13 +699,16 @@ public class AccountPage implements Page {
         }
     }
 
+    /**
+     * 皮肤选项渲染：内置皮肤显示头部缩略图，其它只显示文字
+     */
     private static class SkinOptionCell extends ListCell<SkinOption> {
         private final javafx.scene.image.ImageView thumb = new javafx.scene.image.ImageView();
         private final Label text = new Label();
         private final HBox box;
 
         SkinOptionCell() {
-
+            // 皮肤图头部在 (8,8) 8x8，直接截这块当作缩略图（像素风不插值）
             thumb.setViewport(new javafx.geometry.Rectangle2D(8, 8, 8, 8));
             thumb.setFitWidth(26);
             thumb.setFitHeight(26);
@@ -657,6 +735,7 @@ public class AccountPage implements Page {
         }
     }
 
+    /** 账号实际使用的 API 根（供「上传皮肤」按钮跳转） */
     private String resolveSite(Account a) {
         String site = a.getSkinSite();
         if (site == null || site.isBlank() || "auto".equalsIgnoreCase(site)) {
@@ -667,6 +746,8 @@ public class AccountPage implements Page {
         }
         return SkinSites.guessApiRoot(site);
     }
+
+    // ---------- 离线登录 ----------
 
     private ScrollPane buildOfflineTab() {
         VBox box = new VBox(14);
@@ -745,6 +826,8 @@ public class AccountPage implements Page {
         }
     }
 
+    // ---------- 微软登录 ----------
+
     private ScrollPane buildMicrosoftTab() {
         VBox box = new VBox(14);
         box.setPadding(new Insets(16));
@@ -773,6 +856,7 @@ public class AccountPage implements Page {
         msLoginButton.setDisable(clientId.isBlank());
         msLoginButton.setOnAction(e -> startMsLogin());
 
+        // 设备代码展示
         codeBox = new VBox(8);
         codeBox.getStyleClass().add("card");
         codeBox.setAlignment(Pos.CENTER);
@@ -826,6 +910,7 @@ public class AccountPage implements Page {
                     codeBox.setManaged(true);
                     msStatus.setText(L.t("s_683cc62d6e"));
 
+                    // 复制验证码到剪贴板，方便用户粘贴
                     var content = new javafx.scene.input.ClipboardContent();
                     content.putString(dc.getUserCode());
                     javafx.scene.input.Clipboard.getSystemClipboard().setContent(content);

@@ -1,5 +1,6 @@
 package com.mclauncher.launcher;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.config.ConfigManager;
 import com.mclauncher.network.Downloader;
@@ -15,12 +16,31 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
+/**
+ * 依赖引导器
+ * 负责在首次运行时检查并下载必要的依赖
+ *
+ * 对应模块 1：项目骨架与本地配置管理
+ */
 public class DependencyBootstrap {
 
     private static final Logger logger = LoggerFactory.getLogger(DependencyBootstrap.class);
 
+    /**
+     * 启动器自身的数据目录名
+     *
+     * 注意与「游戏数据目录」区分：
+     * - 本目录（启动器目录）：存放启动器配置、账号、Java 运行时、缓存
+     *   位置 = 启动器程序所在目录/.mc_launcher
+     * - 游戏数据目录：存放版本、库、资源、存档、模组
+     *   位置 = 用户选定的游戏根目录/.mc_launcher
+     *
+     * 两者同名是历史原因（都叫 .mc_launcher），但它们位于不同父目录下，
+     * 不会冲突。游戏数据目录由 GameDirectory 负责管理。
+     */
     public static final String LAUNCHER_DIR = ".mc_launcher";
 
+    // 必要的子目录（启动器自身需要的）
     private static final String[] REQUIRED_DIRS = {
             "cache",
             "cache/downloads",
@@ -28,6 +48,7 @@ public class DependencyBootstrap {
             "logs"
     };
 
+    // BMCLAPI 基础 URL
     private static final String BMCLAPI_BASE = "https://bmclapi2.bangbang93.com";
 
     private final Path launcherDir;
@@ -38,26 +59,38 @@ public class DependencyBootstrap {
 
     public DependencyBootstrap(ConfigManager config) {
         this.config = config;
-
-        
+        // 锚定在「启动器程序所在目录」，不要用 CWD（否则不同工作目录下
+        // 会解析出不同的位置，导致配置/缓存「丢失」）
         this.launcherDir = ConfigManager.getConfigDir();
         this.downloader = new Downloader();
     }
 
+    /**
+     * 设置状态回调
+     */
     public void setStatusCallback(Consumer<String> callback) {
         this.statusCallback = callback;
     }
 
+    /**
+     * 执行引导流程
+     *
+     * @return 是否成功
+     */
     public boolean bootstrap() {
         try {
             reportStatus(L.t("s_bb0749c752"));
 
+            // 1. 创建必要的目录结构
             createDirectoryStructure();
 
+            // 2. 创建版本标记文件
             createVersionMarker();
 
+            // 3. 检查并创建默认配置
             ensureDefaultConfig();
 
+            // 4. 检查启动器自身依赖
             reportStatus(L.t("s_7e3000a645"));
             checkLauncherDependencies();
 
@@ -72,13 +105,19 @@ public class DependencyBootstrap {
         }
     }
 
+    /**
+     * 创建目录结构
+     */
     private void createDirectoryStructure() throws IOException {
-
+        // 用统一的工具方法创建并隐藏，保证跨平台行为一致
         DirectoryUtils.ensureHiddenTree(launcherDir, REQUIRED_DIRS);
         logger.info("启动器目录: {} (隐藏={})",
                 launcherDir, DirectoryUtils.isHidden(launcherDir));
     }
 
+    /**
+     * 创建版本标记文件
+     */
     private void createVersionMarker() throws IOException {
         Path markerFile = launcherDir.resolve("launcher.version");
         String currentVersion = config.getLauncherVersion();
@@ -90,13 +129,32 @@ public class DependencyBootstrap {
         }
     }
 
+    /**
+     * 确保配置文件存在
+     *
+     * 配置的创建与读写**完全由 ConfigManager 负责**（它使用锚定在
+     * 启动器程序目录的绝对路径）。这里只做一个「兜底触发」，
+     * 不直接操作文件。
+     *
+     * 历史教训：此前这里会用相对路径读一份 config.json、
+     * 再用绝对路径 + REPLACE_EXISTING 覆盖另一份，
+     * 导致进程工作目录变化时用户设置被默认值覆盖
+     * （表现为「重启后设置全部消失」）。已移除该逻辑。
+     */
     private void ensureDefaultConfig() {
-
-        
+        // ConfigManager 的构造函数在文件不存在时已自动写入默认配置，
+        // 这里只需确保内存中的配置落盘一次即可。
         config.forceSave();
         logger.debug("配置文件路径: {}", ConfigManager.getConfigPath());
     }
 
+    /**
+     * 检查启动器依赖
+     *
+     * 这里检查的是启动器运行所需的本地库文件。
+     * 由于我们使用 Fat JAR 打包，大部分依赖已经包含在内。
+     * 这里检查的是一些运行时的辅助文件。
+     */
     private void checkLauncherDependencies() throws IOException {
         List<DependencyInfo> dependencies = getRequiredDependencies();
 
@@ -132,16 +190,28 @@ public class DependencyBootstrap {
         }
     }
 
+    /**
+     * 获取必需的依赖列表
+     *
+     * 注意：这些是启动器运行时的辅助资源。
+     * 主要的 Java 库已经打包在 Fat JAR 中。
+     */
     private List<DependencyInfo> getRequiredDependencies() {
         List<DependencyInfo> deps = new ArrayList<>();
 
-        
+        // 启动器图标（可选，不影响功能）
+        // deps.add(new DependencyInfo("launcher_icon", "icons/icon.png", ...));
 
-        
+        // 当前版本没有必需的运行时依赖需要下载
+        // 所有必要的库都已打包在 Fat JAR 中
+        // 这里保留结构，方便后续添加
 
         return deps;
     }
 
+    /**
+     * 下载依赖
+     */
     private void downloadDependency(DependencyInfo dep) throws IOException {
         Path targetPath = launcherDir.resolve(dep.path);
         Files.createDirectories(targetPath.getParent());
@@ -174,6 +244,9 @@ public class DependencyBootstrap {
         }
     }
 
+    /**
+     * 验证依赖完整性
+     */
     public boolean verifyDependencies() {
         for (DependencyInfo dep : getRequiredDependencies()) {
             Path targetPath = launcherDir.resolve(dep.path);
@@ -195,10 +268,16 @@ public class DependencyBootstrap {
         return true;
     }
 
+    /**
+     * 获取启动器目录
+     */
     public Path getLauncherDir() {
         return launcherDir;
     }
 
+    /**
+     * 报告状态
+     */
     private void reportStatus(String status) {
         logger.debug("状态: {}", status);
         if (statusCallback != null) {
@@ -206,10 +285,16 @@ public class DependencyBootstrap {
         }
     }
 
+    /**
+     * 关闭
+     */
     public void shutdown() {
         downloader.shutdown();
     }
 
+    /**
+     * 依赖信息
+     */
     private static class DependencyInfo {
         final String name;
         final String path;

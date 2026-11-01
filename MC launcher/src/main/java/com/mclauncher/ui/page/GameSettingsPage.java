@@ -1,5 +1,6 @@
 package com.mclauncher.ui.page;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.config.ConfigManager;
 import com.mclauncher.game.ModLoaderInstaller;
@@ -19,10 +20,19 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
+/**
+ * 游戏设置页
+ *
+ * 包含：
+ * - 模组管理：启用/禁用（改扩展名）、删除
+ * - 加载器管理：安装/卸载 Forge、Fabric、OptiFine
+ * - 世界管理 / 原理图管理 / 光影管理 / 本地文件浏览
+ */
 public class GameSettingsPage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(GameSettingsPage.class);
 
+    /** 内嵌弹窗宿主（由 MainWindow 注入） */
     private com.mclauncher.ui.component.ModalHost modalHost;
 
     @Override
@@ -30,6 +40,7 @@ public class GameSettingsPage implements Page {
         this.modalHost = host;
     }
 
+    /** 禁用的模组统一加这个后缀 */
     private static final String DISABLED_SUFFIX = ".disabled";
 
     private final ConfigManager config;
@@ -39,14 +50,17 @@ public class GameSettingsPage implements Page {
     private BorderPane root;
     private TabPane tabPane;
 
+    // 模组管理
     private VBox modListContainer;
     private Label modCountLabel;
 
+    // 各文件管理面板
     private FileListPane worldsPane;
     private FileListPane schematicsPane;
     private FileListPane shaderPacksPane;
     private FileListPane fileBrowserPane;
 
+    // 加载器管理
     private ComboBox<String> loaderTypeCombo;
     private ComboBox<String> loaderGameVersionCombo;
     private ComboBox<String> loaderVersionCombo;
@@ -86,6 +100,8 @@ public class GameSettingsPage implements Page {
         if (fileBrowserPane != null) fileBrowserPane.refresh();
     }
 
+    // ==================== UI ====================
+
     private BorderPane buildUI() {
         BorderPane pane = new BorderPane();
         pane.getStyleClass().add("bg-main");
@@ -121,6 +137,8 @@ public class GameSettingsPage implements Page {
         pane.setCenter(center);
         return pane;
     }
+
+    // ---------- 模组管理 ----------
 
     private VBox buildModTab() {
         VBox box = new VBox(12);
@@ -165,6 +183,9 @@ public class GameSettingsPage implements Page {
         return box;
     }
 
+    /**
+     * 刷新模组列表
+     */
     private void refreshMods() {
         Path dir = modsDir();
 
@@ -174,7 +195,7 @@ public class GameSettingsPage implements Page {
                 try (DirectoryStream<Path> s = Files.newDirectoryStream(dir)) {
                     for (Path p : s) {
                         String name = p.getFileName().toString().toLowerCase();
-
+                        // 只认 .jar 与 .jar.disabled
                         if (name.endsWith(".jar")) {
                             ModEntry e = new ModEntry();
                             e.path = p;
@@ -219,7 +240,7 @@ public class GameSettingsPage implements Page {
             row.setPadding(new Insets(8, 12, 8, 12));
 
             Label statusDot = new Label(e.enabled ? "●" : "○");
-
+            // 用主题感知的样式类：浅色主题下亮绿对比度不足
             statusDot.getStyleClass().add(e.enabled ? "status-ok" : "text-muted");
             statusDot.setStyle("-fx-font-size: 15px;");
 
@@ -251,6 +272,10 @@ public class GameSettingsPage implements Page {
         }
     }
 
+    /**
+     * 启用/禁用模组：通过改扩展名实现
+     * 这是业界通行做法 —— Minecraft 只加载 .jar，改名即失效
+     */
     private void toggleMod(ModEntry entry) {
         CompletableFuture.runAsync(() -> {
             try {
@@ -258,10 +283,10 @@ public class GameSettingsPage implements Page {
                 Path target;
 
                 if (entry.enabled) {
-
+                    // 禁用：xxx.jar -> xxx.jar.disabled
                     target = entry.path.resolveSibling(name + DISABLED_SUFFIX);
                 } else {
-
+                    // 启用：xxx.jar.disabled -> xxx.jar
                     if (!name.toLowerCase().endsWith(DISABLED_SUFFIX)) {
                         return;
                     }
@@ -314,16 +339,20 @@ public class GameSettingsPage implements Page {
         return config.getGameDir().resolve("mods");
     }
 
+    // ---------- 加载器管理 ----------
+
     private VBox buildLoaderTab() {
         VBox box = new VBox(14);
         box.setPadding(new Insets(16));
         box.getStyleClass().add("bg-surface");
 
+        // 已安装的加载器
         Label installedTitle = new Label(L.t("s_939a2da274"));
         installedTitle.getStyleClass().add("card-title");
 
         installedLoadersBox = new VBox(3);
 
+        // 安装区
         Label installTitle = new Label(L.t("s_84fc9a0d9a"));
         installTitle.getStyleClass().add("card-title");
 
@@ -393,6 +422,9 @@ public class GameSettingsPage implements Page {
         return wrapper;
     }
 
+    /**
+     * 列出已安装的加载器版本（扫描 versions 目录的目录名特征）
+     */
     private void refreshInstalledLoaders() {
         if (installedLoadersBox == null) {
             return;
@@ -454,6 +486,9 @@ public class GameSettingsPage implements Page {
         }));
     }
 
+    /**
+     * 卸载加载器：删除对应的版本目录
+     */
     private void uninstallLoader(String versionId) {
         com.mclauncher.ui.component.MessageDialog.confirm(
                 modalHost,
@@ -616,6 +651,8 @@ public class GameSettingsPage implements Page {
         });
     }
 
+    // ---------- 文件管理标签页 ----------
+
     private enum DirKind { WORLDS, SCHEMATICS, SHADERPACKS, BROWSE }
 
     private VBox buildDirTab(DirKind kind) {
@@ -630,7 +667,7 @@ public class GameSettingsPage implements Page {
             case WORLDS -> {
                 base = gameDir.resolve("saves");
                 hint = L.t("s_aa553cfcdb");
-                navigate = false;   
+                navigate = false;   // 存档点进去应该是打开文件夹，不是浏览
                 dirsOnly = true;
                 exts = null;
             }
@@ -660,6 +697,7 @@ public class GameSettingsPage implements Page {
         FileListPane pane = new FileListPane(base, hint, statusConsumer,
                 navigate, dirsOnly, exts);
 
+        // 传递内嵌弹窗宿主，否则删除确认会退化成「无确认直接删」
         pane.setModalHost(modalHost);
 
         switch (kind) {
@@ -688,6 +726,8 @@ public class GameSettingsPage implements Page {
         box.getChildren().addAll(desc, listBox);
         return box;
     }
+
+    // ==================== 工具 ====================
 
     private void openFolder(Path path) {
         CompletableFuture.runAsync(() -> {
@@ -732,6 +772,7 @@ public class GameSettingsPage implements Page {
         com.mclauncher.ui.component.MessageDialog.error(modalHost, L.t("s_b859c7be75"), message);
     }
 
+    /** 模组条目 */
     private static class ModEntry {
         Path path;
         boolean enabled;

@@ -1,5 +1,6 @@
 package com.mclauncher.ui.window;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.config.ConfigManager;
 import com.mclauncher.game.ModpackInstaller;
@@ -19,6 +20,23 @@ import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
+/**
+ * 整合包版本选择与一键安装窗口
+ *
+ * 与 {@link ModVersionChooserWindow} 分开的原因：整合包是「一整个游戏环境」，
+ * 安装到独立目录、带原版与加载器，参数和流程完全不同。
+ *
+ * <h3>界面</h3>
+ * <pre>
+ *   包名 / 简介                ← 顶部
+ *   [版本下拉]  游戏版本 / 加载器 / 大小   ← 选中版本后显示这些信息
+ *   安装到: D:\...\packs\xxx  [更改…]
+ *   [开始安装]                ← 底部
+ * </pre>
+ *
+ * 安装在一个新的独立游戏目录（{@code <当前目录>\packs\<包名>}），
+ * 不会污染已有的游戏目录 —— 玩家可以同时保留多个整合包。
+ */
 public class ModpackInstallWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(ModpackInstallWindow.class);
@@ -37,13 +55,21 @@ public class ModpackInstallWindow {
     private ProgressBar progressBar;
     private Label progressText;
     private TextArea logArea;
-
+    /** 后台线程赋值、FX 线程读取，必须 volatile */
     private volatile ModpackInstaller installer;
-
+    /** 窗口是否已关闭：关闭后后台任务不再往已移除的节点上写 */
     private volatile boolean closed = false;
-
+    /**
+     * 本次安装的轮次号
+     *
+     * 关闭窗口再打开（或点「重试」）时，上一轮的后台任务可能还在跑，
+     * 它回来时不得改写新窗口的按钮 / 进度 / 日志，更不能替用户「关闭」新窗口。
+     */
     private volatile int runId = 0;
 
+    /**
+     * @param project 搜索结果里的整合包
+     */
     public ModpackInstallWindow(ModalHost modalHost,
                                    ModrinthClient client,
                                    ModrinthClient.ModProject project,
@@ -57,13 +83,14 @@ public class ModpackInstallWindow {
         this.targetDir = defaultTargetDir();
     }
 
+    /** 整合包默认装到「当前游戏目录\packs\包名」 */
     private Path defaultTargetDir() {
         String name = project.getSlug() != null && !project.getSlug().isBlank()
                 ? project.getSlug() : project.getTitle();
         if (name == null || name.isBlank()) {
             name = "modpack";
         }
-
+        // 文件名安全化
         name = name.replaceAll("[\\\\/:*?\"<>|]", "_");
         return config.getGameDir().toAbsolutePath().resolve("packs").resolve(name);
     }
@@ -74,7 +101,7 @@ public class ModpackInstallWindow {
         BorderPane root = buildUI();
         modalHost.show(L.t("s_5bc09cb578") + project.getTitle(), root, () -> {
             closed = true;
-            runId++;            
+            runId++;            // 让在途任务的结果失效
             ModpackInstaller inst = installer;
             if (inst != null) {
                 inst.cancel();
@@ -88,6 +115,7 @@ public class ModpackInstallWindow {
         root.getStyleClass().add("version-dialog-root");
         root.setPrefSize(720, 480);
 
+        // ---- 顶部：简介 ----
         VBox header = new VBox(6);
         header.setPadding(new Insets(16, 20, 8, 20));
 
@@ -103,6 +131,7 @@ public class ModpackInstallWindow {
 
         header.getChildren().addAll(title, desc);
 
+        // ---- 中部：版本 + 目标目录 + 进度 ----
         VBox center = new VBox(14);
         center.setPadding(new Insets(4, 20, 8, 20));
 
@@ -113,8 +142,8 @@ public class ModpackInstallWindow {
         versionCombo = new ComboBox<>();
         versionCombo.setPrefWidth(320);
         versionCombo.setPromptText(L.t("s_514c33af5c"));
-
-        
+        // 下拉项显示「游戏版本 · 加载器 · 版本号」而不是 object.toString()；
+        // 列表按版本号倒序，最新的在最上面
         versionCombo.setCellFactory(lv -> versionCell());
         versionCombo.setButtonCell(versionCell());
         versionCombo.setOnAction(e -> onVersionSelected());
@@ -124,6 +153,7 @@ public class ModpackInstallWindow {
         metaLabel.getStyleClass().add("text-secondary");
         metaLabel.setWrapText(true);
 
+        // 安装目录
         HBox targetRow = new HBox(10);
         targetRow.setAlignment(Pos.CENTER_LEFT);
         Label tl = new Label(L.t("s_7d95c47ebf"));
@@ -167,6 +197,7 @@ public class ModpackInstallWindow {
                 targetRow, note, progressBar, progressText, logArea);
         VBox.setVgrow(logArea, Priority.ALWAYS);
 
+        // ---- 底部 ----
         HBox footer = new HBox(10);
         footer.setPadding(new Insets(8, 20, 16, 20));
         footer.setAlignment(Pos.CENTER_RIGHT);
@@ -184,6 +215,8 @@ public class ModpackInstallWindow {
         return root;
     }
 
+    // ==================== 版本 ====================
+
     private void loadVersions() {
         CompletableFuture.supplyAsync(() -> {
             try {
@@ -198,8 +231,8 @@ public class ModpackInstallWindow {
                 metaLabel.setText(L.t("s_95831308d1"));
                 return;
             }
-
-            
+            // 只列有主文件的版本：没有文件的版本装了也没意义，
+            // 而且会让下拉框里出现一串无从判断的条目
             java.util.List<ModrinthClient.ModVersion> usable = new java.util.ArrayList<>();
             for (ModrinthClient.ModVersion v : list) {
                 if (v.getPrimaryFile() != null) {
@@ -220,6 +253,7 @@ public class ModpackInstallWindow {
         }));
     }
 
+    /** 版本下拉项：游戏版本 · 加载器 · 版本号 */
     private ListCell<ModrinthClient.ModVersion> versionCell() {
         return new ListCell<>() {
             @Override
@@ -280,9 +314,11 @@ public class ModpackInstallWindow {
         }
     }
 
-    private void startInstall() {
+    // ==================== 安装 ====================
 
-        
+    private void startInstall() {
+        // 「重试」按钮可能在上一轮还没结束时被再点一次：先收掉旧实例，
+        // 否则旧任务取消不掉，两个安装同时往同一个目录写
         ModpackInstaller oldInst = installer;
         if (oldInst != null) {
             oldInst.cancel();
@@ -318,9 +354,10 @@ public class ModpackInstallWindow {
             installer = inst;
             final int run = myRun;
             try {
-
+                // 1) 先把整合包本体下载到临时位置
                 Path packFile = downloadPackFile(file);
 
+                // 2) 安装
                 ModpackInstaller.Result r = inst.install(packFile, targetDir,
                         new ModpackInstaller.Progress() {
                             @Override
@@ -349,6 +386,7 @@ public class ModpackInstallWindow {
                             }
                         });
 
+                // 3) 把安装目录加进游戏目录列表（已存在则不重复加）
                 if (r.success) {
                     Platform.runLater(() -> {
                         if (closed || run != runId) return;
@@ -372,6 +410,11 @@ public class ModpackInstallWindow {
         });
     }
 
+    /**
+     * 下载 .mrpack 本体
+     *
+     * 走 Modrinth 文件镜像；失败时回退原始地址。
+     */
     private Path downloadPackFile(ModrinthClient.ModFile file) throws Exception {
         Path tmpDir = config.getDownloadDir().toAbsolutePath().resolve("modpacks");
         Files.createDirectories(tmpDir);
@@ -401,6 +444,7 @@ public class ModpackInstallWindow {
         progressBar.setProgress(1);
         progressText.setText(L.t("s_f423573349"));
 
+        // 注册为新游戏目录
         config.addGameDirectory(targetDir.toAbsolutePath().toString(),
                 project.getTitle() + " (" + (r.versionId == null ? L.t("s_b3a621217c") : r.versionId) + ")");
 

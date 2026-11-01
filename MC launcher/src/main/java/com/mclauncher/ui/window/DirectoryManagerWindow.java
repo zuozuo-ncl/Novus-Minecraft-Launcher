@@ -1,5 +1,6 @@
 package com.mclauncher.ui.window;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.config.ConfigManager;
 import com.mclauncher.config.GameDirectory;
@@ -23,6 +24,20 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
+/**
+ * 目录管理窗口
+ *
+ * 功能：
+ * - 列出所有已添加的游戏根目录
+ * - 添加新目录（DirectoryChooser）/ 删除 / 重命名
+ * - 单选设置「当前激活目录」
+ * - 展示每个目录对应的 .mc_launcher 数据文件夹状态与占用
+ *
+ * 概念说明（避免混淆）：
+ * 用户选的是「根目录」（如 D:\Minecraft），
+ * 游戏数据实际落在「根目录/.mc_launcher」（隐藏文件夹）里。
+ * 界面会同时展示这两层，让用户清楚知道文件去哪了。
+ */
 public class DirectoryManagerWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(DirectoryManagerWindow.class);
@@ -35,6 +50,7 @@ public class DirectoryManagerWindow {
     private Label summaryLabel;
     private Label hintLabel;
 
+    /** 当前列表（含未落盘的中间状态） */
     private List<GameDirectory> directories;
 
     public DirectoryManagerWindow(ModalHost modalHost, ConfigManager config, Consumer<String> onChanged) {
@@ -46,20 +62,23 @@ public class DirectoryManagerWindow {
     public void show() {
         directories = config.getGameDirectories();
         BorderPane content = buildUI();
-
+        // 弹窗框架已有标题，内容里不再重复大标题（见 buildUI）
         modalHost.show(L.t("s_a0be294e14"), content, null);
-
+        // 关键：弹出后必须刷新列表，否则面板是空的
         refreshList();
     }
+
+    // ==================== UI ====================
 
     private BorderPane buildUI() {
         BorderPane root = new BorderPane();
         root.getStyleClass().add("bg-main");
-
+        // 弹窗内容区给一个合适的尺寸，避免列表被压扁
         root.setPrefSize(720, 420);
-
+        // 只设 pref 不设 min：min 会让弹窗无法在小窗口里收缩
         root.setMinHeight(0);
 
+        // 顶部：说明 + 添加按钮
         VBox header = new VBox(8);
         header.setPadding(new Insets(14, 20, 6, 20));
 
@@ -83,15 +102,16 @@ public class DirectoryManagerWindow {
 
         header.getChildren().addAll(sub, actionRow);
 
+        // 中间：目录列表（占据主要空间）
         listContainer = new VBox(8);
         listContainer.setPadding(new Insets(4));
 
         ScrollPane scroll = new ScrollPane(listContainer);
         scroll.setFitToWidth(true);
         scroll.setStyle("-fx-background: transparent; -fx-background-color: transparent;");
-
-        
-
+        // 明确给列表高度，否则在弹窗里会被提示文字挤扁。
+        // minHeight 必须是 0：弹窗宿主用 BorderPane，它严格遵守子节点的 min，
+        // 窗口较矮时会让整张卡片超出窗口、底部按钮被挤到不可见区域。
         scroll.setPrefHeight(250);
         scroll.setMinHeight(0);
         VBox.setVgrow(scroll, Priority.ALWAYS);
@@ -100,6 +120,7 @@ public class DirectoryManagerWindow {
         center.setPadding(new Insets(0, 20, 8, 20));
         VBox.setVgrow(scroll, Priority.ALWAYS);
 
+        // 底部：提示 + 关闭
         VBox footerBox = new VBox(8);
         footerBox.setPadding(new Insets(0, 20, 12, 20));
 
@@ -124,6 +145,9 @@ public class DirectoryManagerWindow {
         return root;
     }
 
+    /**
+     * 刷新列表显示
+     */
     private void refreshList() {
         directories = config.getGameDirectories();
         String activeId = config.getActiveDirectoryId();
@@ -154,12 +178,16 @@ public class DirectoryManagerWindow {
         }
     }
 
+    /**
+     * 构建单个目录行
+     */
     private HBox buildRow(GameDirectory d, boolean active) {
         HBox row = new HBox(12);
         row.getStyleClass().add("card");
         row.setPadding(new Insets(14));
         row.setAlignment(Pos.CENTER_LEFT);
 
+        // 单选按钮
         RadioButton radio = new RadioButton();
         radio.setSelected(active);
         radio.setOnAction(e -> {
@@ -174,6 +202,7 @@ public class DirectoryManagerWindow {
             refreshList();
         });
 
+        // 文本区
         VBox textBox = new VBox(3);
         HBox.setHgrow(textBox, Priority.ALWAYS);
 
@@ -203,10 +232,11 @@ public class DirectoryManagerWindow {
 
         textBox.getChildren().addAll(nameRow, rootLabel, storageLabel);
 
-        
-
-        
-
+        // 操作菜单
+        //
+        // 原来是三个竖排的带文字按钮（打开 / 重命名 / 移除），
+        // 横向占掉一大块，把目录路径挤得很窄。
+        // 改成一个「⋮」按钮 + 下拉菜单：平时只占一格，点开才是三个操作。
         MenuButton actions = new MenuButton("⋮");
         actions.getStyleClass().add("menu-dots");
         actions.setFocusTraversable(false);
@@ -227,6 +257,12 @@ public class DirectoryManagerWindow {
         return row;
     }
 
+    /**
+     * 更新「游戏文件位置」状态行
+     *
+     * 展示的是游戏文件实际存在的目录（即用户选的根目录本身），
+     * 以及启动器辅助数据文件夹（.mc_launcher）的状态。
+     */
     private void updateStorageLabel(Label label, GameDirectory d) {
         Path root = d.getRootPath();
 
@@ -247,16 +283,23 @@ public class DirectoryManagerWindow {
         label.setText(L.t("s_ad1b0eb7fb") + meta);
         label.getStyleClass().add("text-muted");
 
+        // 异步统计占用，避免大目录卡住界面
         CompletableFuture.supplyAsync(() -> DirectoryUtils.calculateSize(meta))
                 .thenAccept(size -> Platform.runLater(() ->
                         label.setText(L.t("s_ad1b0eb7fb") + meta
                                 + L.t("s_4eaa62db90") + FileUtils.formatFileSize(size))));
     }
 
+    // ==================== 操作 ====================
+
+    /**
+     * 添加目录
+     */
     private void addDirectory() {
         DirectoryChooser chooser = new DirectoryChooser();
         chooser.setTitle(L.t("s_6b496b310e"));
 
+        // 初始定位到上次使用的目录或其父目录
         GameDirectory active = config.getActiveDirectory();
         if (active != null && active.existsOnDisk()) {
             chooser.setInitialDirectory(active.getRootPath().toFile());
@@ -269,12 +312,14 @@ public class DirectoryManagerWindow {
 
         Path root = selected.toPath();
 
+        // 校验
         String error = DirectoryUtils.validateRootDirectory(root);
         if (error != null) {
             showAlert(Alert.AlertType.ERROR, L.t("s_5602bb851c"), error);
             return;
         }
 
+        // 检查是否已经添加过
         for (GameDirectory d : config.getGameDirectories()) {
             if (d.getRootPathString() != null
                     && d.getRootPathString().equalsIgnoreCase(root.toString())) {
@@ -293,6 +338,7 @@ public class DirectoryManagerWindow {
             return;
         }
 
+        // 立刻创建隐藏数据文件夹，让用户能看到效果
         try {
             prepareStorage(added);
         } catch (Exception e) {
@@ -307,6 +353,13 @@ public class DirectoryManagerWindow {
         refreshList();
     }
 
+    /**
+     * 准备该目录的启动器辅助数据文件夹
+     *
+     * 只创建 .mc_launcher（隐藏）用于放缓存与日志。
+     * 游戏自己的子目录（versions/libraries/assets/mods/saves）
+     * 会在实际下载或启动时按需创建在**根目录**下。
+     */
     private void prepareStorage(GameDirectory d) throws Exception {
         Path meta = d.getLauncherDataPath();
 
@@ -316,6 +369,9 @@ public class DirectoryManagerWindow {
                 meta, DirectoryUtils.isHidden(meta));
     }
 
+    /**
+     * 重命名
+     */
     private void rename(GameDirectory d) {
         com.mclauncher.ui.component.MessageDialog.prompt(
                 modalHost,
@@ -332,6 +388,9 @@ public class DirectoryManagerWindow {
                 });
     }
 
+    /**
+     * 移除（仅从列表移除，不删磁盘文件）
+     */
     private void remove(GameDirectory d) {
         com.mclauncher.ui.component.MessageDialog.confirm(
                 modalHost,
@@ -376,6 +435,11 @@ public class DirectoryManagerWindow {
         });
     }
 
+    /**
+     * 提示框
+     *
+     * 参数保留 Alert.AlertType，方便调用处写语义；内部映射到内嵌消息弹窗。
+     */
     private void showAlert(Alert.AlertType type, String title, String content) {
         if (type == Alert.AlertType.ERROR) {
             com.mclauncher.ui.component.MessageDialog.error(modalHost, title, content);

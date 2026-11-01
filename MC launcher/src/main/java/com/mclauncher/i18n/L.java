@@ -12,10 +12,25 @@ import java.util.Locale;
 import java.util.Properties;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+/**
+ * 界面文案
+ *
+ * 用法：{@code L.t("download.search")}，带参数时 {@code L.t("error.http", 404)}。
+ *
+ * <h3>为什么不用 ResourceBundle</h3>
+ * ResourceBundle 对文件编码、缺失键回退的规则很绕（尤其 JDK 9 前后的差异），
+ * 而且切换语言后已经构建好的界面不会自己更新。这里用自己的实现：
+ * <ul>
+ *   <li>properties 文件统一按 UTF-8 读取</li>
+ *   <li>缺失的键 → 回退到中文 → 仍没有就返回键名本身（能一眼看出漏翻）</li>
+ *   <li>{@link #addListener} 注册回调，切换语言后界面可以即时重建</li>
+ * </ul>
+ */
 public final class L {
 
     private static final Logger logger = LoggerFactory.getLogger(L.class);
 
+    /** 支持的语言 */
     public enum Lang {
         ZH_CN("zh_CN", "简体中文"),
         EN_US("en_US", "English");
@@ -40,17 +55,20 @@ public final class L {
 
     private static volatile Lang current = Lang.ZH_CN;
 
+    /** 语言码 -> 文案表 */
     private static final java.util.Map<String, Properties> BUNDLES = new java.util.HashMap<>();
 
+    /** 来自配置的自定义覆盖（可放服务端下发的文案） */
     private static final java.util.Map<String, String> OVERRIDES = new java.util.concurrent.ConcurrentHashMap<>();
 
     private static final List<Runnable> LISTENERS = new CopyOnWriteArrayList<>();
 
     private L() {}
 
+    /** 取一条文案 */
     public static String t(String key) {
-
-        
+        // 静态初始化顺序：Lang 枚举的构造可能早于本类的字段初始化，
+        // 那期间 OVERRIDES/BUNDLES 还是 null —— 必须容忍。
         if (key == null) {
             return "";
         }
@@ -67,8 +85,8 @@ public final class L {
     private static String lookup(String key) {
         java.util.Map<String, Properties> bundles = BUNDLES;
         if (bundles == null) {
-
-            
+            // 静态初始化尚未完成（别的类在初始化期间就调用了 t()）。
+            // 直接同步读取，不依赖静态块的执行顺序。
             Properties early = readBundle(current);
             if (early == null) {
                 return key;
@@ -84,7 +102,7 @@ public final class L {
                 return unescapeNewlines(s);
             }
         }
-
+        // 回退到中文：宁可显示中文，也不要显示 key
         Properties zh = bundles.get(Lang.ZH_CN.code);
         if (zh != null && current != Lang.ZH_CN) {
             String s = zh.getProperty(key);
@@ -96,6 +114,9 @@ public final class L {
         return key;
     }
 
+    /**
+     * 带参数的文案，{@code {0}} {@code {1}} 会被替换
+     */
     public static String t(String key, Object... args) {
         String s = t(key);
         if (args != null) {
@@ -106,6 +127,13 @@ public final class L {
         return s;
     }
 
+    /**
+     * 把文案里的字面 \\n 转成真实换行
+     *
+     * properties 里写单个反斜杠 + n 时，Properties.load 已经还原成换行了；
+     * 但被误写成两个反斜杠时，读出来就是字面两个字符（反斜杠 + n），
+     * 界面会直接显示成那样。这里统一兜底。
+     */
     private static String unescapeNewlines(String s) {
         if (s == null || s.indexOf(BS_SLASH) < 0) {
             return s;
@@ -114,12 +142,15 @@ public final class L {
                 .replace(String.valueOf(BS_SLASH) + "t", "\t");
     }
 
+    /** 单个反斜杠字符（避免在源码里写转义，容易出错） */
     private static final char BS_SLASH = 92;
 
+    /** 当前语言 */
     public static Lang lang() {
         return current;
     }
 
+    /** 按系统区域猜一个默认语言 */
     public static Lang detectSystemLanguage() {
         Locale l = Locale.getDefault();
         if (l != null && "zh".equalsIgnoreCase(l.getLanguage())) {
@@ -128,6 +159,11 @@ public final class L {
         return Lang.EN_US;
     }
 
+    /**
+     * 加载某语言的文案表
+     *
+     * @return 是否加载成功
+     */
     public static boolean load(Lang lang) {
         if (BUNDLES == null) {
             return false;
@@ -143,6 +179,7 @@ public final class L {
         return true;
     }
 
+    /** 从 classpath 读一份文案表；失败返回 null */
     private static Properties readBundle(Lang lang) {
         String path = "/i18n/messages_" + lang.code + ".properties";
         try (InputStream in = L.class.getResourceAsStream(path)) {
@@ -159,6 +196,11 @@ public final class L {
         }
     }
 
+    /**
+     * 切换语言
+     *
+     * 会通知所有监听者重建界面。
+     */
     public static void setLang(Lang lang) {
         if (lang == null || lang == current) {
             return;
@@ -175,6 +217,11 @@ public final class L {
         }
     }
 
+    /**
+     * 启动时设置语言，不触发界面重建回调
+     *
+     * 界面还没构建好，此时通知监听者没有意义。
+     */
     public static void setLangQuiet(Lang lang) {
         if (lang == null) {
             return;
@@ -183,12 +230,14 @@ public final class L {
         current = lang;
     }
 
+    /** 注册「语言切换」回调 */
     public static void addListener(Runnable r) {
         if (r != null) {
             LISTENERS.add(r);
         }
     }
 
+    /** 设置自定义覆盖（例如服务端下发的文案） */
     public static void setOverride(String key, String value) {
         if (key == null) {
             return;
@@ -200,6 +249,7 @@ public final class L {
         }
     }
 
+    /** 全部已加载的键（调试用） */
     public static List<String> keys() {
         Properties p = BUNDLES.get(current.code);
         return p == null ? new ArrayList<>() : new ArrayList<>(p.stringPropertyNames());

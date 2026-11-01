@@ -16,13 +16,29 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * 联机中转服务器
+ *
+ * 界面只列「服务器」，不列具体地址 —— 一台服务器可以配多个入口端口，
+ * 启动器自动挑一个能用的。
+ *
+ * <h3>两种接入方式</h3>
+ * <ul>
+ *   <li><b>HTTP</b>：直接暴露端口，用 JSON 申请房间</li>
+ *   <li><b>二进制</b>：纯 TCP，没有 HTTP 关键字。前面挂 WAF 的环境只能用它
+ *       （实测：发 {@code GET /hub} 会被 WAF 回 403）</li>
+ * </ul>
+ * AUTO 模式先试二进制，失败再退回 HTTP。
+ */
 public final class RelayServers {
 
     private static final org.slf4j.Logger logger =
             org.slf4j.LoggerFactory.getLogger(RelayServers.class);
 
+    /** 接入方式 */
     public enum Mode { HTTP, BINARY, AUTO }
 
+    /** 一个入口地址 */
     public static final class Endpoint {
         public final String host;
         public final int port;
@@ -38,12 +54,18 @@ public final class RelayServers {
         }
     }
 
+    /**
+     * 一台中转服务器
+     *
+     * 界面只展示 name；endpoints 是它可用的入口，用户看不到。
+     */
     public static final class Server {
         public final String id;
         public final String name;
         public final List<Endpoint> endpoints = new ArrayList<>();
         public final Mode mode;
 
+        /** 最近一次测得的延迟（毫秒）；-1 表示未测/不可用 */
         private volatile int latencyMs = -1;
 
         public Server(String id, String name, Mode mode) {
@@ -75,6 +97,9 @@ public final class RelayServers {
         }
     }
 
+    /**
+     * 内置服务器列表 —— 只列「服务器」，不列地址
+     */
     public static final Server[] ALL = {
             new Server("node1", "节点1", Mode.AUTO)
                     .add("39.106.60.15", 8080),
@@ -89,6 +114,13 @@ public final class RelayServers {
         return ALL[0];
     }
 
+    // ==================== 申请房间 ====================
+
+    /**
+     * 申请一个房间
+     *
+     * 依次尝试该服务器下的每个入口，第一个成功的就用它。
+     */
     public static Room request(Server server, String roomName) throws IOException {
         IOException last = null;
         for (Endpoint ep : server.endpoints) {
@@ -113,8 +145,8 @@ public final class RelayServers {
             case HTTP:
                 return requestHttp(ep, roomName);
             default:
-
-                
+                // AUTO：WAF 环境下 HTTP 必被拦，二进制是通用方式；
+                // 只认 HTTP 的旧服务端会回 400，这时再回退。
                 try {
                     return requestBinary(ep, roomName);
                 } catch (IOException e) {
@@ -124,11 +156,12 @@ public final class RelayServers {
         }
     }
 
+    /** 申请结果 */
     public static final class Room {
         public final String roomId;
         public final String token;
         public final int port;
-
+        /** 实际使用的入口（控制通道也从这里连） */
         public final Endpoint endpoint;
 
         Room(String roomId, String token, int port, Endpoint endpoint) {
@@ -139,6 +172,13 @@ public final class RelayServers {
         }
     }
 
+    // ==================== 延迟测试 ====================
+
+    /**
+     * 测试所有服务器的延迟（并行，最多等 3 秒）
+     *
+     * 结果写进各 Server 的 latencyMs。
+     */
     public static void measureLatencyAsync(Runnable onDone) {
         Thread t = new Thread(() -> {
             ExecutorService pool = Executors.newFixedThreadPool(Math.max(2, ALL.length));
@@ -163,6 +203,7 @@ public final class RelayServers {
         t.start();
     }
 
+    /** 测一台服务器：连它的第一个入口，算三次握手耗时 */
     private static int measureOne(Server s) {
         Endpoint ep = s.first();
         if (ep == null) {
@@ -176,11 +217,13 @@ public final class RelayServers {
                 int ms = (int) ((System.nanoTime() - t0) / 1_000_000);
                 best = Math.min(best, ms);
             } catch (IOException e) {
-
+                // 这一轮失败，继续
             }
         }
         return best == Integer.MAX_VALUE ? -1 : best;
     }
+
+    // ==================== 二进制 ====================
 
     private static Room requestBinary(Endpoint ep, String roomName) throws IOException {
         byte[] name = roomName.getBytes(StandardCharsets.UTF_8);
@@ -222,6 +265,8 @@ public final class RelayServers {
             throw new IOException("无法识别的响应: " + m);
         }
     }
+
+    // ==================== HTTP ====================
 
     private static Room requestHttp(Endpoint ep, String roomName) throws IOException {
         String url = "http://" + ep.host + ":" + ep.port + "/api/host";

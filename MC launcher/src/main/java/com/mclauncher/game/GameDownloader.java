@@ -1,5 +1,6 @@
 package com.mclauncher.game;
 
+
 import com.mclauncher.i18n.L;
 import com.google.gson.*;
 import com.mclauncher.network.BMCLApiClient;
@@ -17,6 +18,10 @@ import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
+/**
+ * 游戏下载管理器
+ * 负责下载游戏本体、库文件、资源文件
+ */
 public class GameDownloader {
 
     private static final Logger logger = LoggerFactory.getLogger(GameDownloader.class);
@@ -26,13 +31,16 @@ public class GameDownloader {
     private final Path gameDir;
     private final Gson gson;
 
+    // 进度回调
     private ProgressCallback callback;
     private volatile boolean cancelled = false;
 
+    // 下载统计
     private final AtomicInteger totalFiles = new AtomicInteger(0);
     private final AtomicInteger completedFiles = new AtomicInteger(0);
     private final AtomicInteger failedFiles = new AtomicInteger(0);
 
+    /** 本次 downloadVersion 是否有致命缺失（库 / natives / 资源）。 */
     private volatile boolean downloadFailed = false;
 
     public GameDownloader(BMCLApiClient apiClient, Path gameDir) {
@@ -42,16 +50,26 @@ public class GameDownloader {
         this.gson = new GsonBuilder().setPrettyPrinting().create();
     }
 
+    /**
+     * 设置进度回调
+     */
     public void setCallback(ProgressCallback callback) {
         this.callback = callback;
     }
 
+    /**
+     * 下载游戏版本
+     *
+     * @param versionId 版本 ID
+     * @return 是否成功
+     */
     public boolean downloadVersion(String versionId) {
         cancelled = false;
         downloadFailed = false;
         try {
             reportProgress(0, 100, L.t("s_a0a16feb25") + versionId);
 
+            // 1. 获取版本清单
             reportProgress(2, 100, L.t("s_7ff65f460d"));
             BMCLApiClient.VersionManifest manifest = apiClient.getVersionManifest();
 
@@ -67,10 +85,12 @@ public class GameDownloader {
                 throw new IOException("找不到版本: " + versionId);
             }
 
+            // 2. 获取版本详细 JSON
             reportProgress(5, 100, L.t("s_afd33fb63d"));
             String versionJson = apiClient.getVersionDetailJson(versionInfo.getUrl());
             VersionInfo info = gson.fromJson(versionJson, VersionInfo.class);
 
+            // 3. 保存版本 JSON
             Path versionDir = gameDir.resolve("versions").resolve(versionId);
             Files.createDirectories(versionDir);
 
@@ -78,21 +98,25 @@ public class GameDownloader {
             Files.writeString(versionJsonPath, versionJson, StandardCharsets.UTF_8);
             logger.info("版本 JSON 已保存: {}", versionJsonPath);
 
+            // 4. 下载客户端 JAR
             reportProgress(10, 100, L.t("s_9a265de912"));
             downloadClientJar(versionId, versionDir, info);
 
+            // 5. 下载库文件
             reportProgress(40, 100, L.t("s_173b5acb54"));
             downloadLibraries(info);
 
+            // 6. 解压 Natives
             reportProgress(70, 100, L.t("s_407f10aec4"));
             downloadNativeLibraries(info);
             extractNatives(info, versionDir);
 
+            // 7. 下载资源文件
             reportProgress(80, 100, L.t("s_454d067676"));
             downloadAssets(info);
 
             if (downloadFailed) {
-
+                // 缺库 / 缺 natives / 缺资源，游戏起来必然崩，不能报成功
                 logger.error("版本 {} 下载不完整（失败文件数 {}）", versionId, failedFiles.get());
                 reportError("下载不完整: 有 " + failedFiles.get() + " 个文件下载失败，请重试");
                 return false;
@@ -109,10 +133,14 @@ public class GameDownloader {
         }
     }
 
+    /**
+     * 下载客户端 JAR
+     */
     private void downloadClientJar(String versionId, Path versionDir, VersionInfo info)
             throws IOException {
         Path jarPath = versionDir.resolve(versionId + ".jar");
 
+        // 优先使用版本 JSON 中的 URL
         String downloadUrl = null;
         String expectedSha1 = null;
         long expectedSize = -1;
@@ -120,8 +148,8 @@ public class GameDownloader {
         if (info.getDownloads() != null && info.getDownloads().getClient() != null) {
             downloadUrl = info.getDownloads().getClient().getUrl();
             expectedSha1 = info.getDownloads().getClient().getSha1();
-
-            
+            // 版本 JSON 里有客户端 JAR 的确切大小，传下去可省一次探测往返
+            // 并让大文件直接走多线程分块下载
             expectedSize = info.getDownloads().getClient().getSize();
             if (downloadUrl != null) {
                 downloadUrl = apiClient.convertToMirror(downloadUrl);
@@ -132,6 +160,7 @@ public class GameDownloader {
             downloadUrl = apiClient.getClientDownloadUrl(versionId);
         }
 
+        // 已存在且校验通过 -> 跳过
         if (Files.exists(jarPath) && Files.size(jarPath) > 0) {
             if (expectedSha1 == null || expectedSha1.isBlank()
                     || expectedSha1.equalsIgnoreCase(FileUtils.sha1(jarPath))) {
@@ -172,6 +201,7 @@ public class GameDownloader {
             throw new IOException("客户端 JAR 下载失败: " + result.getErrorMessage());
         }
 
+        // 校验
         if (expectedSha1 != null && !expectedSha1.isBlank()) {
             String actual = FileUtils.sha1(jarPath);
             if (!expectedSha1.equalsIgnoreCase(actual)) {
@@ -181,6 +211,9 @@ public class GameDownloader {
         }
     }
 
+    /**
+     * 下载库文件
+     */
     private void downloadLibraries(VersionInfo info) throws IOException {
         if (info.getLibraries() == null || info.getLibraries().isEmpty()) {
             logger.info("没有需要下载的库文件");
@@ -201,12 +234,13 @@ public class GameDownloader {
 
         logger.info("需要下载 {} 个库文件", applicableLibraries.size());
 
-        
-
-        
-
-        
-
+        // 并发下载库文件。
+        //
+        // 线程池可以开得比较大，因为真正限制并发的是 DownloadThrottle：
+        // - 它按 host 独立限流（每站初始 4，上限 16）
+        // - 全局总上限 64
+        // 文件会被轮询分配到 5 个高校镜像站，因此总并发能叠加到几十，
+        // 而每个站实际承受的并发仍在其安全范围内。
         ExecutorService executor = Executors.newFixedThreadPool(32);
         List<Future<Boolean>> futures = new ArrayList<>();
 
@@ -214,6 +248,7 @@ public class GameDownloader {
             futures.add(executor.submit(() -> downloadLibrary(library)));
         }
 
+        // 等待所有下载完成
         int libraryFailed = 0;
         for (Future<Boolean> future : futures) {
             try {
@@ -221,7 +256,7 @@ public class GameDownloader {
                     libraryFailed++;
                 }
             } catch (TimeoutException e) {
-
+                // 单个文件超时不应卡住整个下载流程
                 logger.warn("库文件下载超时（已取消）");
                 future.cancel(true);
                 libraryFailed++;
@@ -235,10 +270,21 @@ public class GameDownloader {
 
         logger.info("库文件下载完成: {}/{}", completedFiles.get(), totalFiles.get());
 
-        
+        // 库文件 / natives 缺失时游戏必然启动失败（UnsatisfiedLinkError），
+        // 必须让上层知道，不能静默当作下载成功
         downloadFailed = failedFiles.get() > 0 || libraryFailed > 0;
     }
 
+    /**
+     * 下载 natives JAR（downloads.classifiers 里的独立文件）。
+     *
+     * 旧版（≈1.13 以前，LWJGL 2）的 natives 不在主 JAR 里，而是
+     * downloads.classifiers["natives-windows"]（以及 -64）。以前只下载主 JAR，
+     * extractNatives 找不到文件就静默跳过，启动后 lwjgl.dll 缺失直接崩溃。
+     *
+     * 新格式（LWJGL 3.3+）没有 classifier 依赖，对应的库名本身就以
+     * :natives-xxx 结尾，会作为普通库被 downloadLibrary 下载，这里不处理。
+     */
     private void downloadNativeLibraries(VersionInfo info) {
         if (info.getLibraries() == null) {
             return;
@@ -259,6 +305,7 @@ public class GameDownloader {
                 continue;
             }
 
+            // 有 downloads.classifiers 时以其中实际存在的路径 / 地址 / 哈希为准
             VersionInfo.DownloadInfo target = null;
             String mavenPath = null;
             if (library.getDownloads() != null && library.getDownloads().getClassifiers() != null) {
@@ -348,6 +395,12 @@ public class GameDownloader {
         }
     }
 
+    /**
+     * 按当前平台与架构选择 natives classifier。
+     *
+     * 老版本 JSON 写的是 "natives-windows"，64 位与 32 位各一个 classifier
+     * （natives-windows-64 / natives-windows-32）；优先取与架构匹配的那个。
+     */
     private String pickNativeClassifier(VersionInfo.Library library) {
         String base = library.getNatives().get(getCurrentOsName());
         if (base == null || base.isBlank()) {
@@ -360,7 +413,7 @@ public class GameDownloader {
         Map<String, VersionInfo.DownloadInfo> classifiers =
                 downloads != null ? downloads.getClassifiers() : null;
         if (classifiers != null && !classifiers.isEmpty()) {
-
+            // 以 JSON 中实际存在的 key 为准，不硬拼
             if (classifiers.containsKey(base + archSuffix)) {
                 return base + archSuffix;
             }
@@ -371,20 +424,23 @@ public class GameDownloader {
             if (classifiers.containsKey(base + other)) {
                 return base + other;
             }
-
+            // key 不以 base 开头时（极少见），取第一个 windows 相关的
             for (String key : classifiers.keySet()) {
                 if (key.contains(getCurrentOsName())) {
                     return key;
                 }
             }
         }
-
+        // 没有 classifiers 信息：按 Mojang 的命名习惯推导
         if (base.contains("${arch}")) {
             return base.replace("${arch}", is64 ? "64" : "32");
         }
         return base + archSuffix;
     }
 
+    /**
+     * 下载单个库文件
+     */
     private boolean downloadLibrary(VersionInfo.Library library) {
         if (cancelled) return false;
 
@@ -397,10 +453,11 @@ public class GameDownloader {
                 failedFiles.incrementAndGet();
                 return false;
             }
-
-            
+            // 主 JAR 只负责进入 classpath，不负责解压 natives；
+            // natives 是 downloads.classifiers 里的单独 JAR，由 downloadNativeLibraries 处理
             Path libraryPath = gameDir.resolve("libraries").resolve(mavenPath);
 
+            // 获取期望的 SHA-1（用于完整性校验）
             String expectedSha1 = null;
             String downloadUrl = null;
 
@@ -410,6 +467,7 @@ public class GameDownloader {
                 downloadUrl = artifact.getUrl();
             }
 
+            // 已存在且校验通过 -> 跳过
             if (Files.exists(libraryPath) && Files.size(libraryPath) > 0) {
                 if (expectedSha1 == null || expectedSha1.isBlank()
                         || expectedSha1.equalsIgnoreCase(FileUtils.sha1(libraryPath))) {
@@ -417,28 +475,30 @@ public class GameDownloader {
                     updateLibraryProgress(library.getName());
                     return true;
                 }
-
+                // 校验不通过，删除后重新下载
                 logger.warn("库文件校验失败，重新下载: {}", library.getName());
                 Files.deleteIfExists(libraryPath);
             }
 
+            // 上报当前文件信息，供 UI 展示
             String displayName = library.getName();
             int remaining = Math.max(0, totalFiles.get() - completedFiles.get());
             reportDetail(displayName, 0, remaining);
 
-            
-
-            
-
-            
-
-            
-
+            // ===== 确定下载地址 =====
+            //
+            // 优先级：
+            // 1. 高校镜像池（实测 3-8 MB/s，无连接数限流）
+            // 2. BMCLAPI 官方节点 / 官方源（兜底）
+            //
+            // 注意：镜像池的路径是「根路径 + Maven 坐标」（无 /maven/ 前缀），
+            // 与 BMCLAPI 官方节点的结构不同。镜像站不支持 fabric-meta 等
+            // API，但库文件和 assets 都支持。
             Downloader.DownloadResult result = null;
             MirrorPool mirrorPool = MirrorPool.getInstance();
 
             if (mirrorPool.isEnabled()) {
-
+                // 轮询选取镜像，把不同文件分散到不同站点
                 MirrorPool.Mirror mirror = mirrorPool.next();
                 if (mirror != null) {
                     String mirrorUrl = mirrorPool.buildUrl(mirror, mavenPath);
@@ -458,6 +518,7 @@ public class GameDownloader {
                 }
             }
 
+            // 兜底：BMCLAPI 官方节点 或 官方源
             if (result == null || !result.isSuccess()) {
                 if (downloadUrl == null || downloadUrl.isBlank()) {
                     downloadUrl = apiClient.getLibraryDownloadUrl(mavenPath);
@@ -467,6 +528,7 @@ public class GameDownloader {
                 result = downloader.download(downloadUrl, libraryPath, speedListener(displayName));
             }
 
+            // 最后兜底：libraries.minecraft.net
             if (!result.isSuccess()) {
                 String fallback = "https://libraries.minecraft.net/" + mavenPath;
                 if (!fallback.equals(downloadUrl)) {
@@ -480,6 +542,7 @@ public class GameDownloader {
                 return false;
             }
 
+            // 校验哈希
             if (expectedSha1 != null && !expectedSha1.isBlank()) {
                 String actualSha1 = FileUtils.sha1(libraryPath);
                 if (!expectedSha1.equalsIgnoreCase(actualSha1)) {
@@ -502,6 +565,9 @@ public class GameDownloader {
         }
     }
 
+    /**
+     * 更新库文件下载进度
+     */
     private void updateLibraryProgress(String libraryName) {
         int completed = completedFiles.get();
         int total = totalFiles.get();
@@ -511,6 +577,9 @@ public class GameDownloader {
         }
     }
 
+    /**
+     * 构建带速度上报的下载监听器（避免在多处重复写匿名类）
+     */
     private Downloader.DownloadListener speedListener(String displayName) {
         return new Downloader.DownloadListener() {
             public void onStart() {}
@@ -528,6 +597,9 @@ public class GameDownloader {
         };
     }
 
+    /**
+     * 判断库文件是否适用于当前平台
+     */
     private boolean isLibraryApplicable(VersionInfo.Library library) {
         if (library.getRules() == null || library.getRules().isEmpty()) {
             return true;
@@ -568,6 +640,9 @@ public class GameDownloader {
         return allowed;
     }
 
+    /**
+     * 获取当前操作系统名称（Minecraft 格式）
+     */
     private String getCurrentOsName() {
         String os = System.getProperty("os.name").toLowerCase();
         if (os.contains("win")) return "windows";
@@ -575,6 +650,9 @@ public class GameDownloader {
         return "linux";
     }
 
+    /**
+     * 获取当前架构
+     */
     private String getCurrentArch() {
         String arch = System.getProperty("os.arch").toLowerCase();
         if (arch.contains("64")) {
@@ -583,6 +661,9 @@ public class GameDownloader {
         return "x86";
     }
 
+    /**
+     * 解压 Natives 文件
+     */
     private void extractNatives(VersionInfo info, Path versionDir) throws IOException {
         Path nativesDir = versionDir.resolve("natives");
         Files.createDirectories(nativesDir);
@@ -598,21 +679,24 @@ public class GameDownloader {
                 continue;
             }
 
+            // 获取当前平台的 natives classifier
             String classifier = library.getNatives().get(currentOs);
             if (classifier == null) {
                 continue;
             }
 
+            // 解析 natives JAR 路径
             String mavenPath = getNativesMavenPath(library.getName(), classifier);
             Path nativesJar = gameDir.resolve("libraries").resolve(mavenPath);
 
             if (!Files.exists(nativesJar)) {
                 logger.warn("Natives JAR 不存在: {}", nativesJar);
-
+                // downloadNativeLibraries 已经尝试下载；这里仍缺说明下载失败
                 downloadFailed = true;
                 continue;
             }
 
+            // 解压（排除 META-INF）
             try {
                 extractNativesJar(nativesJar, nativesDir, library.getExtract());
                 logger.info("解压 Natives 完成: {}", nativesJar.getFileName());
@@ -623,6 +707,9 @@ public class GameDownloader {
         }
     }
 
+    /**
+     * 解压 Natives JAR，排除指定文件
+     */
     private void extractNativesJar(Path jarPath, Path destDir, VersionInfo.Extract extract)
             throws IOException {
         List<String> excludes = new ArrayList<>();
@@ -637,7 +724,7 @@ public class GameDownloader {
 
             java.util.zip.ZipEntry entry;
             while ((entry = zis.getNextEntry()) != null) {
-
+                // 检查是否需要排除
                 boolean skip = false;
                 for (String exclude : excludes) {
                     if (entry.getName().startsWith(exclude) || entry.getName().equals(exclude)) {
@@ -664,6 +751,9 @@ public class GameDownloader {
         }
     }
 
+    /**
+     * 获取 Natives 的 Maven 路径
+     */
     private String getNativesMavenPath(String libraryName, String classifier) {
         String[] parts = libraryName.split(":");
         if (parts.length >= 3) {
@@ -671,6 +761,7 @@ public class GameDownloader {
             String artifact = parts[1];
             String version = parts[2];
 
+            // 处理 version@jar 格式
             if (version.contains("@")) {
                 version = version.split("@")[0];
             }
@@ -681,6 +772,9 @@ public class GameDownloader {
         return libraryName;
     }
 
+    /**
+     * 下载资源文件
+     */
     private void downloadAssets(VersionInfo info) throws IOException {
         if (info.getAssetIndex() == null) {
             logger.info("没有资源索引，跳过资源下载");
@@ -688,7 +782,7 @@ public class GameDownloader {
         }
 
         String assetIndexId = info.getAssetIndex().getId();
-
+        // id 来自远程 JSON，会被拼进文件名：拒绝穿越与非法字符
         if (assetIndexId == null || !assetIndexId.matches("[A-Za-z0-9._\\-]+") || assetIndexId.contains("..")) {
             downloadFailed = true;
             throw new IOException("资源索引 ID 非法: " + assetIndexId);
@@ -700,6 +794,7 @@ public class GameDownloader {
         Files.createDirectories(indexesDir);
         Files.createDirectories(objectsDir);
 
+        // 下载资源索引
         Path indexFile = indexesDir.resolve(assetIndexId + ".json");
 
         boolean indexOk = Files.exists(indexFile) && Files.size(indexFile) > 0;
@@ -723,6 +818,7 @@ public class GameDownloader {
             }
         }
 
+        // 解析资源索引
         String indexJson = Files.readString(indexFile, StandardCharsets.UTF_8);
         JsonObject indexObj = JsonParser.parseString(indexJson).getAsJsonObject();
         JsonObject objects = indexObj.getAsJsonObject("objects");
@@ -734,6 +830,7 @@ public class GameDownloader {
 
         logger.info("需要下载 {} 个资源文件", objects.size());
 
+        // 收集缺失的资源
         List<String> missingHashes = new ArrayList<>();
         for (Map.Entry<String, JsonElement> entry : objects.entrySet()) {
             JsonObject obj = entry.getValue().getAsJsonObject();
@@ -753,11 +850,12 @@ public class GameDownloader {
             return;
         }
 
-        
-
-        
-
-        
+        // 并发下载资源文件。
+        //
+        // 资源文件有几千个，是总耗时的大头。这里开到 48 个线程，
+        // 实际并发由 DownloadThrottle 控制：
+        // 全局封顶 64、每站封顶 16，文件轮询分发到 5 个镜像站，
+        // 因此每个站承受的并发约 10-13，仍在其安全范围内。
         ExecutorService executor = Executors.newFixedThreadPool(48);
         List<Future<Boolean>> futures = new ArrayList<>();
 
@@ -773,7 +871,8 @@ public class GameDownloader {
                     Path objectPath = objectsDir.resolve(prefix).resolve(hash);
                     Files.createDirectories(objectPath.getParent());
 
-                    
+                    // 优先走高校镜像池（assets 路径是扁平的 /assets/<hash>），
+                    // 失败再回退 BMCLAPI 官方节点（/assets/<前2位>/<hash>）
                     Downloader.DownloadResult result = null;
                     MirrorPool pool = MirrorPool.getInstance();
 
@@ -799,13 +898,15 @@ public class GameDownloader {
                         result = downloader.download(url, objectPath, null);
                     }
 
-                    
+                    // 资源文件的名字就是它的 SHA-1，可直接用于校验完整性；
+                    // 损坏的资源会导致游戏启动时崩溃，因此这里必须验证
                     if (result.isSuccess()) {
                         String actual = FileUtils.sha1(objectPath);
                         if (!hash.equalsIgnoreCase(actual)) {
                             logger.debug("资源文件校验失败，重试: {}", hash);
                             Files.deleteIfExists(objectPath);
 
+                            // 回退到官方资源服务器
                             String fallback = "https://resources.download.minecraft.net/"
                                     + prefix + "/" + hash;
                             Downloader.DownloadResult retry =
@@ -825,7 +926,7 @@ public class GameDownloader {
                     if (completed % 20 == 0 || completed == totalAssets) {
                         int percent = 80 + (int) ((double) completed / totalAssets * 18);
                         reportProgress(percent, 100, L.t("s_e5a10cd726") + completed + "/" + totalAssets + ")");
-
+                        // 上报剩余数量，让用户知道还有多少
                         reportDetail(null, 0, totalAssets - completed);
                     }
 
@@ -858,44 +959,69 @@ public class GameDownloader {
         executor.shutdown();
 
         if (assetFailed.get() > 0) {
-
+            // 资源缺失会导致游戏在加载界面崩溃或贴图缺失，必须上报
             failedFiles.addAndGet(assetFailed.get());
             downloadFailed = true;
         }
         if (cancelled && notOk > 0) {
-
+            // 取消下载不算失败，交给上层按取消处理
             logger.info("资源下载被取消，剩余 {} 个", notOk);
         }
     }
 
+    /**
+     * 取消下载
+     */
     public void cancel() {
         cancelled = true;
         downloader.cancel();
     }
 
+    /**
+     * 报告进度
+     */
     private void reportProgress(int percent, int total, String message) {
         if (callback != null) {
             callback.onProgress(percent, total, message);
         }
     }
 
+    /**
+     * 报告错误
+     */
     private void reportError(String message) {
         if (callback != null) {
             callback.onError(message);
         }
     }
 
+    /**
+     * 关闭下载器
+     */
     public void shutdown() {
         downloader.shutdown();
     }
 
+    /**
+     * 进度回调接口
+     */
     public interface ProgressCallback {
         void onProgress(int current, int total, String message);
         void onError(String error);
 
+        /**
+         * 详细进度（用于 UI 展示当前文件 / 速度 / 剩余数量）
+         *
+         * @param currentFile 当前正在下载的文件名（可为 null）
+         * @param speed       速度（字节/秒），0 表示未知
+         * @param remaining   剩余待下载文件数，-1 表示未知
+         */
         default void onDetail(String currentFile, long speed, int remaining) {}
     }
 
+    /**
+     * 报告详细进度
+     */
     private void reportDetail(String currentFile, long speed, int remaining) {
         if (callback != null) {
             callback.onDetail(currentFile, speed, remaining);

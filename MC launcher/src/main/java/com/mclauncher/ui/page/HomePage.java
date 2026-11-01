@@ -1,5 +1,6 @@
 package com.mclauncher.ui.page;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.auth.Account;
 import com.mclauncher.auth.AccountManager;
@@ -23,6 +24,12 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
+/**
+ * 主页
+ *
+ * 内容：公告 + 启动游戏按钮
+ * 玩家进入启动器后看到的第一屏。
+ */
 public class HomePage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(HomePage.class);
@@ -33,8 +40,10 @@ public class HomePage implements Page {
     private final Consumer<String> statusConsumer;
     private final Consumer<String> logConsumer;
 
+    /** 内嵌弹窗宿主（由 MainWindow 注入，用于更新提示等） */
     private com.mclauncher.ui.component.ModalHost modalHost;
 
+    /** 是否已做过启动更新检测（每次运行只查一次，避免切回主页反复弹窗） */
     private boolean updateChecked = false;
 
     private BorderPane root;
@@ -48,6 +57,7 @@ public class HomePage implements Page {
     private Label hintLabel;
     private Label stateLabel;
 
+    /** 版本列表（下拉框展示的是格式化文本，这里保存原始 ID） */
     private List<String> versionIds = new java.util.ArrayList<>();
 
     public HomePage(ConfigManager config, AccountManager accountManager,
@@ -74,6 +84,7 @@ public class HomePage implements Page {
         return root;
     }
 
+    /** 由 MainWindow 注入内嵌弹窗宿主 */
     public void setModalHost(com.mclauncher.ui.component.ModalHost host) {
         this.modalHost = host;
     }
@@ -84,12 +95,19 @@ public class HomePage implements Page {
         refreshAccounts();
         refreshState();
 
+        // 首次显示主页时检查更新（后台进行，不阻塞界面）
         checkUpdateOnStartup();
     }
 
+    /**
+     * 启动时自动检查更新
+     *
+     * 有新版则弹出内嵌面板（用户可选择立即更新 / 稍后）。
+     * 整个检查在后台线程执行，失败静默忽略（不打扰用户）。
+     */
     private void checkUpdateOnStartup() {
         if (updateChecked) {
-            return;     
+            return;     // 每次运行只查一次
         }
         updateChecked = true;
 
@@ -112,9 +130,9 @@ public class HomePage implements Page {
                         com.mclauncher.ui.window.UpdateDialog dialog =
                                 new com.mclauncher.ui.window.UpdateDialog(
                                         modalHost, info, statusConsumer)
-
+                                        // 退出前把配置落盘，避免用户刚改的设置丢失
                                         .setBeforeRestart(() -> config.forceSave())
-
+                                        // 游戏在跑时不允许重启（会把游戏一起带走）
                                         .setGameRunningCheck(() -> gameLauncher.isRunning());
                         dialog.show();
                     });
@@ -122,20 +140,24 @@ public class HomePage implements Page {
                     logger.info("启动检查：{}", info.describe());
                 }
             } catch (Exception e) {
-
+                // 检查更新失败不影响使用，只记日志
                 logger.debug("启动时检查更新失败: {}", e.getMessage());
             }
         }, "update-check").start();
     }
 
+    // ==================== UI ====================
+
     private BorderPane buildUI() {
         BorderPane pane = new BorderPane();
         pane.getStyleClass().add("bg-main");
 
-        
+        // 间距与内边距都收紧：主页要一屏放下、不需要滚动。
+        // 原先是 VBox(20) + Insets(28)，光骨架就吃掉近百像素。
         VBox content = new VBox(12);
         content.setPadding(new Insets(18, 22, 16, 22));
 
+        // ---- 顶部：标题 ----
         VBox header = new VBox(2);
         Label title = new Label(L.t("s_a5d9fdec5a"));
         title.getStyleClass().add("page-title");
@@ -145,10 +167,13 @@ public class HomePage implements Page {
 
         header.getChildren().addAll(title, subtitle);
 
+        // ---- 公告区 ----
         VBox announcement = buildAnnouncement();
 
+        // ---- 启动区（核心） ----
         VBox launchArea = buildLaunchArea();
 
+        // ---- 日志面板（默认隐藏） ----
         logPanel = buildLogPanel();
         logPanel.setVisible(false);
         logPanel.setManaged(false);
@@ -157,17 +182,25 @@ public class HomePage implements Page {
 
         ScrollPane scroll = new ScrollPane(content);
         scroll.setFitToWidth(true);
-
+        // 内容比视口矮时不显示滚动条，避免出现一条没用的灰条
         scroll.setHbarPolicy(ScrollPane.ScrollBarPolicy.NEVER);
         scroll.setVbarPolicy(ScrollPane.ScrollBarPolicy.AS_NEEDED);
-
-        
+        // 用样式类而非内联样式：内联会硬编码颜色，导致切换浅色主题时
+        // 这块区域仍是深色（出现一条深色带）
         scroll.getStyleClass().add("bg-main");
 
         pane.setCenter(scroll);
         return pane;
     }
 
+    /**
+     * 公告卡片
+     *
+     * 注意：这里用 Label 而不是 Text。
+     * JavaFX 的 Text 节点只认 CSS 的 `-fx-fill`，对 `-fx-text-fill` 无效 ——
+     * 之前用 Text 导致文字没被主题着色，在深色背景上显示为黑色，几乎看不清。
+     * Label 正常响应 `-fx-text-fill`，并能自动换行。
+     */
     private VBox buildAnnouncement() {
         VBox box = new VBox(6);
         box.getStyleClass().add("announcement-box");
@@ -177,8 +210,9 @@ public class HomePage implements Page {
 
         VBox body = new VBox(2);
 
-        
-
+        // 文案保持简短：主页要能一屏放下，不需要滚动。
+        // 原来的三条各 60 字左右，在 860px 宽度下会折成 6 行，
+        // 是页面超高、必须滚动的主因。
         String[] lines = {
             L.t("s_4788a2b966"),
             L.t("s_2f6eb44ce7")
@@ -196,14 +230,18 @@ public class HomePage implements Page {
         return box;
     }
 
+    /**
+     * 启动区：版本选择 + 账号选择 + 启动按钮
+     */
     private VBox buildLaunchArea() {
-
+        // 间距收紧到 10：卡片内部原本 16px 的行距在主页显得松散
         VBox box = new VBox(10);
         box.getStyleClass().add("card");
 
         Label title = new Label(L.t("s_2857a3704a"));
         title.getStyleClass().add("card-title");
 
+        // 版本选择
         HBox versionRow = new HBox(12);
         versionRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -221,6 +259,7 @@ public class HomePage implements Page {
 
         versionRow.getChildren().addAll(versionLabel, versionCombo, versionInfoLabel);
 
+        // 账号选择
         HBox accountRow = new HBox(12);
         accountRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -238,14 +277,17 @@ public class HomePage implements Page {
 
         accountRow.getChildren().addAll(accountLabel, accountCombo, accountInfoLabel);
 
-        
+        // 注意：主页刻意**不显示** Java 环境信息。
+        // Java 检测结果在「设置 → Java 环境」里查看 —— 那里能看全所有
+        // 已安装版本、架构和安装入口。主页塞一行只显示单个版本号，
+        // 信息量有限反而占地方。
 
-        
-
+        // 状态提示
         hintLabel = new Label("");
         hintLabel.getStyleClass().add("text-secondary");
         hintLabel.setWrapText(true);
 
+        // 启动按钮 + 日志开关
         HBox actionRow = new HBox(14);
         actionRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -276,6 +318,9 @@ public class HomePage implements Page {
         return box;
     }
 
+    /**
+     * 日志面板
+     */
     private VBox buildLogPanel() {
         VBox box = new VBox(8);
         box.getStyleClass().add("card");
@@ -286,10 +331,10 @@ public class HomePage implements Page {
         logArea = new TextArea();
         logArea.getStyleClass().add("log-area");
         logArea.setEditable(false);
-
-        
-
-        
+        // 140 而不是 220：展开日志面板后主页也不该超高。
+        // 实测主页默认 320px、可用 516px；日志面板约 180px，
+        // 140 的高度让展开后总高约 460px，仍在可视区内。
+        // 需要看更长的历史可以拉大窗口，或到 .mc_launcher/logs 看完整日志。
         logArea.setPrefHeight(140);
         logArea.setWrapText(false);
 
@@ -297,6 +342,11 @@ public class HomePage implements Page {
         return box;
     }
 
+    // ==================== 数据刷新 ====================
+
+    /**
+     * 刷新版本列表（读取本地 versions 目录）
+     */
     private void refreshVersions() {
         Path versionsDir = config.getGameDir().resolve("versions");
 
@@ -314,14 +364,15 @@ public class HomePage implements Page {
                     logger.debug("扫描版本目录失败: {}", e.getMessage());
                 }
             }
-
+            // 本地版本倒序（新的在前）
             result.sort((a, b) -> b.compareToIgnoreCase(a));
             return result;
         }).thenAccept(list -> Platform.runLater(() -> {
             versionIds = list;
             String previous = versionCombo.getSelectionModel().getSelectedItem();
 
-            
+            // 每次刷新都先清空提示，避免残留上一次的文案
+            // （此前非空分支不清空，导致「已安装 1.21.1」时仍显示「还没有安装任何游戏版本」）
             hintLabel.setText("");
 
             versionCombo.getItems().clear();
@@ -332,6 +383,7 @@ public class HomePage implements Page {
                 versionCombo.getItems().addAll(list);
                 versionCombo.setPromptText(L.t("s_81d81d95b2"));
 
+                // 恢复上次选择，否则选第一个
                 String last = config.getGameVersion();
                 if (previous != null && list.contains(previous)) {
                     versionCombo.getSelectionModel().select(previous);
@@ -345,6 +397,9 @@ public class HomePage implements Page {
         }));
     }
 
+    /**
+     * 刷新账号列表
+     */
     private void refreshAccounts() {
         List<Account> accounts = accountManager.getAllAccounts();
 
@@ -369,6 +424,10 @@ public class HomePage implements Page {
         }
     }
 
+
+    /**
+     * 刷新当前状态提示（是否可启动）
+     */
     private void refreshState() {
         if (stateLabel == null) {
             return;
@@ -412,6 +471,8 @@ public class HomePage implements Page {
         }
     }
 
+    // ==================== 交互 ====================
+
     private void onAccountSelected() {
         int idx = accountCombo.getSelectionModel().getSelectedIndex();
         List<Account> accounts = accountManager.getAllAccounts();
@@ -436,6 +497,7 @@ public class HomePage implements Page {
         launchButton.setDisable(true);
         launchButton.setText(L.t("s_a5b885735c"));
 
+        // 展开日志区
         logPanel.setVisible(true);
         logPanel.setManaged(true);
 
@@ -447,13 +509,15 @@ public class HomePage implements Page {
             launchButton.setDisable(false);
             refreshState();
 
-            
-
+            // 非 0 退出码通常是崩溃 —— 自动分析日志并给出原因。
+            // 放到后台线程：读日志 + 正则匹配可能要几百毫秒，
+            // 不能卡住 FX 线程。
             if (code != 0) {
                 analyzeCrashAsync();
             }
         }));
 
+        // 注入弹窗宿主，使 GameLauncher 能在 Java 不足时弹出下载进度
         gameLauncher.setModalHost(modalHost);
         String javaPath = config.getJavaPath();
 
@@ -474,10 +538,18 @@ public class HomePage implements Page {
                 }
             }
             refreshState();
-
+            // 启动流程可能自动下载了 Java，重新刷新主页 Java 状态
             }));
     }
 
+    /**
+     * 后台分析崩溃日志，然后弹窗告诉用户原因
+     *
+     * 设计取舍：
+     *   - 没识别出已知模式时**不弹窗**，只在日志区提示一句 —— 弹一个
+     *     "没分析出原因" 的框只会增加困惑
+     *   - 识别出多条时按级别排序，全部列出（玩家自己判断哪条最像）
+     */
     private void analyzeCrashAsync() {
         final java.nio.file.Path gameDir = config.getGameDir();
         if (gameDir == null) {
@@ -493,7 +565,7 @@ public class HomePage implements Page {
             }
         }).thenAccept(report -> Platform.runLater(() -> {
             if (report == null || !report.hasFinding()) {
-
+                // 没有已知模式：只记日志，不打扰用户
                 appendLog(L.t("s_3d37583f73"));
                 if (report != null && report.logSource != null) {
                     appendLog(L.t("s_eaaf3ab914") + report.logSource);
@@ -504,6 +576,9 @@ public class HomePage implements Page {
         }));
     }
 
+    /**
+     * 把分析结果渲染成弹窗
+     */
     private void showCrashReport(com.mclauncher.launcher.CrashAnalyzer.Report report) {
         if (modalHost == null) {
             return;
@@ -518,6 +593,7 @@ public class HomePage implements Page {
         head.setWrapText(true);
         content.getChildren().add(head);
 
+        // 最多展示 4 条，避免弹窗过长
         int shown = 0;
         for (com.mclauncher.launcher.CrashAnalyzer.Finding f : report.findings) {
             if (shown >= 4) {
@@ -547,6 +623,7 @@ public class HomePage implements Page {
 
             card.getChildren().addAll(title, detail, fix);
 
+            // 证据折叠在下面，字号小一点
             if (f.evidence != null && !f.evidence.isBlank()) {
                 Label ev = new Label(f.evidence);
                 ev.getStyleClass().add("text-muted");
@@ -582,7 +659,7 @@ public class HomePage implements Page {
                 try {
                     java.awt.Desktop.getDesktop().open(report.logSource.getParent().toFile());
                 } catch (Exception ignored) {
-
+                    // 打不开就算了
                 }
             });
             buttons.getChildren().add(openLog);
@@ -602,6 +679,9 @@ public class HomePage implements Page {
         modalHost.show(L.t("s_e5d8070f04"), scroll, null);
     }
 
+    /**
+     * 追加日志（供外部调用，如 GameLauncher 的输出）
+     */
     public void appendLog(String message) {
         if (logArea == null) {
             return;

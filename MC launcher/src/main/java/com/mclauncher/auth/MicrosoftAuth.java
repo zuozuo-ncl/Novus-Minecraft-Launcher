@@ -1,5 +1,6 @@
 package com.mclauncher.auth;
 
+
 import com.mclauncher.i18n.L;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -14,10 +15,19 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.*;
 
+/**
+ * 微软 OAuth 2.0 登录
+ * 使用设备代码流（Device Code Flow）
+ *
+ * 参考文档:
+ * - https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code
+ * - https://wiki.vg/Microsoft_Authentication_Scheme
+ */
 public class MicrosoftAuth {
 
     private static final Logger logger = LoggerFactory.getLogger(MicrosoftAuth.class);
 
+    // 微软 OAuth 端点（标准端点，不要修改）
     private static final String DEVICE_CODE_URL =
             "https://login.microsoftonline.com/consumers/oauth2/v2.0/devicecode";
     private static final String TOKEN_URL =
@@ -31,11 +41,13 @@ public class MicrosoftAuth {
     private static final String MC_PROFILE_URL =
             "https://api.minecraftservices.com/minecraft/profile";
 
+    // 作用域
     private static final String SCOPE = "XboxLive.signin offline_access";
 
     private final HttpClientUtils httpClient;
     private final Gson gson;
 
+    // 用户提供的 Azure Client ID
     private String clientId;
 
     public MicrosoftAuth() {
@@ -45,6 +57,10 @@ public class MicrosoftAuth {
                 .create();
     }
 
+    /**
+     * 设置 Azure Client ID
+     * 用户需要在 Azure Portal 注册应用后填写
+     */
     public void setClientId(String clientId) {
         this.clientId = clientId;
     }
@@ -53,6 +69,10 @@ public class MicrosoftAuth {
         return clientId;
     }
 
+    /**
+     * 步骤 1：请求设备代码
+     * 返回设备代码和用户验证 URL
+     */
     public DeviceCodeResponse requestDeviceCode() throws IOException {
         if (clientId == null || clientId.isEmpty()) {
             throw new IllegalStateException("未配置 Azure Client ID，请在设置中填写");
@@ -71,6 +91,13 @@ public class MicrosoftAuth {
         return deviceCode;
     }
 
+    /**
+     * 步骤 2：轮询等待用户完成授权
+     *
+     * @param deviceCode 设备代码响应
+     * @param callback   状态回调（用于 UI 显示）
+     * @return 微软 Token 响应
+     */
     public MicrosoftTokenResponse pollForToken(DeviceCodeResponse deviceCode, StatusCallback callback)
             throws IOException, InterruptedException {
 
@@ -101,19 +128,19 @@ public class MicrosoftAuth {
                     return token;
                 }
             } catch (IOException e) {
-
-                
-
+                // 优先解析响应体里的 JSON error 字段；解析不出来再退回字符串匹配。
+                // 注意：HttpClientUtils.postForm 已把响应体拼进异常消息，
+                // 否则 HTTP 400 的 authorization_pending 会被当成致命错误。
                 String errorCode = extractOAuthError(e.getMessage());
 
                 if ("authorization_pending".equals(errorCode)) {
-
+                    // 用户还未完成授权，继续轮询
                     if (callback != null) {
                         callback.onPending();
                     }
                     continue;
                 } else if ("slow_down".equals(errorCode)) {
-
+                    // 需要降低轮询频率（微软要求至少再加 5 秒）
                     interval += 5;
                     continue;
                 } else if ("expired_token".equals(errorCode)) {
@@ -130,6 +157,12 @@ public class MicrosoftAuth {
         throw new IOException("登录超时，请重试");
     }
 
+    /**
+     * 从 HTTP 错误消息中取出 OAuth 错误码。
+     *
+     * 消息形如 {@code 表单提交失败: 400 - <url> - {"error":"authorization_pending",...}}。
+     * 优先解析末尾的 JSON 的 error 字段；不是合法 JSON 时再退回关键字匹配。
+     */
     static String extractOAuthError(String message) {
         if (message == null) {
             return null;
@@ -147,6 +180,7 @@ public class MicrosoftAuth {
         return null;
     }
 
+    /** 找到消息中最后一个 '{' 起、到最后一个 '}' 止的子串并解析为对象；失败返回 null。 */
     private static JsonObject parseTrailingJsonObject(String message) {
         int start = message.lastIndexOf('{');
         int end = message.lastIndexOf('}');
@@ -161,6 +195,9 @@ public class MicrosoftAuth {
         }
     }
 
+    /**
+     * 步骤 3：Xbox Live 认证
+     */
     public String authenticateXboxLive(String msAccessToken) throws IOException {
         JsonObject body = new JsonObject();
         JsonObject properties = new JsonObject();
@@ -178,6 +215,9 @@ public class MicrosoftAuth {
         return json.get("Token").getAsString();
     }
 
+    /**
+     * 步骤 4：XSTS 授权
+     */
     public XstsResponse authorizeXsts(String xblToken) throws IOException {
         JsonObject body = new JsonObject();
         JsonObject properties = new JsonObject();
@@ -203,6 +243,9 @@ public class MicrosoftAuth {
         return xsts;
     }
 
+    /**
+     * 步骤 5：Minecraft 认证
+     */
     public String authenticateMinecraft(String xstsToken, String uhs) throws IOException {
         JsonObject body = new JsonObject();
         body.addProperty("identityToken", "XBL3.0 x=" + uhs + ";" + xstsToken);
@@ -213,6 +256,9 @@ public class MicrosoftAuth {
         return json.get("access_token").getAsString();
     }
 
+    /**
+     * 步骤 6：获取 Minecraft 档案
+     */
     public MinecraftProfile getMinecraftProfile(String mcAccessToken) throws IOException {
         okhttp3.OkHttpClient client = new okhttp3.OkHttpClient();
         okhttp3.Request request = new okhttp3.Request.Builder()
@@ -241,6 +287,9 @@ public class MicrosoftAuth {
         }
     }
 
+    /**
+     * 完整的登录流程
+     */
     public Account login(DeviceCodeResponse deviceCode, StatusCallback callback)
             throws IOException, InterruptedException {
 
@@ -248,38 +297,44 @@ public class MicrosoftAuth {
             callback.onStatus(L.t("s_f1655cf620"));
         }
 
+        // 1. 获取微软 Token
         MicrosoftTokenResponse msToken = pollForToken(deviceCode, callback);
 
         if (callback != null) {
             callback.onStatus(L.t("s_52bce24cd2"));
         }
 
+        // 2. Xbox Live 认证
         String xblToken = authenticateXboxLive(msToken.getAccessToken());
 
         if (callback != null) {
             callback.onStatus(L.t("s_047270341d"));
         }
 
+        // 3. XSTS 授权
         XstsResponse xsts = authorizeXsts(xblToken);
 
         if (callback != null) {
             callback.onStatus(L.t("s_694878b092"));
         }
 
+        // 4. Minecraft 认证
         String mcAccessToken = authenticateMinecraft(xsts.getToken(), xsts.getUhs());
 
         if (callback != null) {
             callback.onStatus(L.t("s_135a2a3789"));
         }
 
+        // 5. 获取玩家档案
         MinecraftProfile profile = getMinecraftProfile(mcAccessToken);
 
+        // 6. 创建账号对象
         Account account = Account.createMicrosoft(
                 profile.getName(),
                 profile.getId(),
                 mcAccessToken,
                 msToken.getRefreshToken(),
-                System.currentTimeMillis() + 24 * 60 * 60 * 1000L  
+                System.currentTimeMillis() + 24 * 60 * 60 * 1000L  // MC Token 有效期约 24 小时
         );
         account.setClientId(clientId);
 
@@ -291,6 +346,11 @@ public class MicrosoftAuth {
         return account;
     }
 
+    // ==================== 数据模型 ====================
+
+    /**
+     * 设备代码响应
+     */
     public static class DeviceCodeResponse {
         private String device_code;
         private String user_code;
@@ -307,6 +367,9 @@ public class MicrosoftAuth {
         public String getMessage() { return message; }
     }
 
+    /**
+     * 微软 Token 响应
+     */
     public static class MicrosoftTokenResponse {
         private String token_type;
         private String scope;
@@ -321,6 +384,9 @@ public class MicrosoftAuth {
         public String getRefreshToken() { return refresh_token; }
     }
 
+    /**
+     * XSTS 响应
+     */
     public static class XstsResponse {
         private String token;
         private String uhs;
@@ -331,6 +397,9 @@ public class MicrosoftAuth {
         public void setUhs(String uhs) { this.uhs = uhs; }
     }
 
+    /**
+     * Minecraft 玩家档案
+     */
     public static class MinecraftProfile {
         private String id;
         private String name;
@@ -341,6 +410,9 @@ public class MicrosoftAuth {
         public void setName(String name) { this.name = name; }
     }
 
+    /**
+     * 状态回调接口
+     */
     public interface StatusCallback {
         void onWaiting(String userCode, String verificationUri);
         void onPending();

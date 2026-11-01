@@ -1,5 +1,6 @@
 package com.mclauncher.utils;
 
+
 import com.mclauncher.i18n.L;
 import com.mclauncher.network.UpdateClient;
 import org.slf4j.Logger;
@@ -12,12 +13,32 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.List;
 
+/**
+ * 启动器重启工具
+ *
+ * 用途：更新下载完成后，让程序切到新版本的 jar 上运行。
+ *
+ * 为什么不能「就地重启」：
+ * 当前进程是用 {@code java -jar <旧 jar>} 拉起来的，JVM 已经加载了旧 jar
+ * 的内容。在同一个进程里没法把自己换成新版本 —— 必须**新开一个进程**
+ * 指向新 jar，然后让当前进程退出。
+ *
+ * 为什么不走 C++ 引导器：
+ * 引导器存在的意义是「没有 Java 时把 Java 装上」，日常更新已经交给启动器。
+ * 更新完后直接拉新 jar 更快，也少一层依赖（不必知道 exe 在哪）。
+ *
+ * 失败时**不退出**当前进程：宁可让用户手动重启，也不能让新进程拉不起来
+ * 导致用户手上什么都没有。
+ */
 public final class RestartUtils {
 
     private static final Logger logger = LoggerFactory.getLogger(RestartUtils.class);
 
     private RestartUtils() {}
 
+    /**
+     * 重启结果
+     */
     public static final class Result {
         public final boolean ok;
         public final String message;
@@ -28,6 +49,15 @@ public final class RestartUtils {
         }
     }
 
+    /**
+     * 启动一个新进程来运行指定的 jar，成功后退出当前进程
+     *
+     * 注意：本方法在**成功时不会返回**（内部会 System.exit）。
+     * 只有在启动失败时才会返回 Result，交给调用方提示用户。
+     *
+     * @param newJar 要运行的新 jar（一般是刚下载好的）
+     * @return 仅在失败时返回
+     */
     public static Result restartWith(Path newJar) {
         if (newJar == null || !Files.isRegularFile(newJar)) {
             return new Result(false, L.t("s_75b22229f5") + newJar);
@@ -38,6 +68,7 @@ public final class RestartUtils {
             return new Result(false, L.t("s_08f546b4c5"));
         }
 
+        // 工作目录沿用当前进程的，保证相对路径的资源仍能正确解析
         String workDir = System.getProperty("user.dir");
 
         List<String> command = new ArrayList<>();
@@ -53,15 +84,16 @@ public final class RestartUtils {
             if (workDir != null && !workDir.isBlank()) {
                 pb.directory(new File(workDir));
             }
-
+            // 不继承本进程的标准流：否则新进程的日志会与当前进程的输出混在一起
             pb.redirectOutput(ProcessBuilder.Redirect.DISCARD);
             pb.redirectError(ProcessBuilder.Redirect.DISCARD);
 
             Process p = pb.start();
             logger.info("新版本进程已启动 (PID={})，当前进程即将退出", p.pid());
 
-            
-
+            // 先把当前进程的退出流程走完（保存配置等），再真正退出。
+            // 这里交给调用方在合适的时机调用 exitCurrent()，
+            // 本方法只负责把新进程拉起来。
             return new Result(true, L.t("s_1643c63eab"));
 
         } catch (Exception e) {
@@ -70,14 +102,26 @@ public final class RestartUtils {
         }
     }
 
+    /**
+     * 退出当前进程
+     *
+     * 与 restartWith 分开：调用方可以先把「已启动成功」的状态写进配置，
+     * 再调用本方法，避免退出过快导致状态没落盘。
+     */
     public static void exitCurrent() {
         logger.info("退出当前进程以完成重启");
         javafx.application.Platform.exit();
-
-        
+        // Platform.exit() 只是请求 JavaFX 收尾；若仍有非守护线程存活，
+        // JVM 不会退出。这里强制兜底，保证用户点的「重启」真的重启。
         System.exit(0);
     }
 
+    /**
+     * 找到当前 JVM 对应的 javaw / java 可执行文件
+     *
+     * 从 java.home 推导而非硬编码路径：用户可能用的是绿色版 JDK，
+     * 或引导器自动下载的 JRE，路径各不相同。
+     */
     private static String resolveJavaw() {
         String javaHome = System.getProperty("java.home");
         if (javaHome == null || javaHome.isBlank()) {
@@ -89,6 +133,7 @@ public final class RestartUtils {
 
         Path bin = Paths.get(javaHome, "bin");
 
+        // Windows 优先 javaw（无控制台窗口）；其余平台用 java
         List<String> candidates = windows
                 ? List.of("javaw.exe", "java.exe")
                 : List.of("java");
@@ -104,6 +149,12 @@ public final class RestartUtils {
         return null;
     }
 
+    /**
+     * 在启动器数据目录里找出「当前已下载的最新版本 jar」
+     *
+     * 供重启时兜底使用：万一调用方没拿到具体路径，
+     * 也能从数据目录里挑出最新的那个。
+     */
     public static Path findLatestDownloadedJar() {
         Path dir = UpdateClient.getAppDataDir();
         if (!Files.isDirectory(dir)) {
@@ -130,6 +181,11 @@ public final class RestartUtils {
         return best;
     }
 
+    /**
+     * 语义化版本比较（与 C++ 引导器的 CompareVersions 规则保持一致）
+     *
+     * 逐段比数字，段数不同时短的补 0：1.2 > 1.1.9，1.0.1 > 1.0
+     */
     static int compareVersions(String a, String b) {
         String[] pa = a.split("\\.");
         String[] pb = b.split("\\.");
@@ -145,6 +201,7 @@ public final class RestartUtils {
         return 0;
     }
 
+    /** 取段内的数字部分，"1-beta" -> 1 */
     private static int parseSegment(String s) {
         StringBuilder digits = new StringBuilder();
         for (char c : s.toCharArray()) {
