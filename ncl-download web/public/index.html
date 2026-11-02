@@ -74,6 +74,9 @@
         </button>
       </div>
     </div>
+    <footer>
+        <a>开源:<img src="https://github.githubassets.com/favicons/favicon.png" alt="some_text" width="18" height="18"><button id="githubBtn" type="button">Novus-Minecraft-Launcher</button></a>
+    </footer>
   </div>
   <script>
     (function() {
@@ -86,15 +89,23 @@
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
+      };
+      function openweb(url) {
+        window.open(url);
       }
       const nclBtn = document.getElementById('downloadNclBtn');
       const x86Btn = document.getElementById('downloadX86Btn');
+      const hubBtn = document.getElementById('githubBtn');
       nclBtn.addEventListener('click', function(event) {
         downloadFile('https://preview.ccwu.cc/NCL.exe');
       });
       x86Btn.addEventListener('click', function(event) {
         event.preventDefault();
         downloadFile('https://preview.ccwu.cc/NCL_x86.exe');
+      });
+      hubBtn.addEventListener('click', function(event) {
+        event.preventDefault();
+        openweb('https://github.com/zuozuo-ncl/Novus-Minecraft-Launcher');
       });
     })();
   </script>
