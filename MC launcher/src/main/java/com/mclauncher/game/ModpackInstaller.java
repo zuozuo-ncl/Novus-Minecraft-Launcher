@@ -292,7 +292,9 @@ public class ModpackInstaller {
 
         // ---------- 2. 加载器 ----------
         String installedVersion = m.gameVersion;
-        if (m.loader != null && !m.loader.isBlank()) {
+        boolean loaderRequired = m.loader != null && !m.loader.isBlank();
+        String loaderFailed = null;
+        if (loaderRequired) {
             p.onStage(L.t("s_8b50af569e") + m.loader + " ...");
             p.onPercent(0.32);
 
@@ -300,6 +302,9 @@ public class ModpackInstaller {
             if (loaderId != null) {
                 installedVersion = loaderId;
             } else {
+                // 这个整包标注了加载器却装不上：不能当成功继续装（mod 在纯原版下
+                // 根本加载不了，玩家会以为装好了，启动后一堆 mod 缺失）
+                loaderFailed = loaderLabel(m.loader);
                 p.onLog(L.t("s_feb9c1fb6f") + loaderLabel(m.loader) + L.t("s_0c294e49d0"));
             }
         }
@@ -311,6 +316,8 @@ public class ModpackInstaller {
         int[] counts = downloadFiles(m, targetDir, p);
         int downloaded = counts[0];
         int failed = counts[1];
+
+
 
         if (cancelled) {
             return Result.fail(L.t("s_a5ffdc95ee"));
@@ -333,6 +340,11 @@ public class ModpackInstaller {
 
         if (failed > 0) {
             p.onLog(L.t("s_bdb9a2a05b") + failed + L.t("s_e198c2d600"));
+        }
+
+        if (loaderFailed != null) {
+            return Result.fail("加载器 " + loaderFailed + " 安装失败，整合包无法运行（已下载 "
+                    + downloaded + " 个文件，可修复网络后重试）");
         }
 
         Result r = Result.ok(installedVersion, downloaded);
@@ -577,6 +589,7 @@ public class ModpackInstaller {
                 }
                 Files.createDirectories(dest.getParent());
                 try (InputStream in = zip.getInputStream(ze)) {
+                    backupIfExists(dest);
                     Files.copy(in, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 }
                 count++;
@@ -675,6 +688,7 @@ public class ModpackInstaller {
                 }
                 Files.createDirectories(dest.getParent());
                 try (InputStream in = zip.getInputStream(ze)) {
+                    backupIfExists(dest);
                     Files.copy(in, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 }
                 count++;
@@ -725,7 +739,50 @@ public class ModpackInstaller {
                 throw new IOException("包含 ..");
             }
         }
+        return guardSymlink(baseNorm, resolved);
+    }
+
+    /**
+     * 逐级检查目标路径上已存在的父目录：是被替换目标目录之外的
+     * 符号链接 / 目录联接（junction）就拒绝。
+     *
+     * safeResolve 只做词法校验：如果游戏目录里早就有一个指向 C:\Windows 的
+     * junction（用户误操作或之前被利用过），词法上完全合法的条目也会写到外面去。
+     */
+    private static Path guardSymlink(Path baseNorm, Path resolved) throws IOException {
+        Path abs = resolved.toAbsolutePath().normalize();
+        Path cur = baseNorm;
+        Path rel = baseNorm.relativize(abs);
+        for (Path part : rel) {
+            cur = cur.resolve(part);
+            try {
+                if (Files.exists(cur, java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                        && Files.isSymbolicLink(cur)) {
+                    Path target = cur.toRealPath();
+                    if (!target.startsWith(baseNorm)) {
+                        throw new IOException("路径经过指向外部的链接: " + cur);
+                    }
+                }
+            } catch (IOException e) {
+                if (e.getMessage() != null && e.getMessage().startsWith("路径经过")) {
+                    throw e;
+                }
+                // 其它 IO 错误（权限等）交给后续写入时报错
+            }
+        }
         return resolved;
+    }
+
+    /** 覆盖已有文件前先备份成 ".bak"（只备份一次），避免修复类整合包误覆盖存档/配置 */
+    private static void backupIfExists(Path dest) {
+        try {
+            if (Files.isRegularFile(dest) && !Files.exists(dest.resolveSibling(
+                    dest.getFileName() + ".bak"))) {
+                Files.copy(dest, dest.resolveSibling(dest.getFileName() + ".bak"));
+            }
+        } catch (IOException ignored) {
+            // 备份失败不影响解压
+        }
     }
 
     private static String readEntry(ZipFile zip, ZipEntry entry) throws IOException {

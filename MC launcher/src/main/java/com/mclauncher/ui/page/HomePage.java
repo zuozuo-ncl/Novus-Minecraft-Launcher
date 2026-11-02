@@ -522,7 +522,8 @@ public class HomePage implements Page {
         String javaPath = config.getJavaPath();
 
         CompletableFuture.supplyAsync(() ->
-                gameLauncher.launch(version, account, javaPath)
+                gameLauncher.launch(version, account, javaPath,
+                        acct -> accountManager == null ? acct : accountManager.ensureFresh(acct))
         ).thenAccept(success -> Platform.runLater(() -> {
             if (success) {
                 launchButton.setText(L.t("s_686a6c5793"));

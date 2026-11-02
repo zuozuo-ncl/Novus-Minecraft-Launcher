@@ -45,6 +45,9 @@ public class Account {
      */
     private String skinSite;
 
+    /** 刷新令牌用的回调（登录时注入，不参与序列化） */
+    private transient java.util.function.Function<Account, Account> refresher;
+
     public Account() {
         this.id = UUIDUtils.randomUUID().toString();
     }
@@ -128,6 +131,20 @@ public class Account {
 
     public String getAccessToken() { return accessToken; }
     public void setAccessToken(String accessToken) { this.accessToken = accessToken; }
+
+    public void setRefresher(java.util.function.Function<Account, Account> r) { this.refresher = r; }
+
+    /** 用 refresh_token 换一个新的 Account（不修改自身） */
+    public Account refresh() throws java.io.IOException {
+        if (refresher == null) {
+            throw new java.io.IOException("该账号没有可用的刷新器，请重新登录");
+        }
+        try {
+            return refresher.apply(this);
+        } catch (RuntimeException e) {
+            throw new java.io.IOException(e.getMessage(), e);
+        }
+    }
 
     public String getRefreshToken() { return refreshToken; }
     public void setRefreshToken(String refreshToken) { this.refreshToken = refreshToken; }

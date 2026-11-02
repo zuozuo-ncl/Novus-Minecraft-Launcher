@@ -426,7 +426,17 @@ public class AccountPage implements Page {
                 Account a = accountManager.getCurrentAccount();
                 if (a != null && text != null && !text.isBlank()
                         && SkinSites.guessApiRoot(text) != null) {
-                    applySkinOption(a, SkinOption.custom(text.trim()));
+                    SkinOption opt = SkinOption.custom(text.trim());
+                    applySkinOption(a, opt);
+                    // 自定义站点也要进选项列表：否则收起下拉/失焦时编辑器
+                    // 会被回填成空串或旧值，显示与账号实际 skinSite 不一致
+                    rememberCustomOption(opt);
+                    suppressSiteChange = true;
+                    try {
+                        skinSiteCombo.getSelectionModel().select(opt);
+                    } finally {
+                        suppressSiteChange = false;
+                    }
                 }
             }
         });
@@ -685,6 +695,16 @@ public class AccountPage implements Page {
     }
 
     /** 把用户的选择写到当前账号并刷新显示 */
+    /** 把自定义皮肤站加入下拉列表（已存在则不重复） */
+    private void rememberCustomOption(SkinOption opt) {
+        for (SkinOption o : skinSiteCombo.getItems()) {
+            if (opt.value != null && opt.value.equals(o.value)) {
+                return;
+            }
+        }
+        skinSiteCombo.getItems().add(opt);
+    }
+
     private void applySkinOption(Account a, SkinOption opt) {
         a.setSkinSite(opt.value);
         accountManager.save();
@@ -942,6 +962,7 @@ public class AccountPage implements Page {
                     codeBox.setVisible(false);
                     codeBox.setManaged(false);
                     msStatus.setText(L.t("s_943dc1528f") + account.getUsername());
+                    msStatus.getStyleClass().removeIf(cls -> cls.startsWith("status-"));
                     msStatus.getStyleClass().add("status-ok");
                     refreshAccountList();
 
@@ -958,6 +979,7 @@ public class AccountPage implements Page {
                     codeBox.setVisible(false);
                     codeBox.setManaged(false);
                     msStatus.setText(L.t("s_dde1d2dc48") + e.getMessage());
+                    msStatus.getStyleClass().removeIf(cls -> cls.startsWith("status-"));
                     msStatus.getStyleClass().add("status-fail");
                 });
             }

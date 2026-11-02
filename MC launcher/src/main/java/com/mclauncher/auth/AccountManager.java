@@ -38,7 +38,18 @@ public class AccountManager {
 
     private final Map<String, Account> accounts;
     private final Gson gson;
-    private String currentAccountId;
+    private volatile String currentAccountId;
+    /**
+     * 账号文件的读写锁。
+     *
+     * 以前 save() 完全不加锁：登录线程（后台）与切换账号（FX 线程）同时写时，
+     * 两边各自快照 → 后写的覆盖先写的（新账号丢失）；而 writeAtomic 用固定
+     * 的 ".tmp" 文件名，两个线程同时写同一个 tmp 会把内容写成交错的非法 JSON，
+     * 下次启动 load() 解析失败 → 所有账号都消失。
+     */
+    private final Object writeLock = new Object();
+    /** 每个账号一把刷新锁：防止并发刷新把轮换后的 refresh_token 写乱 */
+    private final ConcurrentHashMap<String, Object> refreshLocks = new ConcurrentHashMap<>();
 
     public AccountManager() {
         this.accounts = new ConcurrentHashMap<>();
@@ -86,20 +97,56 @@ public class AccountManager {
      * 保存账号列表
      */
     public void save() {
-        try {
-            Files.createDirectories(ACCOUNTS_PATH.getParent());
+        synchronized (writeLock) {
+            try {
+                Files.createDirectories(ACCOUNTS_PATH.getParent());
 
-            AccountsData data = new AccountsData();
-            data.accounts = new ArrayList<>(accounts.values());
-            data.currentAccountId = currentAccountId;
+                AccountsData data = new AccountsData();
+                data.accounts = new ArrayList<>(accounts.values());
+                data.currentAccountId = currentAccountId;
 
-            String json = gson.toJson(data);
-            // 原子写：账号文件里有 refresh_token，截断即等于所有账号掉线
-            com.mclauncher.utils.FileUtils.writeAtomic(ACCOUNTS_PATH, json);
-            restrictPermissions(ACCOUNTS_PATH);
-            logger.debug("账号列表已保存: {}", ACCOUNTS_PATH);
-        } catch (Exception e) {
-            logger.error("保存账号失败: {} ({})", e.getMessage(), ACCOUNTS_PATH);
+                String json = gson.toJson(data);
+                // 原子写：账号文件里有 refresh_token，截断即等于所有账号掉线
+                com.mclauncher.utils.FileUtils.writeAtomic(ACCOUNTS_PATH, json);
+                restrictPermissions(ACCOUNTS_PATH);
+                logger.debug("账号列表已保存: {}", ACCOUNTS_PATH);
+            } catch (Exception e) {
+                logger.error("保存账号失败: {} ({})", e.getMessage(), ACCOUNTS_PATH);
+            }
+        }
+    }
+
+    /**
+     * 确保账号的 Minecraft 令牌可用；过期时用 refresh_token 自动刷新。
+     *
+     * 以前完全没有刷新逻辑：登录 24 小时后账号就永久失效，只能删掉重登。
+     *
+     * @return 可直接用于启动的账号（可能已刷新并落盘）；无法恢复时返回原账号
+     */
+    public Account ensureFresh(Account account) {
+        if (account == null || account.getType() != Account.Type.MICROSOFT
+                || !account.isTokenExpired()) {
+            return account;
+        }
+        Object lock = refreshLocks.computeIfAbsent(account.getId(), k -> new Object());
+        synchronized (lock) {
+            Account cur = accounts.get(account.getId());
+            if (cur == null) {
+                cur = account;
+            }
+            if (!cur.isTokenExpired()) {
+                return cur;   // 另一个线程刚刷新过
+            }
+            try {
+                Account fresh = cur.refresh();
+                accounts.put(fresh.getId(), fresh);
+                save();
+                logger.info("账号 {} 的令牌已自动刷新", fresh.getUsername());
+                return fresh;
+            } catch (Exception e) {
+                logger.warn("刷新账号 {} 失败（需要重新登录）: {}", cur.getUsername(), e.getMessage());
+                return cur;
+            }
         }
     }
 

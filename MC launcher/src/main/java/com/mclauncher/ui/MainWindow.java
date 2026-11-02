@@ -160,9 +160,33 @@ public class MainWindow {
         accountManager = new AccountManager();
         apiClient = new BMCLApiClient("bmcl".equals(config.getSourceType()));
         // 启动器数据目录：与 C++ 引导器保持一致（%APPDATA%\NCL_Launcher）
+        // 旧目录迁移放后台做：它可能涉及上千个文件，不能卡住窗口出现
+        com.mclauncher.utils.AppPaths.migrateInBackground();
         Path launcherDir = com.mclauncher.utils.AppPaths.appDataDir();
         bootstrap = new DependencyBootstrap(config);
         gameLauncher = new GameLauncher(config, launcherDir);
+
+        // VPN 联机：游戏进程接到的 VPN 玩家连接交给当前 VPN 会话配对
+        // 游戏进程接住 VPN 玩家后：把预读字节写回连接，再交给当前 VPN 房主会话配对
+        gameLauncher.setPlayerJoinConsumer((id, head, peerSock) -> {
+            try {
+                if (head != null && head.length > 0) {
+                    peerSock.getOutputStream().write(head);
+                    peerSock.getOutputStream().flush();
+                }
+            } catch (java.io.IOException e) {
+                logger.debug("回放 VPN 预读字节失败: {}", e.getMessage());
+            }
+            com.mclauncher.multiplayer.vpn.VpnSession host =
+                    com.mclauncher.multiplayer.vpn.VpnSession.activeHost();
+            if (host == null) {
+                try { peerSock.close(); } catch (java.io.IOException ignored) { }
+                return;
+            }
+            host.gamePeerReady(peerSock);
+        });
+        gameLauncher.setVpnForwardingGate(() ->
+                com.mclauncher.multiplayer.vpn.VpnSession.activeHost() != null);
 
         String last = config.getLastAccountId();
         if (last != null && !last.isEmpty()) {
@@ -489,6 +513,7 @@ public class MainWindow {
                 // 使用与 C++ 引导器相同的数据目录：%APPDATA%\NCL_Launcher
                 Path launcherDir = com.mclauncher.utils.AppPaths.appDataDir();
                 LauncherSettingsPage p = new LauncherSettingsPage(config, launcherDir);
+                p.setGameLauncher(gameLauncher);
                 // 注入内嵌弹窗宿主，使其能弹出目录管理面板
                 p.setModalHost(modalHost);
                 // 注入主场景，使「外观」标签页能即时切换主题

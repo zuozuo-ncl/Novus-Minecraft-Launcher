@@ -4,39 +4,73 @@ import com.mclauncher.multiplayer.vpn.VpnTunnel.Role;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 一键开房间 / 加入房间（VPN 模式）
  *
- * <p>房主：
+ * <h3>房主</h3>
  * <ol>
- *   <li>{@link #host()} 创建虚拟网卡、配 10.77.0.1、加路由</li>
- *   <li>向中继申请房间（复用 RelayServers.request）</li>
- *   <li>建立一条 vpn-host 长连接，把网卡上的包按目标 IP 转发给对应玩家</li>
+ *   <li>申请房间 → 建 VPN 长连接（vpn-host）→ 开控制通道（hello）</li>
+ *   <li>本机 MC 的局域网端口为 P。房主自己的 MC 客户端连进来时，
+ *       启动器为这位玩家申请 join token + 虚拟 IP，把邀请码发给房主界面。</li>
+ *   <li>朋友经 VPN 连 10.77.0.N:P+1 → 包到房主 → 房主转发器配对并交付给 MC。</li>
  * </ol>
  *
- * <p>玩家：
+ * <h3>玩家</h3>
  * <ol>
- *   <li>{@link #join(String, String)} 创建虚拟网卡、配 10.77.0.N、加路由</li>
- *   <li>建立一条 vpn-join 长连接</li>
+ *   <li>粘贴邀请 → 用口令向中继换取 token/uuid/IP</li>
+ *   <li>配虚拟网卡 10.77.0.N → 建 VPN 长连接（vpn-join + token）</li>
+ *   <li>在 127.0.0.1:P+1 监听：本机 MC 每条连接经 VPN 转到房主</li>
  * </ol>
  *
- * <p>之后 MC 里直接填 房主的虚拟 IP（10.77.0.1:端口）即可。
+ * <p>虚拟地址与 uuid 都由<b>服务器</b>分配，客户端不再自报、不再固定 seat。
  */
 public final class VpnSession implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(VpnSession.class);
 
-    /** 玩家端虚拟 IP 从 .2 开始分配，最多 8 个 */
-    private static final int PEER_IP_MIN = 2;
-    private static final int PEER_IP_MAX = 9;
+    public static final int FORWARD_OFFSET = 1;
 
     private final WintunAdapter adapter;
     private final VpnTunnel tunnel;
     private final String role;
-    private final String address;   // 房主：公网可达地址；玩家：房主虚拟 IP
+    private final String address;
+    private volatile boolean closed;
+
+    /** 房主：控制通道线程 */
+    private Thread controlThread;
+    /** 房主：控制通道出站请求的响应队列 */
+    private final LinkedBlockingQueue<String[]> controlOutbox = new LinkedBlockingQueue<>();
+    private volatile OutputStream controlOut;
+
+    /** 房主：转发口 = 局域网端口 + 1 */
+    private volatile int gameForwardPort;
+    /** 房主：本地玩家入口监听（玩家 MC 连进来时触发） */
+    private java.net.ServerSocket forwardServer;
+    private ExecutorService forwardPool;
+    private final AtomicInteger forwardSeq = new AtomicInteger();
+
+    /** 房主：游戏进程侧接到的 VPN 连接 */
+    private final LinkedBlockingQueue<Socket> gameSockets = new LinkedBlockingQueue<>();
+    /** 房主：等待接入的玩家 */
+    private final LinkedBlockingQueue<VpnTunnel.Peer> playerQueue = new LinkedBlockingQueue<>();
+
+    /** 玩家：本地端口转发监听 */
+    private ServerSocket peerServer;
 
     private VpnSession(WintunAdapter adapter, VpnTunnel tunnel, String role, String address) {
         this.adapter = adapter;
@@ -46,18 +80,51 @@ public final class VpnSession implements AutoCloseable {
     }
 
     public String role() { return role; }
-    /** 房间号（房主开房后才有意义） */
     public String roomId() { return tunnel == null ? "" : tunnel.roomId(); }
-    /** 房主：别人该连的地址（10.77.0.1）；玩家：房主地址 */
     public String address() { return address; }
     public boolean isRunning() { return tunnel != null && tunnel.isRunning(); }
     public long bytesIn() { return tunnel == null ? 0 : tunnel.bytesIn(); }
     public long bytesOut() { return tunnel == null ? 0 : tunnel.bytesOut(); }
 
     // ---------------------------------------------------------------
+    //  当前活动会话（供 UI / GameLauncher 查询）
+    // ---------------------------------------------------------------
+    private static final java.util.concurrent.atomic.AtomicReference<VpnSession> ACTIVE =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+    /** 当前是否有 VPN 会话（房主或玩家） */
+    public static VpnSession active() {
+        VpnSession s = ACTIVE.get();
+        return (s != null && !s.closed) ? s : null;
+    }
+
+    /** 当前是否有「房主」会话 */
+    public static VpnSession activeHost() {
+        VpnSession s = active();
+        return (s != null && "host".equals(s.role)) ? s : null;
+    }
+
+    /**
+     * 房主：游戏进程的本地转发口。
+     *
+     * 优先返回执行了 bind 的实际端口（局域网端口被占用时，启动器改绑系统分配端口，
+     * 真正的端口在这里暴露出来，由 GameLauncher 使用）。
+     */
+    public int forwardGatewayPort() {
+        ServerSocket ss = forwardServer;
+        if (ss != null && ss.isBound()) {
+            return ss.getLocalPort();
+        }
+        return 0;
+    }
+
+    public static int playerPort(int localMcPort) {
+        return Math.max(1, Math.min(65534, localMcPort)) + FORWARD_OFFSET;
+    }
+
+    // ---------------------------------------------------------------
     //  前置检查
     // ---------------------------------------------------------------
-    /** 当前环境能否开 VPN（Windows + 管理员） */
     public static String precheck() {
         String os = System.getProperty("os.name", "").toLowerCase();
         if (!os.contains("win")) {
@@ -72,70 +139,319 @@ public final class VpnSession implements AutoCloseable {
     // ---------------------------------------------------------------
     //  房主
     // ---------------------------------------------------------------
-    /**
-     * 开一个 VPN 房间。
-     *
-     * @param relayHost 中继地址
-     * @param relayPort 中继 HTTP 端口
-     * @param roomName  房间名（会显示在中继日志里）
-     */
-    public static VpnSession host(String relayHost, int relayPort, String roomName) throws IOException {
-        return host(relayHost, relayPort, roomName, WintunAdapter.ADAPTER_NAME);
+    public static VpnSession host(String relayHost, int relayPort, String roomName,
+                                  int localMcPort, String apiKey) throws IOException {
+        return host(relayHost, relayPort, roomName, localMcPort, apiKey, WintunAdapter.ADAPTER_NAME);
     }
 
-    /** 指定网卡名（同机多实例测试用） */
     public static VpnSession host(String relayHost, int relayPort, String roomName,
+                                  int localMcPort, String apiKey,
                                   String adapterName) throws IOException {
         String err = precheck();
         if (err != null) {
             throw new IOException(err);
         }
         WintunAdapter ad = WintunAdapter.openOrCreate(adapterName);
-        ad.startSession(0x40000);
-        VpnNetworkConfig.setAddress(adapterName, VpnNetworkConfig.HOST_IP);
-        VpnNetworkConfig.routeSubnetToAdapter(adapterName);
+        boolean ok = false;
+        VpnTunnel t = null;
+        try {
+            ad.startSession(0x40000);
+            VpnNetworkConfig.setAddress(adapterName, VpnNetworkConfig.HOST_IP);
+            VpnNetworkConfig.routeSubnetToAdapter(adapterName);
 
-        // 向中继申请房间：复用现有 HTTP 接口
-        String[] roomToken = requestRoom(relayHost, relayPort, roomName);
-        String uuid = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+            String[] roomToken = requestRoom(relayHost, relayPort, roomName, apiKey);
+            String uuid = "h" + UUID.randomUUID().toString().replace("-", "").substring(0, 15);
 
-        VpnTunnel t = new VpnTunnel(relayHost, relayPort, roomToken[0], roomToken[1],
-                Role.HOST, uuid, ad);
+            t = new VpnTunnel(relayHost, relayPort, roomToken[0], roomToken[1], Role.HOST, uuid, ad);
+            t.start();
 
-        // 房主按「目标虚拟 IP」把包分给对应玩家。这里先一次性登记 8 个可能的位置，
-        // 玩家连上后中继会带 uuid，宿主端再按实际 uuid 精确登记（见 registerPeer）。
-        for (int i = PEER_IP_MIN; i <= PEER_IP_MAX; i++) {
-            t.registerPeer("peer-" + i, "10.77.0." + i);
+            VpnSession s = new VpnSession(ad, t, "host", VpnNetworkConfig.HOST_IP);
+            s.startHostSide(relayHost, relayPort, roomToken[0], roomToken[1], apiKey,
+                    Math.max(1, Math.min(65534, localMcPort)));
+            ACTIVE.set(s);
+            ok = true;
+            logger.info("VPN 房主已开启：房间 {}，玩家连 {}:{}", roomToken[0],
+                    VpnNetworkConfig.HOST_IP, playerPort(localMcPort));
+            return s;
+        } finally {
+            if (!ok) {
+                if (t != null) {
+                    try { t.close(); } catch (Exception ignored) { }
+                }
+                try { VpnNetworkConfig.clearRoutes(); } catch (Exception ignored) { }
+                try { ad.close(); } catch (Exception ignored) { }
+            }
+        }
+    }
+
+    private void startHostSide(String relayHost, int relayPort, String roomId, String roomToken,
+                               String apiKey, int localMcPort) {
+        this.gameForwardPort = playerPort(localMcPort);
+
+        // 1) 本地玩家入口
+        try {
+            forwardServer = new ServerSocket();
+            forwardServer.setReuseAddress(true);
+            forwardServer.bind(new InetSocketAddress(
+                    java.net.InetAddress.getByName("127.0.0.1"), localMcPort), 50);
+            forwardPool = Executors.newCachedThreadPool(r -> {
+                Thread th = new Thread(r, "vpn-host-entrant");
+                th.setDaemon(true);
+                return th;
+            });
+            Thread acc = new Thread(this::acceptEntrants, "vpn-host-accept");
+            acc.setDaemon(true);
+            acc.start();
+        } catch (IOException e) {
+            logger.info("房主本地玩家入口未能监听 127.0.0.1:{}（{}），需要手动生成邀请",
+                    localMcPort, e.getMessage());
         }
 
-        t.start();
-        logger.info("VPN 房主已开启：房间 {}，别人连 {}:端口", roomToken[0], VpnNetworkConfig.HOST_IP);
-        return new VpnSession(ad, t, "host", VpnNetworkConfig.HOST_IP);
+        // 2) 控制通道
+        controlThread = new Thread(() -> runHostControl(relayHost, relayPort, roomId, roomToken),
+                "vpn-host-control");
+        controlThread.setDaemon(true);
+        controlThread.start();
+
+        // 3) 配对线程
+        Thread pair = new Thread(this::pairLoop, "vpn-host-pair");
+        pair.setDaemon(true);
+        pair.start();
+    }
+
+    private void acceptEntrants() {
+        while (!closed) {
+            try {
+                Socket local = forwardServer.accept();
+                local.setTcpNoDelay(true);
+                forwardPool.submit(() -> onEntrant(local));
+            } catch (IOException e) {
+                if (closed || forwardServer.isClosed()) {
+                    return;
+                }
+            }
+        }
+    }
+
+    private void onEntrant(Socket local) {
+        try {
+            VpnTunnel.Peer peer = requestNewPeer();
+            if (peer == null) {
+                local.close();
+                return;
+            }
+            inviter.accept(peer);
+            playerQueue.offer(peer);
+            // 房主自己的 MC 客户端 → 经虚拟网卡连到该玩家的 10.77.0.N:P+1
+            Socket out = new Socket();
+            out.connect(new InetSocketAddress(peer.ip, gameForwardPort), 5000);
+            out.setTcpNoDelay(true);
+            newPumpThreads(local, out);
+        } catch (Exception e) {
+            logger.debug("玩家接入失败: {}", e.getMessage());
+            try { local.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    public interface PeerListener {
+        void accept(VpnTunnel.Peer peer);
+    }
+
+    private volatile PeerListener inviter;
+
+    public void setPeerListener(PeerListener l) {
+        this.inviter = l;
+    }
+
+    public VpnTunnel.Peer requestNewPeer() throws IOException, InterruptedException {
+        return requestJoinToken();
+    }
+
+    /** 房主：向中继要一枚 join token；返回 null 表示失败 */
+    private VpnTunnel.Peer requestJoinToken() throws IOException, InterruptedException {
+        for (int attempt = 0; attempt < 3 && !closed; attempt++) {
+            OutputStream o = controlOut;
+            if (o == null) {
+                Thread.sleep(200);
+                continue;
+            }
+            int id = forwardSeq.incrementAndGet();
+            synchronized (this) {
+                o.write(("{\"type\":\"vpn-token\",\"id\":" + id + "}\n")
+                        .getBytes(StandardCharsets.UTF_8));
+                o.flush();
+            }
+            String key = "req:" + id;
+            long deadline = System.currentTimeMillis() + 8000;
+            while (System.currentTimeMillis() < deadline) {
+                String[] m = controlOutbox.poll(200, TimeUnit.MILLISECONDS);
+                if (m == null) {
+                    continue;
+                }
+                if (!key.equals(m[0])) {
+                    dispatch(m);
+                    continue;
+                }
+                if ("error".equals(m[1])) {
+                    logger.warn("中继拒绝签发玩家邀请: {}", m[2]);
+                    return null;
+                }
+                VpnTunnel.Peer peer = new VpnTunnel.Peer(
+                        m.length > 4 ? m[4] : "", m[1], m[2], m[3]);
+                tunnel.putPendingPeer(peer);
+                return peer;
+            }
+        }
+        return null;
+    }
+
+    private void dispatch(String[] m) {
+        if ("peer".equals(m[0])) {
+            tunnel.registerPeer(m[1], m[2]);
+        } else if ("peer-left".equals(m[0])) {
+            tunnel.unregisterPeer(m[1]);
+        }
+    }
+
+    /** 房主控制通道：hello → 收发信令 */
+    private void runHostControl(String relayHost, int relayPort, String roomId, String token) {
+        Socket c = null;
+        try {
+            c = new Socket();
+            c.connect(new InetSocketAddress(relayHost, relayPort), 15000);
+            c.setTcpNoDelay(true);
+            OutputStream o = c.getOutputStream();
+            o.write(("MCRELAY{\"type\":\"hello\",\"room\":\"" + roomId
+                    + "\",\"token\":\"" + token + "\"}\n").getBytes(StandardCharsets.UTF_8));
+            o.flush();
+            controlOut = o;
+
+            BufferedReader r = new BufferedReader(new InputStreamReader(
+                    c.getInputStream(), StandardCharsets.UTF_8));
+            String line;
+            while (!closed && (line = r.readLine()) != null) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                try {
+                    com.google.gson.JsonObject m = com.google.gson.JsonParser.parseString(line)
+                            .getAsJsonObject();
+                    String type = m.has("type") ? m.get("type").getAsString() : "";
+                    switch (type) {
+                        case "vpn-token" -> controlOutbox.put(new String[]{
+                                "req:" + m.get("id").getAsLong(),
+                                m.get("token").getAsString(),
+                                m.get("uuid").getAsString(),
+                                m.get("ip").getAsString(),
+                                m.has("code") ? m.get("code").getAsString() : ""});
+                        case "vpn-token-error" -> controlOutbox.put(new String[]{
+                                "req:" + m.get("id").getAsLong(),
+                                "error", m.has("error") ? m.get("error").getAsString() : "未知错误"});
+                        case "vpn-peer" -> dispatch(new String[]{"peer",
+                                m.get("uuid").getAsString(), m.get("ip").getAsString()});
+                        case "vpn-peer-left" -> dispatch(new String[]{"peer-left",
+                                m.get("uuid").getAsString()});
+                        default -> { /* pong 等 */ }
+                    }
+                } catch (Exception e) {
+                    logger.debug("控制通道消息解析失败: {}", e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            if (!closed) {
+                logger.warn("VPN 控制通道断开: {}", e.getMessage());
+            }
+        } finally {
+            controlOut = null;
+            if (c != null) {
+                try { c.close(); } catch (IOException ignored) { }
+            }
+        }
+    }
+
+    /**
+     * 房主：游戏进程转发器接住一个来自 VPN 的连接。
+     * 调用方必须已经把预读字节写回 sock。这里只负责配对。
+     */
+    public void gamePeerReady(Socket sock) {
+        if (!"host".equals(role) || sock == null) {
+            if (sock != null) {
+                closeQuietly(sock);
+            }
+            return;
+        }
+        gameSockets.offer(sock);
+    }
+
+    private void pairLoop() {
+        while (!closed) {
+            try {
+                Socket game = gameSockets.poll(500, TimeUnit.MILLISECONDS);
+                if (game == null) {
+                    continue;
+                }
+                VpnTunnel.Peer peer = playerQueue.poll(8, TimeUnit.SECONDS);
+                if (peer == null) {
+                    logger.warn("收到 VPN 转发连接，但没有等待中的玩家，已断开");
+                    closeQuietly(game);
+                    continue;
+                }
+                Socket out = new Socket();
+                out.connect(new InetSocketAddress(peer.ip, gameForwardPort), 3000);
+                out.setTcpNoDelay(true);
+                logger.info("VPN 玩家 {} 的转发连接已配对", peer.ip);
+                newPumpThreads(out, game);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (IOException e) {
+                logger.debug("游戏进程连接配对失败: {}", e.getMessage());
+            }
+        }
     }
 
     // ---------------------------------------------------------------
     //  玩家
     // ---------------------------------------------------------------
-    /**
-     * 加入房间。
-     *
-     * @param roomId    房主给的四位房间号
-     * @param seat      第几个玩家（1..8），决定分到的虚拟 IP
-     */
-    public static VpnSession join(String relayHost, int relayPort, String roomId, int seat)
-            throws IOException {
-        return join(relayHost, relayPort, roomId, seat, WintunAdapter.ADAPTER_NAME);
+
+    public static VpnSession join(String relayHost, int relayPort, String roomId,
+                                  String invite, int gameMcPort) throws IOException {
+        return join(relayHost, relayPort, roomId, invite, "", gameMcPort, WintunAdapter.ADAPTER_NAME);
     }
 
-    /** 指定网卡名（同机多实例测试用） */
-    public static VpnSession join(String relayHost, int relayPort, String roomId, int seat,
+    public static VpnSession join(String relayHost, int relayPort, String roomId,
+                                  String invite, String apiKey, int gameMcPort,
                                   String adapterName) throws IOException {
         String err = precheck();
         if (err != null) {
             throw new IOException(err);
         }
-        int n = Math.max(PEER_IP_MIN, Math.min(PEER_IP_MAX, PEER_IP_MIN + seat - 1));
-        String myIp = "10.77.0." + n;
+        String targetHost = VpnNetworkConfig.HOST_IP;
+        int targetPort = playerPort(Math.max(1, Math.min(65534, gameMcPort)));
+        String code = "";
+        if (invite != null && !invite.isBlank()) {
+            String s = invite.trim();
+            if (s.startsWith("MCRELAY|")) {
+                s = s.substring("MCRELAY|".length());
+            }
+            String[] parts = s.split("#");
+            if (parts.length >= 2) {
+                code = parts[parts.length - 1].trim();
+            }
+            String hp = parts[0].trim();
+            int colon = hp.lastIndexOf(':');
+            if (colon > 0) {
+                targetHost = hp.substring(0, colon).trim();
+                try {
+                    targetPort = Integer.parseInt(hp.substring(colon + 1).trim());
+                } catch (NumberFormatException ignored) {
+                    // 保持默认
+                }
+            }
+        }
+        if (code.isEmpty()) {
+            throw new IOException("邀请缺少口令：请让房主点「复制邀请」把整串发给你");
+        }
 
         WintunAdapter ad = null;
         VpnTunnel t = null;
@@ -143,17 +459,20 @@ public final class VpnSession implements AutoCloseable {
         try {
             ad = WintunAdapter.openOrCreate(adapterName);
             ad.startSession(0x40000);
-            VpnNetworkConfig.setAddress(adapterName, myIp);
+
+            String[] own = claimPeer(relayHost, relayPort, roomId, code);
+            VpnNetworkConfig.setAddress(adapterName, own[1]);
             VpnNetworkConfig.routeSubnetToAdapter(adapterName);
 
-            // uuid 必须唯一：同一房间里两个玩家都用 "peer-1" 的话，
-            // 房主端会把他们的包混在一起。
-            String uuid = "peer-" + n + "-" + randomId();
-            t = new VpnTunnel(relayHost, relayPort, roomId, "", Role.PEER, uuid, ad);
+            t = new VpnTunnel(relayHost, relayPort, roomId, own[0], Role.PEER, own[2], ad);
             t.start();
+
+            VpnSession s = new VpnSession(ad, t, "peer", targetHost);
+            s.startPeerForwarding(targetHost, targetPort);
+            ACTIVE.set(s);
             ok = true;
-            logger.info("VPN 玩家已加入：房间 {}，本机 {}", roomId, myIp);
-            return new VpnSession(ad, t, "peer", VpnNetworkConfig.HOST_IP);
+            logger.info("VPN 玩家已加入：房间 {}，本机 {}，房主 {}:{}", roomId, own[1], targetHost, targetPort);
+            return s;
         } finally {
             if (!ok) {
                 if (t != null) {
@@ -168,14 +487,109 @@ public final class VpnSession implements AutoCloseable {
         }
     }
 
-    // ---------------------------------------------------------------
-    /** 8 位随机十六进制，用于区分不同实例的玩家与房主 */
-    private static String randomId() {
-        return UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+    private void startPeerForwarding(String targetHost, int targetPort) {
+        try {
+            peerServer = new ServerSocket();
+            peerServer.setReuseAddress(true);
+            peerServer.bind(new InetSocketAddress(
+                    java.net.InetAddress.getByName("127.0.0.1"), targetPort), 50);
+            Thread acc = new Thread(() -> {
+                while (!closed) {
+                    try {
+                        Socket local = peerServer.accept();
+                        local.setTcpNoDelay(true);
+                        Socket out = new Socket();
+                        out.connect(new InetSocketAddress(targetHost, targetPort), 5000);
+                        out.setTcpNoDelay(true);
+                        newPumpThreads(local, out);
+                    } catch (IOException e) {
+                        if (closed) {
+                            return;
+                        }
+                        logger.debug("玩家本地转发 accept 失败: {}", e.getMessage());
+                    }
+                }
+            }, "vpn-peer-accept");
+            acc.setDaemon(true);
+            acc.start();
+            logger.info("玩家已在 127.0.0.1:{} 监听，MC 里填 localhost:{}", targetPort, targetPort);
+        } catch (IOException e) {
+            logger.warn("玩家本地端口转发启动失败（可改为在 MC 里直接填 {}:{}）: {}",
+                    targetHost, targetPort, e.getMessage());
+        }
     }
 
-    /** 调中继的 /api/host 申请房间，返回 {roomId, token} */
-    private static String[] requestRoom(String host, int port, String name) throws IOException {
+    private static String[] claimPeer(String relayHost, int relayPort, String roomId, String code)
+            throws IOException {
+        try (Socket s = new Socket()) {
+            s.connect(new InetSocketAddress(relayHost, relayPort), 15000);
+            s.setSoTimeout(15000);
+            OutputStream o = s.getOutputStream();
+            com.google.gson.JsonObject req = new com.google.gson.JsonObject();
+            req.addProperty("type", "vpn-claim");
+            req.addProperty("room", roomId);
+            req.addProperty("code", code);
+            o.write(("MCRELAY" + req + "\n").getBytes(StandardCharsets.UTF_8));
+            o.flush();
+            BufferedReader r = new BufferedReader(new InputStreamReader(
+                    s.getInputStream(), StandardCharsets.UTF_8));
+            String line = r.readLine();
+            if (line == null) {
+                throw new IOException("中继没有响应");
+            }
+            com.google.gson.JsonObject resp = com.google.gson.JsonParser.parseString(line)
+                    .getAsJsonObject();
+            if (resp.has("error")) {
+                throw new IOException("加入失败：" + resp.get("error").getAsString());
+            }
+            return new String[]{resp.get("token").getAsString(),
+                    resp.get("ip").getAsString(),
+                    resp.get("uuid").getAsString()};
+        }
+    }
+
+    // ---------------------------------------------------------------
+    //  数据泵
+    // ---------------------------------------------------------------
+    private static void pump(Socket from, Socket to) {
+        byte[] buf = new byte[32 * 1024];
+        try {
+            java.io.InputStream in = from.getInputStream();
+            OutputStream out = to.getOutputStream();
+            int n;
+            while ((n = in.read(buf)) >= 0) {
+                out.write(buf, 0, n);
+            }
+            try { to.shutdownOutput(); } catch (IOException ignored) { }
+        } catch (IOException ignored) {
+            // 任一端断开
+        }
+    }
+
+    private static void newPumpThreads(Socket aSock, Socket bSock) {
+        Thread a = new Thread(() -> {
+            pump(aSock, bSock);
+            closeQuietly(aSock);
+            closeQuietly(bSock);
+        }, "vpn-pump-a");
+        Thread b = new Thread(() -> {
+            pump(bSock, aSock);
+            closeQuietly(aSock);
+            closeQuietly(bSock);
+        }, "vpn-pump-b");
+        a.setDaemon(true);
+        b.setDaemon(true);
+        a.start();
+        b.start();
+    }
+
+    private static void closeQuietly(Socket s) {
+        try { s.close(); } catch (IOException ignored) { }
+    }
+
+    // ---------------------------------------------------------------
+    private static String[] requestRoom(String host, int port, String name, String apiKey)
+            throws IOException {
         String url = "http://" + host + ":" + port + "/api/host";
         java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
         try {
@@ -184,15 +598,19 @@ public final class VpnSession implements AutoCloseable {
             c.setReadTimeout(15000);
             c.setDoOutput(true);
             c.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            String body = "{\"name\":\"" + name.replace("\"", "") + "\"}";
-            byte[] b = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            if (apiKey != null && !apiKey.isBlank()) {
+                c.setRequestProperty("X-Api-Key", apiKey);
+            }
+            com.google.gson.JsonObject body = new com.google.gson.JsonObject();
+            body.addProperty("name", name);
+            byte[] b = body.toString().getBytes(StandardCharsets.UTF_8);
             c.setFixedLengthStreamingMode(b.length);
             try (var o = c.getOutputStream()) {
                 o.write(b);
             }
             int code = c.getResponseCode();
-            String resp = new String(c.getInputStream().readAllBytes(),
-                    java.nio.charset.StandardCharsets.UTF_8);
+            String resp = new String((code >= 400 ? c.getErrorStream() : c.getInputStream()).readAllBytes(),
+                    StandardCharsets.UTF_8);
             if (code != 200) {
                 throw new IOException("申请房间失败 HTTP " + code + ": " + resp);
             }
@@ -206,6 +624,26 @@ public final class VpnSession implements AutoCloseable {
     // ---------------------------------------------------------------
     @Override
     public void close() {
+        closed = true;
+        ACTIVE.compareAndSet(this, null);
+        try {
+            if (forwardServer != null) {
+                forwardServer.close();
+            }
+        } catch (IOException ignored) {
+        }
+        try {
+            if (peerServer != null) {
+                peerServer.close();
+            }
+        } catch (IOException ignored) {
+        }
+        if (forwardPool != null) {
+            forwardPool.shutdownNow();
+        }
+        if (controlThread != null) {
+            controlThread.interrupt();
+        }
         try {
             if (tunnel != null) {
                 tunnel.close();

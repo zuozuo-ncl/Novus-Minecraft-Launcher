@@ -252,12 +252,20 @@ public final class MirrorPool {
         if (mirror == null || hash == null || hash.length() < 2) {
             return null;
         }
+        // hash 必须是 40 位十六进制：它既用于拼 URL 也用于本地文件名，
+        // 上游数据异常时（或未来有人传入未校验的值）不能让 ../ 之类混进来
+        if (!HASH_RE.matcher(hash).matches()) {
+            return null;
+        }
         String base = mirror.baseUrl;
         if (!base.endsWith("/")) {
             base = base + "/";
         }
         return base + "assets/" + hash;
     }
+
+    private static final java.util.regex.Pattern HASH_RE =
+            java.util.regex.Pattern.compile("[0-9a-f]{40}");
 
     public boolean isEnabled() {
         return !getAvailableMirrors().isEmpty();

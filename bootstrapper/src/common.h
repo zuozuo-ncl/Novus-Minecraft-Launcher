@@ -53,7 +53,10 @@
 //
 //  为什么要多个：主接口曾多次因中转服务不稳定而连不上。任一地址失败
 //  会自动尝试下一个，全部失败才报错。
-#define VERSION_API_BASES {         L"https://version-interface.us.ci",                         L"http://frp.xueyuanpang.dpdns.org:37666",              }
+// 版本接口地址：**全部必须是 HTTPS**。
+// 以前的明文 HTTP 备路（frp.xueyuanpang.dpdns.org:37666）让网络上的任何人
+// 都能决定「下载哪个版本」，直接威胁到启动器 jar 的可信链。
+#define VERSION_API_BASES { L"https://version-interface.us.ci", L"https://frp.xueyuanpang.dpdns.org", }
 
 #define VERSION_API_PATH    L"/api/versions"
 
@@ -207,6 +210,13 @@ void InitArch();
 //  JavaFX 界面、主题切换、网络、版本清单全部正常。
 // ============================================================================
 #define ZULU_CDN  L"https://cdn.azul.com/zulu/bin/"
+
+// JRE 包的内置 SHA-256：{ 架构(x64/x32), 哈希 }。
+// 留空的架构只做严格的 ZIP 结构校验（见 java.cpp）。发布时把核验过的哈希填进来：
+//   { L"x64", L"<64 位十六进制>" },
+#define KNOWN_JRE_SHA256_LIST \
+    { L"x64", L"" }, \
+    { L"x32", L"" }
 
 // Zulu FX 文件名（32 位 i686 / 64 位 x64）
 #define ZULU_17_X86  L"zulu17.68.203-ca-fx-jre17.0.20.1-win_i686.zip"
@@ -403,6 +413,10 @@ namespace Http {
     std::wstring GetLastNetworkDetail();
 
 
+    // 下载源白名单：返回 true 才允许请求/跟随重定向。
+    // 用于 JRE 这类「下载后会被执行」的文件 —— 地址只允许来自固定的官方/CDN 域名。
+    using AllowRedirectFn = bool (*)(const std::wstring& url);
+
     // 简单的 GET，把响应体作为字符串返回（用于 JSON API）
     StepResult GetText(const std::wstring& url,
                        std::wstring& outText,
@@ -414,10 +428,12 @@ namespace Http {
     //   destPath    保存路径
     //   progress    进度回调（可为空）
     //   cancelFlag  指向一个 bool，主线程置 true 可请求取消（可为 nullptr）
+    //   allowUrl    下载源白名单（首跳与每一跳重定向都要满足），nullptr 表示不限制
     StepResult DownloadFile(const std::wstring& url,
                             const std::wstring& destPath,
                             ProgressFn progress,
-                            volatile bool* cancelFlag = nullptr);
+                            volatile bool* cancelFlag = nullptr,
+                            AllowRedirectFn allowUrl = nullptr);
 
     // 解析一个 URL 的 host / port / path
     bool ParseUrl(const std::wstring& url,
@@ -446,6 +462,10 @@ namespace Zip {
     StepResult ExtractTo(const std::wstring& zipPath,
                          const std::wstring& destDir,
                          ProgressFn progress);
+
+    // 只校验压缩包结构（中央目录 / 条目名 / zip-slip / 符号链接），不解压。
+    // JRE 这类「解压后立即执行」的包必须在解压前过这一关。
+    StepResult Validate(const std::wstring& zipPath);
 
 } // namespace Zip
 

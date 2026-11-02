@@ -45,7 +45,12 @@ public class UpdateClient {
      */
     private static final String[] API_BASES = {
             "https://version-interface.us.ci",                    // 主力
-            "http://frp.xueyuanpang.dpdns.org:37666",             // 备用
+            // 备用地址必须也是 HTTPS：明文 HTTP 后备会让中间人直接决定
+            // 「下载哪个版本、期望是什么哈希」（哈希又只认 HTTPS 来源），
+            // 等同把更新通道的信任根交给了网络路径上的任何人。
+            // 旧的 http://frp.xueyuanpang.dpdns.org:37666 已删除；
+            // 需要新的备用时请部署 HTTPS（反代/证书）后加在这里。
+            "https://frp.xueyuanpang.dpdns.org",                  // 备用（HTTPS）
     };
 
     /** 当前实际生效的地址（首次成功后记住，避免每次都从头试） */
@@ -287,6 +292,36 @@ public class UpdateClient {
         return JAR_PREFIX + "mc-launcher-" + version + ".jar";
     }
 
+    /** 对应 jar 的官方 .sha256 文件地址（发布脚本会上传；404 时由调用方跳过） */
+    public String jarShaUrl(String version) {
+        return JAR_PREFIX + "mc-launcher-" + version + ".jar.sha256";
+    }
+
+    /**
+     * 没有随接口下发的哈希时，去文件服务器取同目录的 .sha256。
+     *
+     * 注意这是「弱兜底」：文件和哈希同域，只能防止下载过程损坏/被临时替换，
+     * 真正的信任根仍然是引导器内置表 / 本机信任表。
+     *
+     * @return 64 位十六进制哈希；取不到返回 null
+     */
+    public String fetchOfficialSha256(String version) {
+        if (version == null || !version.matches("[0-9.\\-]+")) {
+            return null;
+        }
+        try {
+            String body = http.get(jarShaUrl(version));
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile("([0-9a-fA-F]{64})").matcher(body);
+            if (m.find()) {
+                return m.group(1).toLowerCase(java.util.Locale.ROOT);
+            }
+        } catch (Exception e) {
+            logger.info("取不到官方 .sha256（{}）: {}", version, e.getMessage());
+        }
+        return null;
+    }
+
     /**
      * 下载指定版本的 jar 到数据目录（保留旧版本，不删除）
      *
@@ -392,13 +427,17 @@ public class UpdateClient {
                 }
                 logger.info("下载内容 SHA-256 校验通过: {}", target.getFileName());
             } else {
-                // 没有哈希时也不能盲信：CDN / 反代返回 404 页面或错误 JSON 时
-                // 状态码可能是 200，下载下来的其实是一段 HTML。至少校验 ZIP 魔数。
-                if (!isZipFile(target)) {
+                // 没有哈希时不能盲信：CDN / 反代返回 404 页面或错误 JSON 时
+                // 状态码可能是 200。这里做两层弱校验：
+                //   · 必须是 ZIP；
+                //   · 解压后必须能打开、含主清单（Entry-Point），排除「假 jar」。
+                // 想更严格可以再加签名，但引导器侧仍会按信任表最终把关。
+                if (!isZipFile(target) || !looksLikeLauncherJar(target)) {
                     Files.deleteIfExists(target);
-                    throw new IOException("下载到的文件不是有效的 jar（可能是错误页面），已删除");
+                    throw new IOException("下载到的文件不是有效的启动器 jar（可能是错误页面），已删除");
                 }
-                logger.info("服务器未提供该版本哈希，已校验文件格式: {}", target.getFileName());
+                logger.warn("服务器未提供该版本哈希，只做了格式校验（建议服务端补登记 sha256）: {}",
+                        target.getFileName());
             }
             return target;
         } finally {
@@ -407,6 +446,20 @@ public class UpdateClient {
     }
 
     /** 文件开头是否为 ZIP 魔数（PK / PK / PK） */
+    private static boolean looksLikeLauncherJar(Path f) {
+        try (java.util.zip.ZipFile zf = new java.util.zip.ZipFile(f.toFile())) {
+            java.util.zip.ZipEntry mf = zf.getEntry("META-INF/MANIFEST.MF");
+            if (mf == null) {
+                return false;
+            }
+            String text = new String(zf.getInputStream(mf).readAllBytes(),
+                    java.nio.charset.StandardCharsets.ISO_8859_1);
+            return text.contains("Main-Class");
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     private static boolean isZipFile(Path f) {
         try (InputStream in = Files.newInputStream(f)) {
             byte[] h = in.readNBytes(4);

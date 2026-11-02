@@ -72,6 +72,13 @@ public class LauncherSettingsPage implements Page {
         this.launcherDir = launcherDir;
     }
 
+    /** 由 MainWindow 注入：用于「检查更新」时判断游戏是否在运行 */
+    private com.mclauncher.launcher.GameLauncher gameLauncher;
+
+    public void setGameLauncher(com.mclauncher.launcher.GameLauncher g) {
+        this.gameLauncher = g;
+    }
+
     /** 由 MainWindow 注入内嵌弹窗宿主 */
     public void setLanguageChangeListener(Runnable r) {
         this.languageChangeListener = r;
@@ -226,6 +233,11 @@ public class LauncherSettingsPage implements Page {
                                             modalHost, info, null)
                                             // 重启前落盘，保证刚保存的设置不丢
                                             .setBeforeRestart(() -> config.forceSave());
+                            // 和主页一样注入「游戏是否在运行」：否则游戏开着时
+                            // 点「立即重启」会把游戏进程一起带走
+                            if (gameLauncher != null) {
+                                dialog.setGameRunningCheck(gameLauncher::isRunning);
+                            }
                             dialog.show();
                         } else {
                             showMsg(L.t("s_bdeaca9059") + info.latestVersion

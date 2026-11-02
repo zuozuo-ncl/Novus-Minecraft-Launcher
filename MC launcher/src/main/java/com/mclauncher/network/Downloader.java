@@ -55,7 +55,7 @@ public class Downloader {
      */
     private static final int MAX_CHUNK_THREADS = 16;
 
-    private final OkHttpClient httpClient;
+    private volatile OkHttpClient httpClient;
     private final Gson gson;
     private ExecutorService downloadExecutor;
     private final ExecutorService chunkExecutor;
@@ -172,7 +172,9 @@ public class Downloader {
      * 设置代理
      */
     public void setProxy(Proxy proxy) {
-        this.httpClient.newBuilder()
+        // newBuilder().build() 返回的是**新**客户端，以前直接丢弃了 ——
+        // 一旦有人接入代理设置，这个函数等于什么都没做
+        this.httpClient = this.httpClient.newBuilder()
                 .proxy(proxy)
                 .build();
     }
@@ -463,7 +465,14 @@ public class Downloader {
      * 否则会显著增加请求数（有触发服务器限流的风险）。
      * 结果按 host 缓存，避免同一域名重复探测。
      */
-    private final Map<String, Boolean> rangeSupportCache = new ConcurrentHashMap<>();
+    /**
+     * host -> {是否支持 Range, 记录时间}。
+     *
+     * 以前只缓存布尔值、永不过期：探测失败（临时断网/429）的 host 会被永久
+     * 判成「不支持 Range」，之后分块下载/断点续传长期失准。现在 10 分钟后重探。
+     */
+    private static final long RANGE_CACHE_TTL_MS = 10 * 60 * 1000L;
+    private final Map<String, Object[]> rangeSupportCache = new ConcurrentHashMap<>();
 
     private boolean supportsRange(String url) {
         String host;
@@ -476,9 +485,9 @@ public class Downloader {
             host = url;
         }
 
-        Boolean cached = rangeSupportCache.get(host);
-        if (cached != null) {
-            return cached;
+        Object[] cached = rangeSupportCache.get(host);
+        if (cached != null && System.currentTimeMillis() - (Long) cached[1] < RANGE_CACHE_TTL_MS) {
+            return (Boolean) cached[0];
         }
 
         boolean supported = false;
@@ -498,7 +507,10 @@ public class Downloader {
             logger.debug("检测 Range 支持失败: {}", e.getMessage());
         }
 
-        rangeSupportCache.put(host, supported);
+        // 只缓存成功探测的结果；探测异常时本次直接返回 false，不污染缓存
+        if (supported) {
+            rangeSupportCache.put(host, new Object[]{Boolean.TRUE, System.currentTimeMillis()});
+        }
         return supported;
     }
 
@@ -968,9 +980,10 @@ public class Downloader {
 
         try (Response response = executeThrottled(request);
              InputStream is = response.body() != null ? response.body().byteStream() : null;
-             OutputStream os = Files.exists(destination)
+             OutputStream os = startPosition > 0 && Files.exists(destination)
                      ? Files.newOutputStream(destination, StandardOpenOption.APPEND)
-                     : Files.newOutputStream(destination)) {
+                     : Files.newOutputStream(destination,
+                             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
 
             // 关键：必须检查 HTTP 状态码。
             // 服务器返回 403/429/5xx 时响应体是错误页面（HTML/JSON），
@@ -983,6 +996,48 @@ public class Downloader {
 
             if (is == null) {
                 throw new IOException("响应体为空: " + url);
+            }
+
+            // 续传必须真的从 startPosition 开始：
+            //   · 请求过 Range 却拿到 200（整份文件）：从头写，不能 APPEND，
+            //     否则文件头部重复、大小恰好对上时哈希仍失败且难以定位；
+            //   · 206 的 Content-Range 起点与我们的续传点不一致：拒绝。
+            if (response.code() == 200 && startPosition > 0) {
+                logger.debug("服务器忽略了 Range，从头重新写入: {}", url);
+                downloaded = 0;
+                is.close();
+                try (InputStream restart = response.body() != null
+                        ? response.body().byteStream() : null;
+                     OutputStream trunc = Files.newOutputStream(destination,
+                             StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+                    if (restart != null) {
+                        byte[] buf = new byte[DEFAULT_BUFFER_SIZE];
+                        int n;
+                        while ((n = restart.read(buf)) != -1) {
+                            if (cancelled.get()) {
+                                throw new InterruptedIOException("已取消");
+                            }
+                            trunc.write(buf, 0, n);
+                            downloaded += n;
+                        }
+                    }
+                }
+                return downloaded;
+            }
+            if (response.code() == 206 && startPosition > 0) {
+                String cr = response.header("Content-Range");
+                if (cr != null && cr.contains(" ")) {
+                    try {
+                        long got = Long.parseLong(cr.substring(cr.indexOf(' ') + 1,
+                                cr.indexOf('-')));
+                        if (got != startPosition) {
+                            throw new IOException("续传起点不符（期望 " + startPosition
+                                    + "，实际 " + got + "）: " + url);
+                        }
+                    } catch (NumberFormatException | IndexOutOfBoundsException ignored) {
+                        // 解析不了就不强求
+                    }
+                }
             }
 
             // 若调用方没提供总大小，从响应头推断

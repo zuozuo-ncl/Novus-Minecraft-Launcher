@@ -6,8 +6,12 @@
  * 房主和玩家各自用 TCP 长连接到本服务器，服务器在其中转字节。
  * 每条连接开头是一行 JSON 握手（与房间协议同样的魔数前缀）：
  *
- *     房主：  MCRELAY\n{"type":"vpn-host","room":"a1b2c3","token":"...","peers":["uuid1",...]}\n
- *     玩家：  MCDATA\n{"type":"vpn-join","room":"a1b2c3","uuid":"..."}\n
+ *     房主：  MCRELAY\n{"type":"vpn-host","room":"a1b2c3","token":"..."}\n
+ *     玩家：  MCRELAY\n{"type":"vpn-join","room":"a1b2c3","uuid":"...","token":"..."}\n
+ *
+ *   玩家的 uuid 与虚拟 IP 由**服务器**分配：房主在控制通道上发
+ *   {"type":"vpn-token","id":N}，服务器回 {"type":"vpn-token","id":N,"token","uuid","ip"}，
+ *   房主再把这个 token/uuid 转给对应玩家。vpn-join 必须带 token，且一票一用。
  *
  * 房间用现有 createRoom 分配（复用端口池、速率限制、控制通道心跳），
  * 区别是 **不再监听端口**，所有流量都通过上面这两条 TCP 长连接。
@@ -76,6 +80,12 @@ function makeFramer(sock, prefetched, onHandshake, onFrame, onError) {
   if (prefetched && prefetched.length) {
     buf = buf.length ? Buffer.concat([prefetched, buf]) : Buffer.from(prefetched);
     process_();
+  }
+  // 交给 VPN 时 socket 一般还停在判定阶段留下的暂停状态（relay-server 的
+  // frontServer 先 pause 再嗅探魔数）。这里不 resume 的话，房主/玩家的数据
+  // 永远读不到 —— 表现为「房主已连接」之后立即断开。
+  if (typeof sock.resume === 'function') {
+    try { sock.resume(); } catch { /* 已关闭 */ }
   }
   return { feed: () => process_() };
 }

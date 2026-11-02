@@ -34,10 +34,12 @@ Type=simple
 # 修改为实际运行用户 (不要用 root)
 User=www
 Group=www
-# 修改为实际项目路径
-WorkingDirectory=/www/wwwroot/MC launcher-Server
-# Node.js 可执行文件路径 (用 which node 查看)
-ExecStart=/usr/bin/node server.js
+# 修改为实际项目路径（**路径含空格时必须加引号**）
+WorkingDirectory="/www/wwwroot/MC launcher-Server"
+# 管理令牌等敏感配置放这里（deploy.sh --setup 会自动生成）
+EnvironmentFile=-/www/wwwroot/MC launcher-Server/.env
+# Node.js：用 env 查找，避免不同发行版路径不同（/usr/bin/node 并不总是存在）
+ExecStart=/usr/bin/env node server.js
 # 重启策略
 Restart=on-failure
 RestartSec=5
@@ -57,8 +59,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/www/wwwroot/MC launcher-Server
-ReadWritePaths=/www/wwwroot/MC launcher-Server/logs
+ReadWritePaths="/www/wwwroot/MC launcher-Server"
+ReadWritePaths="/www/wwwroot/MC launcher-Server/logs"
 
 # 日志输出到 journald
 StandardOutput=journal

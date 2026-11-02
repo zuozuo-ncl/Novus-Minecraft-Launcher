@@ -34,6 +34,7 @@ public class ZipUtils {
 
         Files.createDirectories(destDir);
 
+        long totalUnzipped = 0;
         try (ZipInputStream zis = new ZipInputStream(
                 Files.newInputStream(zipFile), StandardCharsets.UTF_8)) {
 
@@ -42,10 +43,22 @@ public class ZipUtils {
                 Path entryPath = destDir.resolve(entry.getName()).normalize();
 
                 // 安全检查：防止路径遍历攻击
-                if (!entryPath.startsWith(destDir)) {
+                Path destAbs = destDir.toAbsolutePath().normalize();
+                if (!entryPath.toAbsolutePath().normalize().startsWith(destAbs)) {
                     logger.warn("跳过不安全的路径: {}", entry.getName());
                     zis.closeEntry();
                     continue;
+                }
+                // 已存在的父目录是符号链接/junction 时同样可能写到外面
+                if (crossesLink(destAbs, entryPath.toAbsolutePath().normalize())) {
+                    logger.warn("跳过经过外部链接的路径: {}", entry.getName());
+                    zis.closeEntry();
+                    continue;
+                }
+                // 本机唯一的解压上限：防止压缩炸弹把磁盘写满
+                totalUnzipped += entry.getSize() > 0 ? entry.getSize() : 0;
+                if (totalUnzipped > MAX_UNZIPPED_BYTES) {
+                    throw new IOException("解压体积超过上限（可能的压缩炸弹）: " + totalUnzipped);
                 }
 
                 if (entry.isDirectory()) {
@@ -81,6 +94,24 @@ public class ZipUtils {
     /**
      * 解压 ZIP 文件到目标目录（覆盖模式）
      */
+    /** 单个压缩包解压后的总大小上限（16 GB） */
+    private static final long MAX_UNZIPPED_BYTES = 16L * 1024 * 1024 * 1024;
+
+    private static boolean crossesLink(Path base, Path target) {
+        Path cur = base;
+        for (Path part : base.relativize(target)) {
+            cur = cur.resolve(part);
+            try {
+                if (Files.exists(cur, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(cur)) {
+                    return !cur.toRealPath().startsWith(base);
+                }
+            } catch (IOException e) {
+                return true;   // 判断不了就当作不安全
+            }
+        }
+        return false;
+    }
+
     public static void unzip(Path zipFile, Path destDir) throws IOException {
         unzip(zipFile, destDir, true);
     }

@@ -255,7 +255,18 @@ function requireAdmin(req, res, next) {
 // ==================== 通用中间件 ====================
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '50mb' }));
+
+/**
+ * 版本接口的请求体上限。
+ *
+ * 以前全局 50MB、且挂在鉴权之前：匿名请求往任意路由塞 50MB body 就能让
+ * 服务端缓冲 + JSON 解析，几个连接就能打满内存。版本接口的 body 只有几十字节，
+ * 64KB 足够；超限返回 413。
+ */
+const jsonBody = express.json({ limit: '64kb' });
+
+// 只需要 JSON 的版本接口才解析 body（且只解析一次）
+app.use(['/api/check-update', '/api/versions'], jsonBody);
 
 // API 响应一律禁止缓存：版本信息一变就该立刻生效，
 // 不希望中间的反代 / CDN 把「已是最新」缓存住。
@@ -272,7 +283,16 @@ app.use('/api', (req, res, next) => {
 });
 
 // 静态页面（Web 管理页）
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+app.use(express.static(path.join(__dirname, 'public'), {
+  index: false,
+  dotfiles: 'deny',
+  // 只发布静态资源；json/js 数据文件不应通过 / 暴露
+  setHeaders: (res) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy',
+        "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'");
+  },
+}));
 
 // 简易访问日志：只记 API 与非成功状态，避免图片/静态资源刷屏
 app.use((req, res, next) => {
@@ -302,6 +322,9 @@ app.post('/api/check-update', (req, res, next) => {
     const currentVersion = req.body && req.body.currentVersion;
     if (!currentVersion || typeof currentVersion !== 'string') {
       return res.status(400).json({ error: '缺少 currentVersion 参数' });
+    }
+    if (currentVersion.length > 64) {
+      return res.status(400).json({ error: 'currentVersion 过长' });
     }
 
     const data = readVersionFile();
@@ -432,6 +455,9 @@ app.put('/api/versions/latest', requireAdmin, async (req, res, next) => {
     if (!version || typeof version !== 'string') {
       return res.status(400).json({ error: '缺少 version 参数' });
     }
+    if (!VERSION_RE.test(version)) {
+      return res.status(400).json({ error: `版本号格式不正确：${version}` });
+    }
 
     const r = await mutateVersions((data) => {
       if (!data.versions.includes(version)) {
@@ -497,6 +523,12 @@ function getGzipBuffer(st, cb) {
     gzipCache.inflight.push(cb);
     return undefined;
   }
+  if (gzipCache.inflight && gzipCache.inflight.length) {
+    // 文件在压缩途中被替换：旧文件的等待者不能再拿新内容（ETag 是旧的）
+    const stale = gzipCache.inflight.splice(0);
+    const err = new Error('简介表在压缩过程中被替换，请重试');
+    stale.forEach((fn) => fn(err));
+  }
   const waiters = [cb];
   gzipCache = { key, buf: null, inflight: waiters };
   const chunks = [];
@@ -528,6 +560,8 @@ app.get('/mcmod_intros.json', (req, res, next) => {
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
     if (req.headers['if-none-match'] === etag) {
+      res.removeHeader('Content-Type');   // 304 不应带实体头
+      res.removeHeader('Content-Length');
       return res.status(304).end();
     }
 
@@ -561,19 +595,25 @@ app.get('/mcmod_intros.json', (req, res, next) => {
 });
 
 /** 根路径：Web 管理页 */
+/**
+ * 管理页文件名。
+ *
+ * 以前「优先 index.html，否则取排序后第一个 .html」——发布时多拷一个任意
+ * html 到 public/ 就可能顶替管理页。现在：优先 index.html；否则只认部署时
+ * 用 ADMIN_PAGE 指定的文件名（默认管理页），其它 html 不会自动成为入口。
+ */
+const ADMIN_PAGE = process.env.ADMIN_PAGE || 'zuozuo110927.html';
+
 app.get('/', (req, res) => {
   const dir = path.join(__dirname, 'public');
-  let html;
-  try {
-    // 优先 index.html；否则取排序后的第一个 html，保证每次结果一致
-    html = fs.existsSync(path.join(dir, 'index.html'))
-      ? 'index.html'
-      : fs.readdirSync(dir).filter((f) => f.endsWith('.html')).sort()[0];
-  } catch {
-    html = undefined;
+  const candidates = ['index.html', ADMIN_PAGE];
+  for (const name of candidates) {
+    const p = path.join(dir, path.basename(name));
+    if (fs.existsSync(p)) {
+      return res.sendFile(p);
+    }
   }
-  if (!html) return res.status(404).send('管理页面不存在');
-  return res.sendFile(path.join(dir, html));
+  return res.status(404).send('管理页面不存在（public/index.html 缺失）');
 });
 
 /** 健康检查（给 pm2 / nginx / 监控用） */
@@ -599,10 +639,27 @@ app.use((req, res) => {
   res.status(404).json({ error: `未找到: ${req.method} ${req.path}` });
 });
 
+/**
+ * 兜底：未捕获异常/拒绝不要直接让进程退出。
+ * 版本服务本身无状态（写盘都是同步原子写），记录后继续服务。
+ */
+process.on('uncaughtException', (e) => {
+  console.error('[未捕获异常]', e && e.stack ? e.stack : e);
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[未处理的 Promise 拒绝]', e && e.stack ? e.stack : e);
+});
+
 /** 统一错误处理：不把堆栈吐给客户端 */
 app.use((err, req, res, next) => {
   console.error('[错误]', req.method, req.originalUrl, err);
   if (res.headersSent) return next(err);
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: '请求体过大' });
+  }
+  if (err.status && err.status >= 400 && err.status < 500) {
+    return res.status(err.status).json({ error: '请求不合法' });
+  }
   // body 不是合法 JSON 时 express.json 会抛这个
   if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ error: '请求体不是合法 JSON' });

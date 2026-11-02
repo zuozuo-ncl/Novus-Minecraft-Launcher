@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
 
 /**
  * 游戏启动器核心
@@ -46,6 +47,34 @@ public class GameLauncher {
     private Consumer<String> logConsumer;
     private Consumer<Integer> exitConsumer;
 
+    /**
+     * MC 本地服务器「有玩家连上来」的通知（VPN 联机用）
+     *
+     * 参数：(玩家编号, 该连接在完成本地服务器握手前就已经收到的原始字节)。
+     * VPN 转发必须先写回这些字节（MC 握手 + login start 可能早于转发建立），
+     * 否则 MC 客户端会一直卡在「正在登录」。
+     */
+    private PlayerJoinHandler playerJoinConsumer;
+
+    /** 玩家接入回调：玩家编号、已读到的原始字节、本机连接 */
+    @FunctionalInterface
+    public interface PlayerJoinHandler {
+        void onPlayerJoin(int id, byte[] head, java.net.Socket sock);
+    }
+
+    /**
+     * 是否允许把本机 MC 局域网的连接交给 VPN 转发。
+     *
+     * 只在本机确实开了 VPN 房主时返回 true —— 否则任何人扫一下这台机器
+     * 的 MC 端口都能进来；也避免在没开 VPN 时浪费一个转发线程。
+     */
+    private BooleanSupplier vpnForwardingGate;
+
+    /** VPN 转发线程池（懒创建，随游戏进程退出时关闭） */
+    private java.util.concurrent.ExecutorService vpnForwardPool;
+    private volatile java.net.ServerSocket vpnForwarder;
+    private volatile int vpnPeerSeq = 0;
+
     public GameLauncher(ConfigManager config, Path launcherDir) {
         this.config = config;
         this.launcherDir = launcherDir;
@@ -71,6 +100,20 @@ public class GameLauncher {
     }
 
     /**
+     * 设置「玩家接入」回调（VPN 联机用）
+     */
+    public void setPlayerJoinConsumer(PlayerJoinHandler c) {
+        this.playerJoinConsumer = c;
+    }
+
+    /**
+     * 设置 VPN 转发开关：只有本机开了 VPN 房主时才允许接受转发连接
+     */
+    public void setVpnForwardingGate(BooleanSupplier gate) {
+        this.vpnForwardingGate = gate;
+    }
+
+    /**
      * 启动游戏
      *
      * @param versionId 版本 ID
@@ -79,7 +122,30 @@ public class GameLauncher {
      * @return 是否启动成功
      */
     public boolean launch(String versionId, Account account, String javaPath) {
+        return launch(versionId, account, javaPath, null);
+    }
+
+    /**
+     * 启动游戏（可注入账号刷新回调）
+     *
+     * @param refresher 可选：账号的 MC 令牌过期时用它换取新账号；为 null 时跳过刷新
+     */
+    public boolean launch(String versionId, Account account, String javaPath,
+                          java.util.function.UnaryOperator<Account> refresher) {
         try {
+            if (account != null && refresher != null
+                    && account.getType() == Account.Type.MICROSOFT && account.isTokenExpired()) {
+                try {
+                    log("登录令牌已过期，正在刷新…");
+                    Account fresh = refresher.apply(account);
+                    if (fresh != null) {
+                        account = fresh;
+                    }
+                } catch (Exception e) {
+                    logger.warn("刷新登录令牌失败，仍按原账号启动: {}", e.getMessage());
+                    log("刷新登录令牌失败：" + e.getMessage());
+                }
+            }
             log(L.t("s_5c89143955") + versionId + "...");
 
             // 1. 先加载版本 JSON，获取 Java 版本要求
@@ -150,8 +216,10 @@ public class GameLauncher {
                 if (id.matches("1\\.1[7-9].*") || id.matches("1\\.20\\.[0-4].*")) {
                     return 17;
                 }
-                if (id.matches("1\\.1[6-9].*")) {
-                    return 17; // 1.16+ 其实需要 16，但统一用 17
+                // 1.16 只需要 Java 16，但统一用 17；1.17-1.19 已由上面分支覆盖。
+                // 早期这里正则是 1.1[6-9]，与上面重叠且永不生效
+                if (id.matches("1\\.16(\\..*)?")) {
+                    return 17;
                 }
             }
         } catch (Exception e) {
@@ -308,7 +376,13 @@ public class GameLauncher {
                         L.t("s_92f35590d5"), L.t("s_4d0b4688c7"),
                         () -> {
                             started[0] = true;
-                            downloadJavaWithProgress(requiredVersion, resultRef, latch);
+                            try {
+                                downloadJavaWithProgress(requiredVersion, resultRef, latch);
+                            } catch (RuntimeException ex) {
+                                // 弹窗本身出问题时也要放行等待线程，否则启动永久卡住
+                                logger.error("Java 下载面板异常", ex);
+                                latch.countDown();
+                            }
                         },
                         latch::countDown));
 
@@ -425,6 +499,8 @@ public class GameLauncher {
                     closeBtn.setManaged(true);
                 });
             } finally {
+                // 确认分支里若弹窗/线程启动本身抛异常，latch 永不清零，
+                // 启动线程就会永久阻塞（表现为点了开始后一直卡在「正在准备」）
                 latch.countDown();
             }
         }, "java-downloader");
@@ -622,6 +698,10 @@ public class GameLauncher {
 
             boolean infoIs64 = is64Bit(info.getArch());
             boolean bestIs64 = is64Bit(best.getArch());
+            // 启动器是 32 位进程时，它拉起的游戏也只能用 32 位 JVM
+            if (!PlatformUtils.is64BitJvm() && infoIs64) {
+                continue;
+            }
 
             if (infoIs64 && !bestIs64) {
                 best = info;      // 64 位优先
@@ -1054,7 +1134,12 @@ public class GameLauncher {
                 if (Files.exists(libPath)) {
                     classpath.add(libPath);
                 } else {
-                    logger.debug("库文件不存在，跳过: {}", libPath);
+                    // 缺库会让游戏起不来且报错晦涩，必须让用户看到并提示「重新下载」
+                    logger.warn("库文件不存在，已跳过: {}", libPath);
+                    if (logConsumer != null) {
+                        log("缺少库文件：" + libPath.getFileName()
+                                + "（请在「下载」页重新安装该版本）");
+                    }
                 }
             }
         }
@@ -1066,24 +1151,56 @@ public class GameLauncher {
      * 检查库文件是否应该被加载
      */
     private boolean isLibraryAllowed(JsonObject library) {
-        if (!library.has("rules")) {
+        if (!library.has("rules") || !library.get("rules").isJsonArray()) {
             return true;
         }
+        JsonArray rules = library.getAsJsonArray("rules");
+        if (rules.size() == 0) {
+            return true;   // 空 rules 数组 = 无条件允许
+        }
 
+        // 默认拒绝；依次应用规则，最后一条匹配的规则决定结果
         boolean allowed = false;
         String currentOs = getCurrentOsName();
+        String osArch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
+        boolean is64 = osArch.contains("64") || osArch.equals("aarch64");
 
-        for (JsonElement ruleElement : library.getAsJsonArray("rules")) {
+        for (JsonElement ruleElement : rules) {
+            if (!ruleElement.isJsonObject()) {
+                continue;
+            }
             JsonObject rule = ruleElement.getAsJsonObject();
             boolean matches = true;
 
             if (rule.has("os")) {
                 JsonObject os = rule.getAsJsonObject("os");
-                if (os.has("name")) {
-                    String osName = os.get("name").getAsString();
-                    if (!osName.equalsIgnoreCase(currentOs)) {
+                if (os.has("name") && !os.get("name").getAsString().equalsIgnoreCase(currentOs)) {
+                    matches = false;
+                }
+                // os.arch：官方是 x86 / arm64；早期启动器会忽略它，arm64 机器上会拉错库
+                if (matches && os.has("arch")) {
+                    String want = os.get("arch").getAsString().toLowerCase(java.util.Locale.ROOT);
+                    boolean ok;
+                    switch (want) {
+                        case "x86", "i386", "i686", "32", "x32" -> ok = !is64;
+                        case "x86_64", "amd64", "x64", "arm64", "aarch64", "64" -> ok = is64;
+                        default -> ok = true;
+                    }
+                    if (!ok) {
                         matches = false;
                     }
+                }
+                if (matches && os.has("version")) {
+                    matches = versionPatternMatches(os.get("version").getAsString(),
+                            System.getProperty("os.version", ""));
+                }
+            }
+
+            if (matches && rule.has("features")) {
+                JsonObject feats = rule.getAsJsonObject("features");
+                // 启动器不支持任何 features（is_demo_user / has_custom_resolution 等）
+                if (feats.size() > 0) {
+                    matches = false;
                 }
             }
 
@@ -1094,6 +1211,38 @@ public class GameLauncher {
         }
 
         return allowed;
+    }
+
+    /** os.version 规则：支持 ^前缀、$ 后缀、* 通配 */
+    private static boolean versionPatternMatches(String pattern, String version) {
+        if (pattern == null || pattern.isEmpty()) {
+            return true;
+        }
+        boolean anchoredStart = pattern.startsWith("^");
+        boolean anchoredEnd = pattern.endsWith("$");
+        String core = pattern;
+        core = (anchoredStart ? core.substring(1) : core);
+        core = (anchoredEnd ? core.substring(0, core.length() - 1) : core);
+        StringBuilder re = new StringBuilder();
+        int last = 0;
+        for (int k = 0; k < core.length(); k++) {
+            if (core.charAt(k) == '*') {
+                re.append(java.util.regex.Pattern.quote(core.substring(last, k))).append(".*");
+                last = k + 1;
+            }
+        }
+        re.append(java.util.regex.Pattern.quote(core.substring(last)));
+        if (anchoredStart) {
+            re.insert(0, "^");
+        }
+        if (anchoredEnd) {
+            re.append("$");
+        }
+        try {
+            return java.util.regex.Pattern.compile(re.toString()).matcher(version).find();
+        } catch (Exception e) {
+            return true;
+        }
     }
 
     /**
@@ -1454,6 +1603,136 @@ public class GameLauncher {
         }
     }
 
+    // ==================== VPN 转发 ====================
+
+    /**
+     * 启动 VPN 转发监听。
+     *
+     * MC 的「对局域网开放」会让客户端自动连回本机 gamePort（Java 里报给客户端的
+     * 就是那个端口）。VPN 玩家（10.77.0.x）经由中转发来的 IPv4 包让我们替他们
+     * 连 127.0.0.1:gamePort。但本机 MC 已经占住 gamePort，所以这里换个端口监听，
+     * 再把连接转发给 MC，并通过回调把「玩家编号 + 已收到的原始字节」交给 VPN 层。
+     *
+     * 端口占用/被防火墙拦截都不应影响正常启动游戏 —— 失败只记日志。
+     */
+    private void startVpnForwarder(int gamePort) {
+        if (vpnForwarder != null) {
+            return;
+        }
+        gamePort = Math.max(0, Math.min(gamePort, 65535));
+        // 已经开着 VPN 房主时，优先用 VPN 会话里「实际空出来的端口」；
+        // 否则用局域网端口（MC 自己占着时下面 bind 会失败，只记日志）
+        try {
+            com.mclauncher.multiplayer.vpn.VpnSession host =
+                    com.mclauncher.multiplayer.vpn.VpnSession.activeHost();
+            if (host != null && host.forwardGatewayPort() > 0) {
+                gamePort = host.forwardGatewayPort();
+            }
+        } catch (Throwable ignored) {
+            // 不影响正常启动
+        }
+        try {
+            java.net.ServerSocket ss = new java.net.ServerSocket();
+            ss.setReuseAddress(true);
+            // 只监听回环：外部扫描不到；VPN 包只经由我们自己的转发进入
+            int port = gamePort > 0 ? gamePort : 0;   // 0 = 让系统分配
+            ss.bind(new java.net.InetSocketAddress(java.net.InetAddress.getByName("127.0.0.1"), port), 50);
+            ss.setSoTimeout(100);
+            vpnForwarder = ss;
+            Thread t = new Thread(() -> acceptVpnPeers(ss), "vpn-local-forward");
+            t.setDaemon(true);
+            t.start();
+            logger.info("VPN 本地转发已在 127.0.0.1:{} 监听（转发到 MC {}）", ss.getLocalPort(), gamePort);
+        } catch (Exception e) {
+            logger.info("VPN 本地转发未启动（不影响游戏本体）: {}", e.getMessage());
+        }
+    }
+
+    private void acceptVpnPeers(java.net.ServerSocket ss) {
+        while (true) {
+            try {
+                java.net.Socket client = ss.accept();
+                client.setSoTimeout(3000);
+                client.setTcpNoDelay(true);
+                // 先读「已经到达的字节」：MC 握手 + login 可能在转发建立前就到了
+                byte[] head = readAvailable(client);
+                client.setSoTimeout(0);
+                if (vpnForwardingGate != null && !vpnForwardingGate.getAsBoolean()) {
+                    logger.info("收到 VPN 转发但本机未开 VPN 房主，已断开");
+                    client.close();
+                    continue;
+                }
+                if (playerJoinConsumer == null) {
+                    client.close();
+                    continue;
+                }
+                int id = ++vpnPeerSeq;
+                java.util.concurrent.ExecutorService pool;
+                synchronized (this) {
+                    if (vpnForwardPool == null || vpnForwardPool.isShutdown()) {
+                        vpnForwardPool = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                            Thread th = new Thread(r, "vpn-peer-" + id);
+                            th.setDaemon(true);
+                            return th;
+                        });
+                    }
+                    pool = vpnForwardPool;
+                }
+                final java.net.Socket sock = client;
+                final byte[] headCopy = head;
+                pool.submit(() -> playerJoinConsumer.onPlayerJoin(id, headCopy, sock));
+                logger.info("VPN 玩家 #{} 接入本地转发（预读 {} 字节）", id, head.length);
+            } catch (java.net.SocketTimeoutException ignored) {
+                // 只是用来定期检查是否该退出
+            } catch (Exception e) {
+                if (ss.isClosed()) {
+                    return;
+                }
+                logger.debug("VPN 转发 accept 结束: {}", e.getMessage());
+                return;
+            }
+            if (ss.isClosed()) {
+                return;
+            }
+        }
+    }
+
+    /** 读出 socket 里当前已经到达的字节（最多等约 80ms 不再有新数据） */
+    private static byte[] readAvailable(java.net.Socket s) {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[4096];
+        try {
+            java.io.InputStream in = s.getInputStream();
+            long idleUntil = System.currentTimeMillis() + 80;
+            while (System.currentTimeMillis() < idleUntil) {
+                if (in.available() <= 0) {
+                    Thread.sleep(5);
+                    continue;
+                }
+                int n = in.read(buf, 0, Math.min(buf.length, in.available()));
+                if (n <= 0) break;
+                bos.write(buf, 0, n);
+                if (bos.size() > 64 * 1024) break;
+                idleUntil = System.currentTimeMillis() + 30;
+            }
+        } catch (Exception ignored) {
+            // 没有数据也正常
+        }
+        return bos.toByteArray();
+    }
+
+    /** 关闭 VPN 转发监听（游戏结束时调用） */
+    private void stopVpnForwarder() {
+        java.net.ServerSocket ss = vpnForwarder;
+        vpnForwarder = null;
+        if (ss != null) {
+            try {
+                ss.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
     /**
      * 启动进程
      *
@@ -1483,6 +1762,10 @@ public class GameLauncher {
         logger.info("启动游戏进程...");
         log("正在启动游戏进程...");
 
+        // VPN 联机：让虚拟局域网的玩家能连进本机 MC 服务器
+        // （转发口 = 局域网端口 + 1，见 VpnSession.FORWARD_OFFSET）
+        startVpnForwarder(config.getVpnForwardPort());
+
         // 启动进程
         gameProcess = pb.start();
 
@@ -1507,6 +1790,9 @@ public class GameLauncher {
             try {
                 int exitCode = process.waitFor();
                 logger.info("游戏进程退出，退出码: {}", exitCode);
+
+                // 游戏结束：停掉 VPN 本地转发监听
+                stopVpnForwarder();
 
                 if (exitConsumer != null) {
                     exitConsumer.accept(exitCode);
@@ -1574,9 +1860,20 @@ public class GameLauncher {
                 continue;
             }
 
+            // 独立参数形式：--accessToken xxx
             if (arg.equals("--accessToken") || arg.equals("--auth_session")) {
                 masked.add(arg);
                 maskNext = true;
+                continue;
+            }
+            // 等号形式：--accessToken=xxx；JVM 属性形式：-Dauth_access_token=xxx
+            // 这两处以前漏了，会把 token 明文打进日志
+            String lower = arg.toLowerCase(java.util.Locale.ROOT);
+            if (lower.startsWith("--accesstoken=") || lower.startsWith("--auth_session=")
+                    || lower.startsWith("-dauth_access_token=") || lower.startsWith("-dauth_session=")
+                    || lower.startsWith("-daccessToken=".toLowerCase(java.util.Locale.ROOT))) {
+                int eq = arg.indexOf('=');
+                masked.add(arg.substring(0, eq + 1) + "***");
                 continue;
             }
 

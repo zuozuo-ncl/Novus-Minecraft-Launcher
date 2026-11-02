@@ -14,6 +14,8 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <objbase.h>
+#include <vector>
+#include <cstring>
 
 
 namespace {
@@ -71,6 +73,114 @@ DWORD RunAndWait(const std::wstring& cmdLine, bool hidden = true) {
     CloseHandle(pi.hProcess);
 
     return exitCode;
+}
+
+// ---------------------------------------------------------------------------
+// Shell CopyHere 是**异步**的（无消息泵时也照样立即返回 S_OK）。
+// 以前把 S_OK 当「解压完成」，紧接着去找 javaw.exe 会找不到（解压还没写完）。
+// 这里解析 CopyHere 的返回文件夹对象，轮询其条目数是否稳定；
+// 拿不到条目数时退回「轮询目标目录字节数是否稳定」。
+// ---------------------------------------------------------------------------
+static unsigned long long DirByteSizeNoWait(const std::wstring& dir);
+
+// 对象的命名里面有 Items / Count / Item —— 就是我们要找的「文件夹」对象
+bool LooksLikeFolderObject(IDispatch* p) {
+    if (!p) return false;
+    OLECHAR* names[] = {const_cast<OLECHAR*>(L"Items"),
+                        const_cast<OLECHAR*>(L"Count"),
+                        const_cast<OLECHAR*>(L"Item")};
+    DISPID ids[3] = {0, 0, 0};
+    return SUCCEEDED(p->GetIDsOfNames(IID_NULL, names, 3, LOCALE_USER_DEFAULT, ids));
+}
+
+// 调用 p 的 name 属性（0 参数），结果写入 out
+bool InvokeNoArgs(IDispatch* p, const wchar_t* name, VARIANT& out) {
+    DISPID id = 0;
+    OLECHAR* n = const_cast<OLECHAR*>(name);
+    if (FAILED(p->GetIDsOfNames(IID_NULL, &n, 1, LOCALE_USER_DEFAULT, &id))) return false;
+    DISPPARAMS dp = {nullptr, nullptr, 0, 0};
+    return SUCCEEDED(p->Invoke(id, IID_NULL, LOCALE_USER_DEFAULT, DISPATCH_PROPERTYGET,
+                               &dp, &out, nullptr, nullptr));
+}
+
+// 等 Shell 真正写完：轮询目标文件夹的条目数（拿不到就轮询目录字节数）直到稳定
+bool WaitForShellFolderDone(IDispatch* folder, const std::wstring& destDir) {
+    // 目标目录在解压前就存在（可能为空），先记录基线，避免「空目录稳定」被当成完成
+    const unsigned long long baseline = DirByteSizeNoWait(destDir);
+    auto shellItemCount = [&]() -> long {
+        VARIANT vItems;
+        VariantInit(&vItems);
+        long n = -1;
+        if (InvokeNoArgs(folder, L"Items", vItems) && vItems.vt == VT_DISPATCH && vItems.pdispVal) {
+            VARIANT vCount;
+            VariantInit(&vCount);
+            if (InvokeNoArgs(vItems.pdispVal, L"Count", vCount)
+                && (vCount.vt == VT_I4 || vCount.vt == VT_UI4)) {
+                n = vCount.lVal;
+            }
+            VariantClear(&vCount);
+            vItems.pdispVal->Release();
+        }
+        VariantClear(&vItems);
+        return n;
+    };
+
+    const DWORD started = GetTickCount();
+    long last = -2;
+    int stable = 0;
+    unsigned long long lastBytes = ~0ull;
+    while (GetTickCount() - started < 10 * 60 * 1000) {
+        Sleep(300);
+        long n = folder ? shellItemCount() : -1;
+        if (n >= 0) {
+            if (n == last) {
+                if (++stable >= 3) {
+                    Log::WriteF(L"Shell 解压完成：顶层条目 %ld 个", n);
+                    return true;
+                }
+            } else {
+                stable = 0;
+                last = n;
+            }
+            continue;
+        }
+        unsigned long long bytes = DirByteSizeNoWait(destDir);
+        if (bytes == lastBytes && bytes != baseline) {
+            if (++stable >= 3) {
+                Log::WriteF(L"Shell 解压完成（按目录大小判定）：%llu",
+                            static_cast<unsigned long long>(bytes));
+                return true;
+            }
+        } else {
+            stable = 0;
+            lastBytes = bytes;
+        }
+    }
+    Log::Write(L"等待 Shell 解压超时");
+    return false;
+}
+
+// 递归统计目录内容（字节数之和 + 固定偏置，用 FindFirstFileW，不依赖 Shell）
+static unsigned long long DirByteSizeNoWait(const std::wstring& dir) {
+    unsigned long long total = 0;
+    WIN32_FIND_DATAW fd;
+    std::wstring pattern = dir;
+    if (!pattern.empty() && pattern.back() != L'\\' && pattern.back() != L'/') pattern += L'\\';
+    pattern += L'*';
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    do {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+        std::wstring child = pattern.substr(0, pattern.size() - 1) + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            total += DirByteSizeNoWait(child) + 7;
+        } else {
+            total += ((static_cast<unsigned long long>(fd.nFileSizeHigh) << 32)
+                      | fd.nFileSizeLow) + 13;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return total;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,12 +302,23 @@ bool ExtractWithShellCom(const std::wstring& zipPath,
                                                            nullptr, nullptr);
 
                                     VariantClear(&args[1]);
-                                    VariantClear(&vRet);
 
                                     ok = SUCCEEDED(hrInit);
                                     if (!ok) {
                                         Log::Write(L"Shell CopyHere 调用失败");
                                     }
+                                    // CopyHere 成功后必须等它真正写完：
+                                    // 返回值要么是脚本对象（MyPick 占位），要么是
+                                    // 目标文件夹对象；我们更直接地轮询目标目录是否稳定。
+                                    else if (WaitForShellFolderDone(
+                                                 (vRet.vt == VT_DISPATCH && LooksLikeFolderObject(vRet.pdispVal))
+                                                     ? vRet.pdispVal : nullptr,
+                                                 destDir)) {
+                                        Log::Write(L"Shell 解压内容已落盘");
+                                    } else {
+                                        ok = false;
+                                    }
+                                    VariantClear(&vRet);
                                 }
                                 pItem->Release();
                             }
@@ -286,7 +407,24 @@ bool IsSafeZipEntryName(const wchar_t* name) {
     return true;
 }
 
-// 读到 ZIP 的中央目录，逐个检查条目名；不需要解压任何数据
+// 从文件指定偏移读取指定字节数（按需读取，不把整个 ZIP 读进内存）
+bool ReadAt(HANDLE f, unsigned long long offset, void* out, DWORD len) {
+    LARGE_INTEGER pos;
+    pos.QuadPart = static_cast<LONGLONG>(offset);
+    if (!SetFilePointerEx(f, pos, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    DWORD read = 0;
+    return ReadFile(f, out, len, &read, nullptr) && read == len;
+}
+
+// 读 ZIP 的中央目录，逐个检查条目名；按需分段读取，不整包载入内存。
+//
+// 安全要点（历史缺陷）：
+//   · 以前 EOCD 里「条目数 == 0xFFFF」（ZIP64 占位）时直接返回「校验通过」，
+//     恶意 zip 只要改写这一个字段就能让 zip-slip 检查整体失效；
+//   · 以前把整个包 malloc 进内存、ReadFile 长度按 DWORD 截断，大包直接失败。
+//   现在：识别到 ZIP64 就去解析 ZIP64 EOCD 拿到真实条目数；解析不了就拒绝（fail-closed）。
 bool ValidateZipEntries(const std::wstring& zipPath) {
     HANDLE f = CreateFileW(zipPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -294,66 +432,105 @@ bool ValidateZipEntries(const std::wstring& zipPath) {
         return false;
     }
     bool ok = false;
-    unsigned char* b = nullptr;
     do {
         LARGE_INTEGER size;
         if (!GetFileSizeEx(f, &size) || size.QuadPart < 22) {
+            Log::Write(L"ZIP 校验失败：文件过短，不是合法 ZIP");
             break;
         }
-        LARGE_INTEGER zero;
-        zero.QuadPart = 0;
-        if (!SetFilePointerEx(f, zero, nullptr, FILE_BEGIN)) {
-            break;
-        }
-        b = static_cast<unsigned char*>(malloc(static_cast<size_t>(size.QuadPart)));
-        if (!b) {
-            break;
-        }
-        DWORD read = 0;
-        if (!ReadFile(f, b, static_cast<DWORD>(size.QuadPart), &read, nullptr)
-                || read != size.QuadPart) {
+        const unsigned long long fileSize = static_cast<unsigned long long>(size.QuadPart);
+
+        // 尾部注释最长 65535 字节，EOCD 固定 22 字节：只需读最后 65557 字节
+        unsigned long long tailLen = fileSize < 65557 ? fileSize : 65557;
+        unsigned long long tailStart = fileSize - tailLen;
+        std::vector<unsigned char> tail(static_cast<size_t>(tailLen), 0);
+        if (!ReadAt(f, tailStart, tail.data(), static_cast<DWORD>(tailLen))) {
+            Log::Write(L"ZIP 校验失败：读取文件尾部失败");
             break;
         }
 
-        // 找 EOCD（签名 0x06054b50），从尾部往前最多 65KB+（注释长度上限）
+        // 找 EOCD（签名 0x06054b50），从尾部往前
         const unsigned char eocdSig[4] = {0x50, 0x4b, 0x05, 0x06};
-        long long eocd = -1;
-        long long lowest = read > 65557 ? read - 65557 : 0;
-        for (long long i = read - 22; i >= lowest; --i) {
-            if (memcmp(b + i, eocdSig, 4) == 0) {
-                eocd = i;
+        long long eocdInTail = -1;
+        for (long long i = static_cast<long long>(tailLen) - 22; i >= 0; --i) {
+            if (memcmp(tail.data() + i, eocdSig, 4) == 0) {
+                eocdInTail = i;
                 break;
             }
         }
-        if (eocd < 0) {
+        if (eocdInTail < 0) {
             Log::Write(L"ZIP 校验失败：找不到中央目录");
             break;
         }
+        const unsigned char* eocd = tail.data() + eocdInTail;
+        const unsigned long long eocdOffset = tailStart + static_cast<unsigned long long>(eocdInTail);
+
         unsigned long long total = 0;
-        memcpy(&total, b + eocd + 10, 2);        // 本盘条目数
         unsigned long long cdSize = 0, cdOffset = 0;
-        memcpy(&cdSize, b + eocd + 12, 4);
-        memcpy(&cdOffset, b + eocd + 16, 4);
-        if (total == 0xFFFF) {
-            Log::Write(L"ZIP 校验：ZIP64 条目数占位，跳过详细校验");
-            ok = true;
-            break;
+        unsigned short total16 = 0;
+        memcpy(&total16, eocd + 10, 2);          // 本盘条目数
+        total = total16;
+        memcpy(&cdSize, eocd + 12, 4);
+        memcpy(&cdOffset, eocd + 16, 4);
+
+        // ZIP64：任一字段为占位值时，往前找 ZIP64 EOCD locator（0x07064b50，20 字节）
+        const bool needZip64 = (total16 == 0xFFFF) || (cdSize == 0xFFFFFFFF)
+                               || (cdOffset == 0xFFFFFFFF) || eocdOffset < 20;
+        if (needZip64) {
+            unsigned char loc[20];
+            if (eocdOffset < 20 || !ReadAt(f, eocdOffset - 20, loc, 20)
+                || memcmp(loc, "\x50\x4b\x06\x07", 4) != 0) {
+                Log::Write(L"ZIP 校验失败：ZIP64 占位但找不到 ZIP64 EOCD locator，拒绝解压");
+                break;
+            }
+            unsigned long long z64Offset = 0;
+            memcpy(&z64Offset, loc + 8, 8);
+            unsigned char ze[56];
+            if (z64Offset + 56 > fileSize || !ReadAt(f, z64Offset, ze, 56)
+                || memcmp(ze, "\x50\x4b\x06\x06", 4) != 0) {
+                Log::Write(L"ZIP 校验失败：ZIP64 EOCD 记录无效，拒绝解压");
+                break;
+            }
+            unsigned long long zTotal = 0, zCdSize = 0, zCdOffset = 0;
+            memcpy(&zTotal, ze + 32, 8);         // 本盘条目数
+            memcpy(&zCdSize, ze + 40, 8);
+            memcpy(&zCdOffset, ze + 48, 8);
+            total = zTotal;
+            cdSize = zCdSize;
+            cdOffset = zCdOffset;
+            Log::WriteF(L"ZIP 校验：ZIP64 包，条目数 %llu",
+                        static_cast<unsigned long long>(total));
         }
-        if (cdOffset + cdSize > static_cast<unsigned long long>(read)) {
-            Log::Write(L"ZIP 校验失败：中央目录越界");
+
+        // 条目数合理性：每个中央目录记录至少 46 字节
+        if (total > cdSize / 46 || cdOffset + cdSize > fileSize) {
+            Log::Write(L"ZIP 校验失败：中央目录越界或条目数不合理");
             break;
         }
 
-        unsigned long long p = cdOffset;
+        // 分块读取中央目录（最多一次读 1MB）
+        std::vector<unsigned char> cd;
+        unsigned long long remaining = cdSize;
+        if (remaining > 64ull * 1024 * 1024) {
+            Log::Write(L"ZIP 校验失败：中央目录过大");
+            break;
+        }
+        cd.resize(static_cast<size_t>(remaining));
+        if (remaining > 0 && !ReadAt(f, cdOffset, cd.data(), static_cast<DWORD>(remaining))) {
+            Log::Write(L"ZIP 校验失败：读取中央目录失败");
+            break;
+        }
+
+        unsigned long long p = 0;
         ok = true;
         for (unsigned long long k = 0; k < total; ++k) {
-            if (p + 46 > cdOffset + cdSize) {
+            if (p + 46 > cdSize) {
                 ok = false;
+                Log::Write(L"ZIP 校验失败：中央目录记录截断");
                 break;
             }
-            unsigned char* rec = b + p;
-            const unsigned char cdSig[4] = {0x50, 0x4b, 0x01, 0x02};
-            if (memcmp(rec, cdSig, 4) != 0) {
+            const unsigned char* rec = cd.data() + p;
+            if (memcmp(rec, "\x50\x4b\x01\x02", 4) != 0) {
                 ok = false;
                 break;
             }
@@ -361,7 +538,7 @@ bool ValidateZipEntries(const std::wstring& zipPath) {
             memcpy(&nameLen, rec + 28, 2);
             memcpy(&extraLen, rec + 30, 2);
             memcpy(&commentLen, rec + 32, 2);
-            if (p + 46 + nameLen > static_cast<unsigned long long>(read)) {
+            if (p + 46 + nameLen > cdSize) {
                 ok = false;
                 break;
             }
@@ -373,15 +550,16 @@ bool ValidateZipEntries(const std::wstring& zipPath) {
                 ok = false;
                 break;
             }
-            // 条目名是 UTF-8（可能不是）；按本地代码页转宽字符后检查
-            std::string name(reinterpret_cast<char*>(rec + 46), nameLen);
+            std::string name(reinterpret_cast<const char*>(rec + 46), nameLen);
             std::wstring wname = Util::Utf8ToWide(name);
             if (wname.empty()) {
                 int need = MultiByteToWideChar(CP_ACP, 0, name.data(),
                                                static_cast<int>(name.size()), nullptr, 0);
-                wname.resize(need);
-                MultiByteToWideChar(CP_ACP, 0, name.data(), static_cast<int>(name.size()),
-                                    &wname[0], need);
+                if (need > 0) {
+                    wname.resize(static_cast<size_t>(need));
+                    MultiByteToWideChar(CP_ACP, 0, name.data(), static_cast<int>(name.size()),
+                                        wname.data(), need);
+                }
             }
             if (!IsSafeZipEntryName(wname.c_str())) {
                 Log::WriteF(L"ZIP 校验失败：不安全条目 %s", wname.c_str());
@@ -392,19 +570,26 @@ bool ValidateZipEntries(const std::wstring& zipPath) {
         }
     } while (false);
 
-    if (b) {
-        free(b);
-    }
     CloseHandle(f);
     return ok;
 }
-
 } // namespace
 
 // ============================================================================
 //  Zip 实现
 // ============================================================================
 namespace Zip {
+
+StepResult Validate(const std::wstring& zipPath) {
+    if (!Util::IsFile(zipPath)) {
+        return StepResult::FileError;
+    }
+    if (!ValidateZipEntries(zipPath)) {
+        Log::WriteF(L"ZIP 结构校验失败（条目非法或文件损坏）: %s", zipPath.c_str());
+        return StepResult::ExtractError;
+    }
+    return StepResult::Ok;
+}
 
 StepResult ExtractTo(const std::wstring& zipPath,
                      const std::wstring& destDir,

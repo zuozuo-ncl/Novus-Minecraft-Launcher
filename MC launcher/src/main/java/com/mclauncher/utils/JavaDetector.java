@@ -236,7 +236,10 @@ public class JavaDetector {
         // 守护线程：即使子进程卡住，也不会阻止 JVM 退出
         Thread reader = new Thread(() -> {
             try (java.io.InputStream in = process.getInputStream();
-                 java.io.Reader r = new java.io.InputStreamReader(in, StandardCharsets.UTF_8);
+                 // java -version 用的是系统 ANSI 代码页（中文系统上是 GBK），
+                 // 用 UTF-8 解码会得到乱码，部分本地化输出还会让版本号解析失败
+                 java.io.Reader r = new java.io.InputStreamReader(in,
+                         java.nio.charset.Charset.defaultCharset());
                  BufferedReader br = new BufferedReader(r)) {
                 String line;
                 while ((line = br.readLine()) != null) {
@@ -267,44 +270,72 @@ public class JavaDetector {
         }
     }
 
-    /**
-     * 从版本字符串中解析主版本号
-     * 例如："1.8.0_292" -> 8, "17.0.1" -> 17, "11.0.11" -> 11
-     */
     private static int parseMajorVersion(String versionString) {
         if (versionString == null || versionString.isEmpty()) {
             return 0;
         }
-
-        try {
-            // 匹配版本号格式：1.x.x 或 x.x.x
-            String[] parts = versionString.split("[\"\\s]");
-            for (String part : parts) {
-                if (part.startsWith("\"") || part.startsWith("'")) {
-                    part = part.replaceAll("[\"']", "");
-                }
-
-                // 处理 "1.8.x" 格式
-                if (part.matches("1\\.\\d+\\.\\d+.*")) {
-                    String[] versionParts = part.split("\\.");
-                    if (versionParts.length >= 2) {
-                        return Integer.parseInt(versionParts[1]);
-                    }
-                }
-
-                // 处理 "17.x.x" 或 "11.x.x" 格式
-                if (part.matches("\\d+\\.\\d+\\.\\d+.*")) {
-                    String[] versionParts = part.split("\\.");
-                    if (versionParts.length >= 1) {
-                        return Integer.parseInt(versionParts[0]);
-                    }
-                }
+        // openjdk version "21.0.2" 2024-01-16 / java version "1.8.0_292"
+        if (QUOTED_VERSION != null) {
+            java.util.regex.Matcher m = QUOTED_VERSION.matcher(versionString);
+            if (m.find()) {
+                return majorOf(m.group(1));
             }
-        } catch (Exception e) {
-            logger.debug("解析版本号失败: {}", e.getMessage());
         }
-
+        // 没有引号：openjdk 25-ea 2025-xx / 1.8.0_292（取第一行里第一个版本串）
+        for (String line : versionString.split("\n")) {
+            String t = line.trim();
+            if (t.isEmpty()) {
+                continue;
+            }
+            java.util.regex.Matcher mm = BARE_VERSION.matcher(t);
+            if (mm.find()) {
+                return majorOf(mm.group());
+            }
+        }
         return 0;
+    }
+
+    /**
+     * 引号里的版本号。
+     *
+     * 用字符类 [^&#34;]+ 而不是在字符串里写引号，避免转义地狱；
+     * &#34; 即双引号字符。
+     */
+    private static final java.util.regex.Pattern QUOTED_VERSION = buildQuoted();
+    private static final java.util.regex.Pattern BARE_VERSION = buildBare();
+
+    private static java.util.regex.Pattern buildQuoted() {
+        char q = '"';
+        try {
+            return java.util.regex.Pattern.compile(
+                    "version" + "\\s*" + q + "([^" + q + "]+)" + q);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static java.util.regex.Pattern buildBare() {
+        try {
+            return java.util.regex.Pattern.compile(
+                    "(?:(?<=openjdk )|(?<=java )|(?<=jdk ))"
+                            + "([0-9]+(?:[._][0-9]+)*(?:-[a-zA-Z0-9.]+)?)");
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** "1.8.0_292" -> 8，"17.0.1" -> 17，"21" -> 21，"25-ea" -> 25 */
+    private static int majorOf(String ver) {
+        String v = ver.trim();
+        String[] parts = v.split("[._-]");
+        try {
+            if (parts.length >= 2 && "1".equals(parts[0])) {
+                return Integer.parseInt(parts[1]);
+            }
+            return Integer.parseInt(parts[0]);
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     /**

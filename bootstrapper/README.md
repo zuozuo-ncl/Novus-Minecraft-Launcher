@@ -124,7 +124,7 @@ Adoptium 的 API（`api.adoptium.net`）本身可访问，但它返回的下载�
 ## 文件位置
 
 - 引导器：`bin/MCLauncherBootstrap.exe`（约 2.8 MB，单文件，无外部依赖）
-- 版本管理接口：`http://frp.xueyuanpang.dpdns.org:37666/api/versions`
+- 版本管理接口：`https://version-interface.us.ci/api/versions`
 - jar 下载：`https://3984235.xyz/mc-launcher-<版本>.jar`
 
 ## 排错

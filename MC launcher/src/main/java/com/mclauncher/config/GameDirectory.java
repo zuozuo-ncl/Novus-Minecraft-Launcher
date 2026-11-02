@@ -134,7 +134,37 @@ public class GameDirectory {
      * 目录条目是否可用（路径非空）
      */
     public boolean isValid() {
-        return rootPath != null && !rootPath.isBlank();
+        return rootPath != null && !rootPath.isBlank() && validateRoot(rootPath) == null;
+    }
+
+    /**
+     * 校验游戏根目录，返回 null 表示可用，否则返回给用户看的原因。
+     *
+     * 早期只检查「非空」：用户选中 D:\ 时会在磁盘根目录直接创建 .mc_launcher
+     * 隐藏目录；填相对路径 "." 时位置随启动方式漂移。
+     */
+    public static String validateRoot(String root) {
+        if (root == null || root.isBlank()) {
+            return "目录不能为空";
+        }
+        java.nio.file.Path p;
+        try {
+            p = java.nio.file.Paths.get(root.trim());
+        } catch (Exception e) {
+            return "路径格式不正确";
+        }
+        if (!p.isAbsolute()) {
+            return "请填写完整路径（例如 D:/Minecraft）";
+        }
+        p = p.toAbsolutePath().normalize();
+        if (p.getParent() == null) {
+            return "不能选择磁盘根目录，请选择一个子目录（例如 D:/Minecraft）";
+        }
+        String home = System.getProperty("user.home", "");
+        if (!home.isBlank() && p.equals(java.nio.file.Paths.get(home).normalize())) {
+            return "不能直接使用用户主目录";
+        }
+        return null;
     }
 
     /**

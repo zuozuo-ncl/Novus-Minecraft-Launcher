@@ -72,6 +72,8 @@ public class MultiplayerPage implements Page {
     private Button vpnHostButton;
     private Button vpnJoinButton;
     private Button vpnStopButton;
+    private TextField vpnInviteField;
+    private HBox vpnInviteRow;
     /** 防止「开房间」与「加入」被同时点击，造成两个会话互相覆盖 */
     private final java.util.concurrent.atomic.AtomicBoolean vpnBusy =
             new java.util.concurrent.atomic.AtomicBoolean(false);
@@ -143,8 +145,9 @@ public class MultiplayerPage implements Page {
         Label title = new Label("联机");
         title.getStyleClass().add("page-title");
 
-        Label hint = new Label("没有公网 IP 也能和朋友联机：先用下面的「虚拟局域网」，"
-                + "在游戏里点「对局域网开放」后用朋友连 10.77.0.1。");
+        Label hint = new Label("没有公网 IP 也能和朋友联机：先用下面的「虚拟局域网」——"
+                + "你在游戏里点「对局域网开放」，把界面上的邀请发给朋友；"
+                + "朋友加入后在他的 MC 里连 localhost:（端口 = 你的局域网端口 + 1）。");
         hint.setWrapText(true);
         hint.getStyleClass().add("text-secondary");
 
@@ -369,7 +372,7 @@ public class MultiplayerPage implements Page {
         Label roomLabel = new Label("房间号");
         roomLabel.getStyleClass().add("text-secondary");
         vpnRoomField = new TextField();
-        vpnRoomField.setPromptText("房主给的 6 位房间号");
+        vpnRoomField.setPromptText("粘贴房主发来的邀请（点房主界面的「复制邀请」）");
         vpnRoomField.setPrefWidth(150);
 
         vpnJoinButton = new Button("加入");
@@ -387,7 +390,34 @@ public class MultiplayerPage implements Page {
         vpnStatusLabel.setWrapText(true);
         vpnStatusLabel.getStyleClass().add("text-secondary");
 
-        box.getChildren().addAll(title, desc, row, vpnStatusLabel);
+        // 房主的邀请串（朋友加入 VPN 只需要这一串）
+        vpnInviteField = new TextField();
+        vpnInviteField.setEditable(false);
+        vpnInviteField.setPromptText("开房后这里会显示邀请串");
+        vpnInviteField.setPrefWidth(360);
+        Label inviteLabel = new Label("邀请");
+        inviteLabel.getStyleClass().add("text-secondary");
+        Button copyBtn = new Button("复制邀请");
+        copyBtn.getStyleClass().add("button-primary");
+        Runnable copyInvite = () -> {
+            String text = vpnInviteField.getText();
+            if (text != null && !text.isEmpty()) {
+                javafx.scene.input.ClipboardContent cc = new javafx.scene.input.ClipboardContent();
+                cc.putString(text);
+                javafx.scene.input.Clipboard.getSystemClipboard().setContent(cc);
+                setLog("邀请已复制，发给朋友即可");
+            }
+        };
+        vpnInviteField.setOnMouseClicked(e -> copyInvite.run());
+        copyBtn.setOnAction(e -> copyInvite.run());
+        HBox inviteRow = new HBox(8);
+        inviteRow.setAlignment(Pos.CENTER_LEFT);
+        inviteRow.getChildren().addAll(inviteLabel, vpnInviteField, copyBtn);
+        inviteRow.setVisible(false);
+        inviteRow.setManaged(false);
+        vpnInviteRow = inviteRow;
+
+        box.getChildren().addAll(title, desc, row, inviteRow, vpnStatusLabel);
         return box;
     }
 
@@ -424,12 +454,16 @@ public class MultiplayerPage implements Page {
         vpnHostButton.setDisable(true);
         setVpnStatus("正在创建虚拟网卡…（首次会安装驱动，可能需要几秒）");
         final int port = localPort;
+        config.setVpnLocalMcPort(port);
+        final int playerPort = forwardPort(port);
+        final String apiKey = relayApiKey();
         new Thread(() -> {
             try {
                 com.mclauncher.multiplayer.vpn.VpnSession s =
                         com.mclauncher.multiplayer.vpn.VpnSession.host(
                                 com.mclauncher.multiplayer.RelayServers.ALL[0].first().host,
-                                com.mclauncher.multiplayer.RelayServers.ALL[0].first().port, "我的联机房间");
+                                com.mclauncher.multiplayer.RelayServers.ALL[0].first().port, "我的联机房间",
+                                port, apiKey);
                 synchronized (MultiplayerPage.this) {
                     if (vpn != null) {
                         // 另一个入口刚建好会话：丢弃这个，避免互相覆盖
@@ -439,15 +473,25 @@ public class MultiplayerPage implements Page {
                     vpn = s;
                 }
                 String room = s.roomId();
+                final String baseInvite = buildInvite(s.address(), playerPort, room, "");
+                // 玩家入口（房主自己的 MC 连上来时触发）生成的邀请码异步到达，
+                // 这里登记后刷新界面
+                s.setPeerListener(peer -> {
+                    currentInvite = buildInvite(s.address(), playerPort, room, peer.code);
+                    refreshInvite();
+                });
                 Platform.runLater(() -> {
-                    vpnStatusLabel.setText("已开启！房间号：" + room
-                            + "\n把房间号发给朋友，让他们点「加入」。"
-                            + "\n朋友在 Minecraft 里填：10.77.0.1:" + port);
+                    vpnStatusLabel.setText("已开启！点「复制邀请」发给朋友，朋友粘贴后点「加入」。"
+                            + "\n朋友的 MC 会自动连到你这边：" + s.address() + ":" + playerPort
+                            + "\n（注意：你自己的 MC 要先用「对局域网开放」把端口设成 " + port + "）");
                     vpnStopButton.setDisable(false);
-                    vpnRoomField.setText(room);
+                    currentInvite = baseInvite;
+                    vpnInviteField.setText(baseInvite);
+                    vpnInviteRow.setVisible(true);
+                    vpnInviteRow.setManaged(true);
                 });
                 setLog("虚拟局域网已开启，房间号 " + room);
-                setLog("朋友的连接地址：10.77.0.1:" + port);
+                setLog("朋友要连的地址：" + s.address() + ":" + playerPort);
             } catch (Exception e) {
                 logger.warn("开虚拟局域网失败", e);
                 Platform.runLater(() -> {
@@ -467,11 +511,12 @@ public class MultiplayerPage implements Page {
             setLog("虚拟局域网无法加入：" + err);
             return;
         }
-        String room = vpnRoomField.getText() == null ? "" : vpnRoomField.getText().trim();
-        if (room.isEmpty()) {
-            setLog("请先填写房主给的房间号");
+        String invite = vpnRoomField.getText() == null ? "" : vpnRoomField.getText().trim();
+        if (invite.isEmpty()) {
+            setLog("请先粘贴房主发来的邀请");
             return;
         }
+        String room = extractRoom(invite);
         if (vpn != null) {
             setLog("虚拟局域网已经连着，请先断开");
             return;
@@ -483,12 +528,16 @@ public class MultiplayerPage implements Page {
         vpnJoinButton.setDisable(true);
         setVpnStatus("正在加入房间…");
         final int localMcPort = detectMcPort();
+        final String inviteText = invite;
+        final String apiKey = relayApiKey();
         new Thread(() -> {
             try {
                 com.mclauncher.multiplayer.vpn.VpnSession s =
                         com.mclauncher.multiplayer.vpn.VpnSession.join(
                                 com.mclauncher.multiplayer.RelayServers.ALL[0].first().host,
-                                com.mclauncher.multiplayer.RelayServers.ALL[0].first().port, room, 1);
+                                com.mclauncher.multiplayer.RelayServers.ALL[0].first().port,
+                                room, inviteText, apiKey, localMcPort,
+                                com.mclauncher.multiplayer.vpn.WintunAdapter.ADAPTER_NAME);
                 synchronized (MultiplayerPage.this) {
                     if (vpn != null) {
                         s.close();
@@ -498,7 +547,8 @@ public class MultiplayerPage implements Page {
                 }
                 Platform.runLater(() -> {
                     vpnStatusLabel.setText("已加入房间 " + room
-                            + "\n现在在 Minecraft 里直接连接服务器：10.77.0.1:" + detectMcPort());
+                            + "\n现在在 Minecraft 里直接连接：localhost:" + forwardPort(detectMcPort())
+                            + "（端口 = 房主在 MC 里开的局域网端口 + 1）");
                     vpnStopButton.setDisable(false);
                 });
                 setLog("已加入虚拟局域网 " + room);
@@ -513,6 +563,54 @@ public class MultiplayerPage implements Page {
                 vpnBusy.set(false);
             }
         }, "vpn-join").start();
+    }
+
+    /** 玩家要连的端口 = 房主局域网端口 + 1（与 VpnSession.FORWARD_OFFSET 一致） */
+    private static int forwardPort(int mcPort) {
+        int p = Math.max(1, Math.min(65534, mcPort));
+        return p + com.mclauncher.multiplayer.vpn.VpnSession.FORWARD_OFFSET;
+    }
+
+    /** 中继的 API 密钥（部署时配置；没配置则为空） */
+    private static String relayApiKey() {
+        String k = System.getenv("MC_RELAY_API_KEY");
+        return k == null ? "" : k.trim();
+    }
+
+    /** 房主：当前邀请串（口令由中继分配，晚于开会话到达） */
+    private volatile String currentInvite;
+
+    /** 邀请串：MCRELAY|地址:端口#房间号#口令 —— 朋友整串粘贴即可 */
+    private static String buildInvite(String host, int port, String room, String code) {
+        return "MCRELAY|" + host + ":" + port + "#" + room + "#" + (code == null ? "" : code);
+    }
+
+    /** 刷新界面上的邀请串（口令是异步到达的） */
+    private void refreshInvite() {
+        Runnable r = () -> {
+            String inv = currentInvite;
+            if (inv != null && vpnInviteField != null) {
+                vpnInviteField.setText(inv);
+            }
+        };
+        if (Platform.isFxApplicationThread()) {
+            r.run();
+        } else {
+            Platform.runLater(r);
+        }
+    }
+
+    /** 从邀请串里取出房间号（兼容旧用法：只填房间号） */
+    private static String extractRoom(String invite) {
+        String s = invite.startsWith("MCRELAY|") ? invite.substring("MCRELAY|".length()) : invite;
+        String[] parts = s.split("#");
+        if (parts.length >= 3) {
+            return parts[1].trim();
+        }
+        if (parts.length == 2) {
+            return parts[1].trim();
+        }
+        return s.replaceAll("^.*:", "").trim();
     }
 
     private void stopVpn() {
@@ -979,7 +1077,16 @@ public class MultiplayerPage implements Page {
     }
 
     private void setLog(String msg) {
-        if (logArea != null) {
+        if (logArea == null) {
+            return;
+        }
+        // 很多调用来自后台线程（开房、加入、隧道回调）：控件操作必须回 FX 线程，
+        // 否则会抛 IllegalStateException 或被静默丢弃，日志里看不到任何东西
+        if (!Platform.isFxApplicationThread()) {
+            Platform.runLater(() -> setLog(msg));
+            return;
+        }
+        {
             logArea.appendText(msg + "\n");
             // 滚动到底
             logArea.setScrollTop(Double.MAX_VALUE);

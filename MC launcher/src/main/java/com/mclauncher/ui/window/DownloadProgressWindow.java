@@ -190,8 +190,9 @@ public class DownloadProgressWindow {
 
         closeButton = new Button(L.t("s_6c14bd7f6f"));
         closeButton.getStyleClass().add("button");
-        // 关闭不取消下载 —— 下载在后台继续
-        closeButton.setOnAction(e -> modalHost.close());
+        // 关闭不取消下载 —— 下载在后台继续。
+        // 必须关「本面板」而不是栈顶：用户可能在本面板之上又开了确认框
+        closeButton.setOnAction(e -> close());
 
         footer.getChildren().addAll(cancelButton, closeButton);
 

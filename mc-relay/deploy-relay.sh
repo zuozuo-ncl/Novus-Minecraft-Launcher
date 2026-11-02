@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # MC 联机中转 —— 部署到 Ubuntu 服务器
 # 用法：bash deploy-relay.sh [server_ip]
+#
+# 环境变量：
+#   SERVER_IP   目标服务器（也可用第一个参数；都没有时直接报错，不再硬编码公网 IP）
+#   API_KEY     开房/列表接口的密钥。未设置时自动生成一个并写入远端 .env，
+#               启动器需要在请求里带 X-Api-Key（relay-host.js 支持 --api-key）
 set -euo pipefail
 
-SERVER="${1:-39.106.60.15}"
+SERVER="${1:-${SERVER_IP:-}}"
+if [ -z "$SERVER" ]; then
+  echo "用法：SERVER_IP=1.2.3.4 bash deploy-relay.sh   （或 bash deploy-relay.sh 1.2.3.4）" >&2
+  exit 2
+fi
 REMOTE_DIR="/opt/mc-relay"
 HTTP_PORT="${HTTP_PORT:-8080}"
 RANGE="${RANGE:-40000-40999}"
@@ -11,9 +20,26 @@ RANGE="${RANGE:-40000-40999}"
 echo "=== 部署到 $SERVER ==="
 
 # 1. 上传
+#    必须把 relay-server.js 的依赖一起传上去：只传 relay-server.js 时，
+#    require('./vpn-room') 会 MODULE_NOT_FOUND，服务无限重启，自检还会误报成安全组问题。
 echo "[1/5] 上传文件"
 ssh "admin@$SERVER" "sudo mkdir -p $REMOTE_DIR && sudo chown \$USER:\$USER $REMOTE_DIR"
-scp relay-server.js "admin@$SERVER:$REMOTE_DIR/"
+scp relay-server.js vpn-room.js vpn-tunnel.js "admin@$SERVER:$REMOTE_DIR/"
+
+# 1.5 生成/保留 API_KEY
+echo "[1.5/5] 配置 API_KEY"
+KEY="${API_KEY:-}"
+if [ -z "$KEY" ]; then
+  KEY=$(ssh "admin@$SERVER" "if [ -f $REMOTE_DIR/.env ]; then grep -E '^API_KEY=' $REMOTE_DIR/.env | cut -d= -f2-; fi")
+  if [ -z "$KEY" ]; then
+    KEY=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    echo "  已生成新的 API_KEY，请保存：" >&2
+    echo "  $KEY" >&2
+  else
+    echo "  沿用远端已有的 API_KEY"
+  fi
+fi
+ssh "admin@$SERVER" "umask 077 && printf 'API_KEY=%s\n' '$KEY' > $REMOTE_DIR/.env"
 
 # 2. systemd 服务
 echo "[2/5] 配置 systemd"
@@ -27,10 +53,11 @@ Wants=network-online.target
 Type=simple
 User=$USER
 WorkingDirectory=$REMOTE_DIR
+EnvironmentFile=$REMOTE_DIR/.env
 Environment=HTTP_PORT=$HTTP_PORT
 Environment=RANGE=$RANGE
 Environment=HOST=0.0.0.0
-ExecStart=/usr/bin/node $REMOTE_DIR/relay-server.js
+ExecStart=/usr/bin/env node $REMOTE_DIR/relay-server.js
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -61,5 +88,17 @@ fi"
 # 5. 自检
 echo "[5/5] 自检"
 sleep 1
-curl -s "http://$SERVER:$HTTP_PORT/health" || echo "  API 不可达（检查安全组）"
-echo
+for i in 1 2 3; do
+  if curl -fsS "http://$SERVER:$HTTP_PORT/health" >/dev/null; then
+    echo "  /health 正常"
+    break
+  fi
+  if [ "$i" = 3 ]; then
+    echo "  /health 连续 $i 次失败，下面是服务端日志尾部：" >&2
+    ssh "admin@$SERVER" "sudo journalctl -u mc-relay -n 30 --no-pager" >&2 || true
+    exit 1
+  fi
+  sleep 2
+done
+curl -s "http://$SERVER:$HTTP_PORT/health"; echo
+echo "  启动器/relay-host 请求需要带上：X-Api-Key: $KEY"

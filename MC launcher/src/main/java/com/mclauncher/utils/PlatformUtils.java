@@ -17,6 +17,13 @@ public class PlatformUtils {
     /**
      * 检查是否在 Windows 系统上运行
      */
+    /** 当前 JVM 是否为 64 位（决定能否运行 64 位 Java / 游戏） */
+    public static boolean is64BitJvm() {
+        String arch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
+        String dataModel = System.getProperty("sun.arch.data.model", "");
+        return arch.contains("64") || arch.equals("aarch64") || "64".equals(dataModel);
+    }
+
     public static boolean isWindows() {
         return System.getProperty("os.name").toLowerCase().contains("win");
     }

@@ -210,6 +210,68 @@ bool FindJavaInPath(std::wstring& outJavaw) {
 }
 
 // ---------------------------------------------------------------------------
+// JRE 包下载源白名单
+//
+// JRE 包解压后立刻被执行（javaw.exe），是引导器里风险最高的一次下载：
+//   · 以前只校验「文件头 PK」，镜像/CDN 投毒或 MITM 都能塞进任意 zip；
+//   · Adoptium API 返回的 "link" 是外部给的任意地址，以前照单全收；
+//   · 重定向会无条件跟随，包括降级到 http://。
+// 现在：地址（含每一跳重定向）必须落在下面这些官方/CDN 域名内且是 https。
+// 新增镜像时务必在这里登记。
+// ---------------------------------------------------------------------------
+bool IsAllowedJreUrl(const std::wstring& url) {
+    if (url.rfind(L"https://", 0) != 0 && url.rfind(L"HTTPS://", 0) != 0) {
+        return false;
+    }
+    size_t hostStart = url.find(L"//") + 2;
+    size_t hostEnd = url.find_first_of(L"/:?#", hostStart);
+    std::wstring host = url.substr(hostStart, hostEnd == std::wstring::npos
+                                                ? std::wstring::npos : hostEnd - hostStart);
+    for (auto& c : host) c = static_cast<wchar_t>(towlower(c));
+
+    static const wchar_t* const kHosts[] = {
+        L"cdn.azul.com",
+        L"download.bell-sw.com",
+        L"mirror.nju.edu.cn",
+        L"mirrors.huaweicloud.com",
+        L"mirrors.ustc.edu.cn",
+        L"api.adoptium.net",
+        L"github.com",
+        L"objects.githubusercontent.com",
+        L"release-assets.githubusercontent.com",
+    };
+    for (const wchar_t* h : kHosts) {
+        if (host == h) return true;
+        // 允许子域名，例如 mirror.nju.edu.cn 之外的 xxx.mirror.nju.edu.cn
+        size_t n = wcslen(h);
+        if (host.size() > n && host.compare(host.size() - n, n, h) == 0
+            && host[host.size() - n - 1] == L'.') {
+            return true;
+        }
+    }
+    Log::WriteF(L"JRE 下载地址不在白名单内，已拒绝: %s", url.c_str());
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// 内置的 JRE 包 SHA-256（按镜像架构 x64 / x32 区分）
+//
+// 默认两项都为空：此时下载后做严格的 ZIP 结构校验。发布新 JRE 时把
+// 核验过的哈希填进 KNOWN_JRE_SHA256_LIST，就能得到逐字节一致的保证。
+// ---------------------------------------------------------------------------
+std::string KnownJreHash(const std::wstring& arch) {
+    static const std::pair<std::wstring, std::wstring> kTable[] = {
+        KNOWN_JRE_SHA256_LIST
+    };
+    for (const auto& row : kTable) {
+        if (row.first == arch && !row.second.empty()) {
+            return Hs::NormalizeHash(Util::WideToUtf8(row.second));
+        }
+    }
+    return std::string();
+}
+
+// ---------------------------------------------------------------------------
 // 从 Adoptium 的 JSON 中抽出 zip 下载地址
 //
 // 响应形如：
@@ -558,6 +620,21 @@ StepResult EnsureJava(const AppPaths& paths,
         }
     }
 
+    // 再过滤一次：Adoptium API 给的 link 可能指向任意主机
+    {
+        std::vector<std::wstring> trusted;
+        for (const auto& u : candidates) {
+            if (IsAllowedJreUrl(u)) {
+                trusted.push_back(u);
+            }
+        }
+        if (trusted.size() != candidates.size()) {
+            Log::WriteF(L"剔除 %d 个不在白名单内的 JRE 下载地址",
+                        static_cast<int>(candidates.size() - trusted.size()));
+        }
+        candidates.swap(trusted);
+    }
+
     Log::WriteF(L"共 %d 个候选下载地址", static_cast<int>(candidates.size()));
 
     // ---- 逐个尝试下载 ----
@@ -591,7 +668,7 @@ StepResult EnsureJava(const AppPaths& paths,
                                                 done, total);
                                    }
                                },
-                               cancelFlag);
+                               cancelFlag, IsAllowedJreUrl);
 
         if (r == StepResult::Ok) {
             usedUrl = url;
@@ -622,6 +699,35 @@ StepResult EnsureJava(const AppPaths& paths,
                     static_cast<unsigned long long>(Util::FileSize(zipPath)));
         Util::DeleteFileQuiet(zipPath);
         return StepResult::NetworkError;
+    }
+
+    // ---- 解压前：完整性校验 ----
+    //
+    // JRE 包解压后立刻被执行。以前只在下完时看过「前两个字节是 PK」，
+    // 被截断或被替换的 zip 也能进去。现在：
+    //   1) 若内置了该架构的 SHA-256（KNOWN_JRE_SHA256_LIST），必须逐字节一致；
+    //   2) 否则做完整的 ZIP 结构校验（中央目录完整、条目名安全、无符号链接）。
+    // 需要更强保证时，把发布时记录的哈希填进 KNOWN_JRE_SHA256_LIST 即可。
+    {
+        const std::string expectedJre = KnownJreHash(g_archMirror);
+        if (!expectedJre.empty()) {
+            std::string actualJre;
+            if (!Hs::Sha256File(zipPath, actualJre, cancelFlag)
+                || !Hs::EqualsIgnoreCase(actualJre, expectedJre)) {
+                Log::WriteF(L"JRE 包哈希不匹配，拒绝解压（期望 %s）",
+                            Util::Utf8ToWide(expectedJre).c_str());
+                Util::DeleteFileQuiet(zipPath);
+                return StepResult::ChecksumMismatch;
+            }
+            Log::Write(L"JRE 包哈希校验通过");
+        } else {
+            Log::Write(L"未内置该架构的 JRE 哈希，改为严格校验 ZIP 结构");
+            StepResult vr = Zip::Validate(zipPath);
+            if (vr != StepResult::Ok) {
+                Util::DeleteFileQuiet(zipPath);
+                return vr;
+            }
+        }
     }
 
     // ---- 解压 ----

@@ -574,13 +574,34 @@ public class ConfigManager {
      * @return 新添加的目录；若已存在同样路径则返回 null
      */
     public GameDirectory addGameDirectory(String rootPath, String name) {
+        // 先规范化：D:\mc、D:/mc/、D:\mc\. 是同一个目录，以前按原始字符串比较会重复添加
+        String invalid = GameDirectory.validateRoot(rootPath);
+        if (invalid != null) {
+            logger.warn("拒绝添加游戏目录 {}: {}", rootPath, invalid);
+            return null;
+        }
+        try {
+            rootPath = java.nio.file.Paths.get(rootPath.trim()).toAbsolutePath().normalize().toString();
+        } catch (Exception e) {
+            return null;
+        }
         List<GameDirectory> dirs = getGameDirectories();
 
-        // 去重：同一路径不重复添加
+        // 去重：同一路径（规范化后）不重复添加
         for (GameDirectory d : dirs) {
-            if (d.getRootPathString() != null
-                    && d.getRootPathString().equalsIgnoreCase(rootPath)) {
-                return null;
+            String existing = d.getRootPathString();
+            if (existing == null) {
+                continue;
+            }
+            try {
+                if (java.nio.file.Paths.get(existing).toAbsolutePath().normalize()
+                        .equals(java.nio.file.Paths.get(rootPath).toAbsolutePath().normalize())) {
+                    return null;
+                }
+            } catch (Exception ignored) {
+                if (existing.equalsIgnoreCase(rootPath)) {
+                    return null;
+                }
             }
         }
 
@@ -790,6 +811,28 @@ public class ConfigManager {
      */
     public void setJavaVersion(String version) {
         setString("javaVersion", version);
+    }
+
+    /**
+     * VPN 联机：本机 MC 局域网的端口（玩家在 MC 里「对局域网开放」时客户端看到的端口）
+     *
+     * VPN 转发监听在 本机回环的该端口上；VPN 玩家连 10.77.0.1:<端口+1>，
+     * 房主端再把收到的连接转到这里。默认 25565。
+     */
+    public int getVpnLocalMcPort() {
+        int p = getInt("vpnLocalMcPort", 25565);
+        return (p > 0 && p < 65535) ? p : 25565;
+    }
+
+    public void setVpnLocalMcPort(int port) {
+        if (port > 0 && port < 65535) {
+            setInt("vpnLocalMcPort", port);
+        }
+    }
+
+    /** VPN 转发真正的监听端口 = 局域网端口 + 1（避开 MC 自己占用的端口） */
+    public int getVpnForwardPort() {
+        return getVpnLocalMcPort() + 1;
     }
 
     /**

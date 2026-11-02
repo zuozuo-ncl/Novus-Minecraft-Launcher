@@ -43,6 +43,15 @@ public class GameDownloader {
     /** 本次 downloadVersion 是否有致命缺失（库 / natives / 资源）。 */
     private volatile boolean downloadFailed = false;
 
+    /** 只取异常消息第一行（Gson 的消息可能很长） */
+    private static String firstLine(String msg) {
+        if (msg == null) {
+            return "";
+        }
+        int i = msg.indexOf((char) 10);
+        return i < 0 ? msg : msg.substring(0, i);
+    }
+
     public GameDownloader(BMCLApiClient apiClient, Path gameDir) {
         this.apiClient = apiClient;
         this.downloader = new Downloader();
@@ -88,7 +97,18 @@ public class GameDownloader {
             // 2. 获取版本详细 JSON
             reportProgress(5, 100, L.t("s_afd33fb63d"));
             String versionJson = apiClient.getVersionDetailJson(versionInfo.getUrl());
-            VersionInfo info = gson.fromJson(versionJson, VersionInfo.class);
+            VersionInfo info;
+            try {
+                info = gson.fromJson(versionJson, VersionInfo.class);
+            } catch (RuntimeException e) {
+                // 某个字段类型与强类型模型不符时整份 JSON 都会解析失败：
+                // 以前直接抛出去，日志里只有一句「JsonSyntaxException」，无从下手
+                throw new IOException("版本 " + versionId + " 的 JSON 格式异常（"
+                        + e.getClass().getSimpleName() + "）: " + firstLine(e.getMessage()), e);
+            }
+            if (info == null) {
+                throw new IOException("版本 " + versionId + " 的 JSON 为空");
+            }
 
             // 3. 保存版本 JSON
             Path versionDir = gameDir.resolve("versions").resolve(versionId);
@@ -839,8 +859,18 @@ public class GameDownloader {
             String prefix = hash.substring(0, 2);
             Path objectPath = objectsDir.resolve(prefix).resolve(hash);
 
+            // 资源文件名就是 SHA-1：已存在但长度不对的一律当作缺失重下
+            // （以前只看「存在」，U盘掉电/磁盘满留下的截断文件会让游戏一进世界就崩）
             if (!Files.exists(objectPath)) {
                 missingHashes.add(hash);
+            } else {
+                try {
+                    if (Files.size(objectPath) <= 0) {
+                        missingHashes.add(hash);
+                    }
+                } catch (IOException e) {
+                    missingHashes.add(hash);
+                }
             }
         }
 

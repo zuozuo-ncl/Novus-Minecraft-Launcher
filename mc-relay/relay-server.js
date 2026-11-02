@@ -43,7 +43,12 @@
 const net = require('net');
 const http = require('http');
 const crypto = require('crypto');
-const { handleVpnConnection } = require('./vpn-room');
+const {
+  handleVpnConnection,
+  looksLikeVpnHandshake,
+  issueJoinToken,
+  MAX_VPN_PEERS,
+} = require('./vpn-room');
 
 // ============ 配置 ============
 const HTTP_PORT = Number(process.env.HTTP_PORT || 8080);
@@ -84,9 +89,32 @@ const BLOCK_IPS = new Set(
     .split(',').map((s) => s.trim()).filter(Boolean)
 );
 
+/**
+ * CORS 允许的来源。
+ *
+ * 以前一律 `Access-Control-Allow-Origin: *`：任意网站都能在访客浏览器里
+ * 匿名调用 /api/host 建房、读 /api/rooms 房间列表。启动器是原生客户端，
+ * 浏览器根本不需要跨域 —— 默认关闭，确有网页端需求时用
+ * CORS_ORIGINS=https://a.example 显式放行。
+ */
+const CORS_ORIGINS = new Set(
+  (process.env.CORS_ORIGINS || '')
+    .split(',').map((v) => v.trim()).filter(Boolean)
+);
+const API_KEY_REQUIRED = API_KEY !== '';
+
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ============ 房间状态 ============
+
+/** 玩家容量只统计「房主已确认接入」的玩家（pending 里未确认的不占名额） */
+function countConfirmed(room) {
+  let n = 0;
+  for (const e of room.pending.values()) {
+    if (e.confirmed) n++;
+  }
+  return n;
+}
 
 /**
  * room = {
@@ -115,13 +143,21 @@ const joinRate = new Map();     // 玩家接入：ip -> { count, resetAt }
 
 // ============ 工具 ============
 
-function json(res, code, obj) {
+function corsOrigin(req) {
+  const origin = req && req.headers ? req.headers.origin || '' : '';
+  return origin && CORS_ORIGINS.has(origin) ? origin : null;
+}
+
+function json(req, res, code, obj) {
   const s = JSON.stringify(obj);
-  res.writeHead(code, {
+  const headers = {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(s),
-    'Access-Control-Allow-Origin': '*',
-  });
+    'Vary': 'Origin',
+  };
+  const origin = corsOrigin(req);
+  if (origin) headers['Access-Control-Allow-Origin'] = origin;
+  res.writeHead(code, headers);
   res.end(s);
 }
 
@@ -215,8 +251,12 @@ function createRoom(name, port) {
     roomId,
     token,
     port,
-    name: String(name || '未命名房间').slice(0, 32),
-    maxPlayers: 8,
+    // 房间名会出现在 /api/rooms 里：去掉控制字符，限制成可打印文本
+    name: String(name || '未命名房间').replace(/[\u0000-\u001f\u007f<>]/g, '').slice(0, 32)
+          || '未命名房间',
+    // 与真实的容量判断（MAX_PLAYERS_PER_ROOM）保持一致；
+    // 以前写死 8，列表里显示 8 但实际能进 20
+    maxPlayers: MAX_PLAYERS_PER_ROOM,
     control: null,
     pending: new Map(),
     pendingJoins: [],
@@ -239,6 +279,11 @@ function closeRoom(roomId, reason) {
   log(`回收房间 ${roomId} (${reason})`);
   rooms.delete(roomId);
   portOwner.delete(room.port);
+  // 握手超时定时器要一起清掉；以前它没挂在 room 上，房间提前关闭后还会残留到超时
+  if (room.handshakeTimer) {
+    clearTimeout(room.handshakeTimer);
+    room.handshakeTimer = null;
+  }
 
   // 监听端口异步释放：先标记 releasing，等 server 'close' 事件后才放回端口池
   releaseRoomServer(room);
@@ -282,12 +327,18 @@ function releaseRoomServer(room) {
     if (typeof server.closeAllConnections === 'function') {
       server.closeAllConnections();
     }
+    if (typeof server.closeIdleConnections === 'function') {
+      // 半关闭（对端 FIN 已到、本方还没 end）的连接不会被 closeAllConnections 处理
+      server.closeIdleConnections();
+    }
     server.close(markReleased);
   } catch {
     markReleased();
     return;
   }
-  setTimeout(markReleased, 30_000).unref();
+  // 最多 2 秒就把端口放回池子。以前兜底 30 秒：攻击者「建房间 + 不走握手」，
+  // 每次都能让一个端口 30~60 秒不可用，几个 IP 就能把端口池耗光。
+  setTimeout(markReleased, 2_000).unref();
 }
 
 /** IPv4-mapped IPv6 地址归一化（::ffff:1.2.3.4 → 1.2.3.4） */
@@ -338,12 +389,26 @@ function listenRoom(room) {
     // 连上却不发数据（端口扫描）→ 直接回收
     // 注意：silentTimer 在派发后（无论玩家还是隧道）都会 clear；
     // 隧道方向若只收到半截魔数，改由 onTunnelConnection 的握手超时兜底。
+    // socket 处于 pause 时，对端发来的一两个字节不会触发 'data'，但会出现在
+    // readableLength 里。以前这种情况一直撑到 10 秒超时才断 —— 扫描器靠
+    // 「每个连接只发 1 字节」就能低成本占满句柄、并把路由表里的房间数吃满。
+    // 真玩家/真房主一定会在 10 秒内发出 >=4 字节（MAGIC 或 MC 握手），否则照样断开。
+    let earlyBytes = false;
     const silentTimer = setTimeout(() => {
-      log(`房间 ${room.roomId} 静默连接超时 from ${sock.remoteAddress}`);
-      sock.destroy();
+      const earlyBytes = sock.readableLength > 1;
+      if (!earlyBytes) {
+        log(`房间 ${room.roomId} 静默连接超时 from ${sock.remoteAddress}`);
+        sock.destroy();
+      }
     }, SILENT_TIMEOUT_MS);
 
     // 先暂停：数据留在内核缓冲区，下面判定完再 resume
+
+    // 关键：上面已经 pause 过 socket，这里**不能**再 resume()。
+    // 以前紧接着 resume()，结果魔数连接在「removeListener → 重新挂监听」之间
+    // 数据就已经被读走（data 事件没人监听 → 静默丢失），房主的隧道握手永远等不到：
+    // 表现为「房主已连接」之后立刻断开。其余分支（VPN/HTTP）在交接前
+    // 本来就保证暂停，也都不受影响；玩家分支自己会 unshift + pause。
     sock.pause();
 
     const onFirst = (chunk) => {
@@ -383,14 +448,16 @@ function listenRoom(room) {
         sock.destroy();
         return;
       }
-      if (room.dataSockets.size + room.pending.size >= MAX_PLAYERS_PER_ROOM) {
+      if (room.dataSockets.size + countConfirmed(room) >= MAX_PLAYERS_PER_ROOM) {
         log(`房间 ${room.roomId} 已满，拒绝新玩家`);
         sock.destroy();
         return;
       }
 
       const id = room.nextId++;
-      const entry = { sock, timer: null };
+      // confirmed=false：房主还没确认接入。未确认的玩家不占容量 ——
+      // 以前连一下不发任何东西的连接也算人数，几个 IP 就能把房间「占满」。
+      const entry = { sock, timer: null, confirmed: false };
       // 房主迟迟不建数据通道：超时回收，玩家不会无限挂着
       entry.timer = setTimeout(() => {
         if (room.pending.get(id) === entry) {
@@ -410,9 +477,11 @@ function listenRoom(room) {
       room.pending.set(id, entry);
       log(`房间 ${room.roomId} 新玩家接入 id=${id} from ${sock.remoteAddress}`);
 
-      // 玩家已经连上、房间也在线：先给一句「正在等待房主确认」。
-      // 房主迟迟不点确认时，玩家端能看到原因，而不是干等到超时后
-      // 只显示「连接已丢失」。
+      // 玩家已经连上、还没收到房主的数据通道时，先发一句「正在等待房主确认」。
+      // 以前这里什么都没发（注释说有，实际没有），玩家只能干等 30 秒超时。
+      // 这是给玩家 MC 客户端的「登录断开」提示包：显示完后客户端会断开。
+      // 房主的数据通道建立后，客户端需要重新连接（中继不再自动接管已断开的连接）。
+      sendLoginDisconnect(sock, '正在等待房主确认，请稍候…');
       if (room.control) {
         entry.timer.refresh();
       }
@@ -491,6 +560,13 @@ function onTunnelConnection(sock, firstChunk) {
       attachControl(sock, msg);
     } else if (msg.type === 'data') {
       attachData(sock, msg);
+    } else if (msg.type === 'vpn-host' || msg.type === 'vpn-join' || msg.type === 'vpn-claim') {
+      // VPN 连接和普通房间共用同一个端口与魔数：
+      // 以前只认 hello/data，房主的 VPN 握手会走到「未知类型 → 断开」，
+      // 导致 VPN 联机根本连不上。这里与 frontServer 的 VPN 识别保持一致。
+      sock.removeAllListeners('data');
+      // 交给 VPN 时只传消息体：handleVpnConnection 自己解析 body 并查 rooms
+      handleVpnConnection(sock, body, rooms, log, Buffer.from(rest, 'utf8'));
     } else {
       sock.destroy();
     }
@@ -556,21 +632,30 @@ function attachControl(sock, msg) {
   });
 
   // 心跳：房主定期发 ping，超时回收（避免死连接占着端口）
+  // 同一通道也承载 VPN 信令（vpn-token），按 JSON 逐条解析，不再用 includes 子串匹配
   let hb = '';
   sock.on('data', (chunk) => {
     room.lastSeen = Date.now();
     room.missedPings = 0;
     hb += chunk.toString('utf8');
-    // 按行处理，避免跨段导致 includes 判断出错
+    // 按行处理，避免跨段导致判断出错
     let i;
     while ((i = hb.indexOf('\n')) >= 0) {
       const line = hb.slice(0, i);
       hb = hb.slice(i + 1);
-      if (line.includes('"ping"')) {
+      if (!line.trim()) continue;
+      let m = null;
+      try { m = JSON.parse(line); } catch { /* 忽略非 JSON 行，例如 ping 之后的空白 */ }
+      const type = m && typeof m.type === 'string' ? m.type : '';
+      if (type === 'ping') {
         safeWrite(sock, JSON.stringify({ type: 'pong' }) + '\n');
+      } else if (type === 'vpn-token') {
+        // 房主要求为某个即将接入的玩家签发 VPN join token
+        const id = Number(m.id);
+        if (Number.isInteger(id)) issueJoinToken(room, id, log);
       }
     }
-    if (hb.length > 4096) hb = '';
+    if (hb.length > 64 * 1024) hb = '';
   });
 
   log(`房间 ${room.roomId} 控制通道就绪`);
@@ -602,6 +687,7 @@ function attachData(sock, msg) {
     sock.destroy();
     return;
   }
+  entry.confirmed = true;
   room.pending.delete(msg.id);
   clearTimeout(entry.timer);
   const client = entry.sock;
@@ -726,27 +812,28 @@ function rateLimited(ip) {
 function handleHost(req, res, body) {
   const ip = req.socket.remoteAddress || 'unknown';
   if (rateLimited(ip)) {
-    return json(res, 429, { error: '请求过于频繁，请稍后再试' });
+    return json(req, res, 429, { error: '请求过于频繁，请稍后再试' });
   }
   if (rooms.size >= MAX_ROOMS) {
-    return json(res, 503, { error: '房间数量已达上限，请稍后再试' });
+    return json(req, res, 503, { error: '房间数量已达上限，请稍后再试' });
   }
   const port = allocPort();
   if (port === null) {
-    return json(res, 503, { error: '端口池已满，请稍后再试' });
+    return json(req, res, 503, { error: '端口池已满，请稍后再试' });
   }
 
-  // 限时内必须建立控制通道
-  const room = createRoom(String(body.name || '未命名房间'), port);
-  setTimeout(() => {
+  // 限时内必须建立控制通道。定时器挂在 room 上，closeRoom 时能主动清掉
+  const room = createRoom(String((body && body.name) || '未命名房间'), port);
+  room.handshakeTimer = setTimeout(() => {
     const r = rooms.get(room.roomId);
     if (r && !r.control) closeRoom(room.roomId, '握手超时');
-  }, HANDSHAKE_TIMEOUT_MS).unref();
+  }, HANDSHAKE_TIMEOUT_MS);
+  room.handshakeTimer.unref();
 
-  json(res, 200, { room: room.roomId, token: room.token, port });
+  json(req, res, 200, { room: room.roomId, token: room.token, port });
 }
 
-function handleList(res) {
+function handleList(req, res) {
   const list = [];
   for (const r of rooms.values()) {
     if (!r.control) continue;
@@ -759,22 +846,32 @@ function handleList(res) {
       uptime: Math.floor((Date.now() - r.createdAt) / 1000),
     });
   }
-  json(res, 200, { rooms: list });
+  json(req, res, 200, { rooms: list });
 }
 
 const httpServer = http.createServer((req, res) => {
   const path = (req.url || '/').split('?')[0];
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
+    // 只回显白名单里的来源；不在名单里的请求拿到的是「没有 CORS 头」，
+    // 浏览器会自行拦截，服务端不做任何跨域授权。
+    const headers = {
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    });
+      'Access-Control-Allow-Headers': 'Content-Type, X-Api-Key',
+      'Vary': 'Origin',
+    };
+    const origin = corsOrigin(req);
+    if (origin) headers['Access-Control-Allow-Origin'] = origin;
+    res.writeHead(204, headers);
     return res.end();
   }
 
   if (req.method === 'POST' && path === '/api/host') {
+    // 先鉴权再读请求体：未授权的请求不该被允许往里灌数据
+    if (API_KEY_REQUIRED && !apiKeyOk(req)) {
+      res.writeHead(401, { 'Content-Type': 'application/json; charset=utf-8' });
+      return res.end(JSON.stringify({ error: '无效的 API 密钥' }));
+    }
     let body = '';
     let tooBig = false;
     req.on('data', (c) => {
@@ -786,35 +883,32 @@ const httpServer = http.createServer((req, res) => {
       if (tooBig) return;
       let obj = {};
       try { obj = body ? JSON.parse(body) : {}; } catch { /* 空对象 */ }
-      if (!API_KEY) {
-        handleHost(req, res, obj);
-      } else {
-        requireApiKey(req, res, () => handleHost(req, res, obj));
-      }
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) obj = {};
+      handleHost(req, res, obj);
     });
     return;
   }
 
   if (req.method === 'GET' && path === '/api/rooms') {
-    // 只在配置了 API_KEY 时进行验证，未配置则放行
-    if (API_KEY) {
-      return requireApiKey(req, res, handleList);
+    if (API_KEY_REQUIRED && !apiKeyOk(req)) {
+      return json(req, res, 401, { error: '无效的 API 密钥' });
     }
-    return handleList(res);
+    return handleList(req, res);
   }
 
   if (path === '/health') {
-    return json(res, 200, {
+    return json(req, res, 200, {
       ok: true,
       rooms: rooms.size,
-      players: [...rooms.values()].reduce((n, r) => n + r.dataSockets.size, 0),
+      players: [...rooms.values()].reduce((n, r) => n + r.dataSockets.size
+                                                   + countConfirmed(r), 0),
       ports: `${PORT_MIN}-${PORT_MAX}`,
       uptime: Math.floor(process.uptime()),
       rss: Math.round(process.memoryUsage().rss / 1048576),
     });
   }
 
-  json(res, 404, { error: 'not found' });
+  json(req, res, 404, { error: 'not found' });
 });
 
 // ============ 二进制申请协议（纯 TCP，供 WAF 后的隧道使用） ============
@@ -849,8 +943,29 @@ function handleBinHandshake(sock, prefetched) {
     const nameLen = buf.readUInt16BE(4);
     if (buf.length < 6 + nameLen) return false;
 
-    const name = buf.slice(6, 6 + nameLen).toString('utf8') || '未命名房间';
+    // 房间名最长 32 字节（UTF-8 下约 10 个汉字）。以前不校验上限：
+    // 未确认的连接每个都能申请 64KB 缓冲，而且限流要等解析完才生效
+    const name = nameLen > 32
+      ? null
+      : (buf.slice(6, 6 + nameLen).toString('utf8') || '未命名房间');
     const ip = sock.remoteAddress || 'unknown';
+
+    if (name === null) { replyErr(sock, '房间名过长'); return true; }
+    // 与 HTTP 接口一致：配置了 API_KEY 时，二进制申请也要带密钥
+    //   MCRQ [nameLen u16] [name] [keyLen u16] [key]
+    if (API_KEY_REQUIRED) {
+      const keyLenAt = 6 + nameLen;
+      if (buf.length < keyLenAt + 2) return false;
+      const keyLen = buf.readUInt16BE(keyLenAt);
+      if (buf.length < keyLenAt + 2 + keyLen) return false;
+      const key = buf.slice(keyLenAt + 2, keyLenAt + 2 + keyLen).toString('utf8');
+      const a = Buffer.from(key, 'utf8');
+      const bkey = Buffer.from(API_KEY, 'utf8');
+      if (a.length !== bkey.length || !crypto.timingSafeEqual(a, bkey)) {
+        replyErr(sock, '无效的 API 密钥');
+        return true;
+      }
+    }
 
     if (rateLimited(ip)) { replyErr(sock, '请求过于频繁，请稍后再试'); return true; }
     if (rooms.size >= MAX_ROOMS) { replyErr(sock, '房间数量已达上限'); return true; }
@@ -871,17 +986,26 @@ function handleBinHandshake(sock, prefetched) {
     return true;
   };
 
+  // 二进制申请帧最多 6 + 32 字节。以前上限 1024：未确认的连接每个都能
+  // 攒到 1KB 才被断，少量 IP 就能占住大量缓冲。
+  const MAX_BIN_FRAME = 6 + 96 + 2 + 256;
+
   if (tryParse()) return;
 
   const onMore = (chunk) => {
     buf = Buffer.concat([buf, chunk]);
     if (tryParse()) {
       sock.removeListener('data', onMore);
-    } else if (buf.length > 1024) {
-      sock.destroy();
+    } else if (buf.length > MAX_BIN_FRAME) {
+      replyErr(sock, '请求格式不正确');
+      sock.removeListener('data', onMore);
     }
   };
   sock.on('data', onMore);
+  // 未完成握手的连接最多留 10 秒（与 frontServer 的静默超时一致）
+  const t = setTimeout(() => { try { sock.destroy(); } catch { /* 忽略 */ } }, 10_000);
+  t.unref();
+  sock.once('close', () => clearTimeout(t));
   sock.resume();
 }
 
@@ -913,11 +1037,25 @@ const HTTP_IDLE_TIMEOUT_MS = 30_000;
  * 与房间协议共用 MAGIC 前缀，所以挂在同一个分发点上。
  */
 function maybeHandleVpn(sock, headBuf) {
+  // VPN 口令领取是短连接：先识别，否则会被当成普通魔数连接一直等到超时
+  {
+    const claimNl = headBuf.indexOf(0x0a);
+    if (claimNl > 0 && claimNl <= 1024) {
+      const t = headBuf.slice(0, claimNl).toString('utf8').trim();
+      if (t.startsWith('MCRELAY') && t.includes('"vpn-claim"')) {
+        handleVpnConnection(sock, t.slice(t.indexOf('{')), rooms, log, Buffer.alloc(0));
+        return true;
+      }
+    }
+  }
   // 握手是第一行 JSON，**必须按字节找换行**：用字符串转换会破坏后面的二进制帧
   const nl = headBuf.indexOf(0x0a);
   if (nl < 0) return false;
+  if (nl > 1024) return false;                 // 合法握手行远小于 1KB
   const line = headBuf.slice(0, nl).toString('utf8');
-  if (!line.includes('"vpn-host"') && !line.includes('"vpn-join"')) return false;
+  // 以前用 includes 子串匹配：任何含 "vpn-join" 字样的 HTTP 请求都会被当成 VPN 断开。
+  // 现在要求「魔数 + 合法 JSON + type 字段」。
+  if (!looksLikeVpnHandshake(line)) return false;
 
   const body = line.startsWith(MAGIC) ? line.slice(MAGIC.length) : line.replace(/^MCDATA/, '');
   // 同一块里已经读到的帧数据（可能为空）：原样交给 VPN，不能丢
@@ -972,19 +1110,36 @@ frontServer.listen(HTTP_PORT, HOST, () => {
   log(`隧道端口池 ${PORT_MIN}-${PORT_MAX}  最多 ${MAX_ROOMS} 个房间`);
   log(`玩家接入限流 ${JOIN_RATE_LIMIT} 次/${JOIN_RATE_WINDOW_MS / 1000} 秒` +
     (BLOCK_IPS.size ? `  黑名单: ${[...BLOCK_IPS].join(',')}` : ''));
+  if (!API_KEY_REQUIRED) {
+    log('[警告] 未配置 API_KEY：/api/host 与 /api/rooms 对任何来源开放，' +
+        '任意网页都可通过访客浏览器匿名建房/枚举房间。请设置 API_KEY 并让客户端带上 X-Api-Key。');
+  }
+  log(`跨域白名单: ${CORS_ORIGINS.size ? [...CORS_ORIGINS].join(',') : '（关闭，原生客户端不需要 CORS）'}`);
 });
 
-function requireApiKey(req, res, next) {
-  const key = req.headers['x-api-key'] || '';
-  if (!API_KEY) {
-    // 未配置 API_KEY，放行（兼容旧部署）
-    return next();
-  }
-  if (key !== API_KEY) {
-    return res.status(401).json({ error: '无效的 API 密钥' });
-  }
-  next();
+/**
+ * 校验 X-Api-Key。
+ *
+ * - 恒定时间比较（以前是普通字符串 !=，理论上可做时序侧信道）
+ * - 未配置 API_KEY 时仍然放行（启动器/部署脚本的默认行为），但启动时会打醒目警告
+ */
+function apiKeyOk(req) {
+  if (!API_KEY_REQUIRED) return true;
+  const key = String(req.headers['x-api-key'] || '');
+  const a = Buffer.from(key, 'utf8');
+  const b = Buffer.from(API_KEY, 'utf8');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
+
+function requireApiKey(req, res, next) {
+  if (apiKeyOk(req)) return next();
+  return res.status(401).json({ error: '无效的 API 密钥' });
+}
+
+// HTTP 层兜底超时：慢读/慢写连接最多 60 秒
+httpServer.headersTimeout = 15_000;
+httpServer.requestTimeout = 30_000;
+httpServer.timeout = 60_000;
 
 // 心跳超时 + 速率限制记录清理
 setInterval(() => {

@@ -29,6 +29,8 @@ const HTTP_PORT = Number(arg('http-port', 8080));
 const LOCAL_PORT = Number(arg('local', 25565));
 const LOCAL_HOST = arg('local-host', '127.0.0.1');
 const ROOM_NAME = arg('name', '我的联机房间');
+// 中转配置了 API_KEY 时必填（见 deploy-relay.sh）
+const API_KEY = arg('api-key', process.env.MC_RELAY_API_KEY || '');
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
@@ -44,7 +46,11 @@ function requestRoom() {
       port: HTTP_PORT,
       path: '/api/host',
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+        ...(API_KEY ? { 'X-Api-Key': API_KEY } : {}),
+      },
       timeout: 15000,
     }, (res) => {
       let d = '';
@@ -101,6 +107,8 @@ function openDataChannel(info, id) {
 
 // ---------- 4. 主流程 ----------
 let heartbeat = null;
+// 控制通道断开后的重连退避（毫秒）
+let backoff = 2000;
 
 /**
  * 用**同一个房间**重连控制通道
@@ -156,6 +164,7 @@ function openControl(info) {
           log(`新玩家 #${msg.id} 正在接入...`);
           openDataChannel(info, msg.id);
         } else if (msg.type === 'hello-ok') {
+          backoff = 2000;   // 连接成功：退避重置
           log(`服务端确认，公网端口 ${msg.port}`);
           if (!settled) { settled = true; resolve(); }
         }
@@ -169,17 +178,21 @@ function openControl(info) {
     ctrl.on('close', () => {
       if (heartbeat) clearInterval(heartbeat);
       if (!settled) { settled = true; reject(new Error('控制通道在确认前断开')); return; }
-      log('控制通道断开，5 秒后用同一个房间重连...');
+      // 指数退避重连（上限 5 分钟）。以前固定 5 秒且永不放弃：房间已被回收时
+      // 每次都「重连失败 → 重新申请房间」，联机地址频繁变化，还持续消耗开房限流
+      backoff = Math.min(backoff * 2, 300000);
+      log(`控制通道断开，${Math.round(backoff / 1000)} 秒后用同一个房间重连...`);
       setTimeout(() => reconnect(info).catch((e) => {
-        log('重连失败，重新申请房间：' + e.message);
-        main().catch((err) => log('启动失败：' + err.message));
-      }), 5000);
+        log('重连失败（房间可能已被回收）：' + e.message);
+        setTimeout(() => main().catch((err) => log('启动失败：' + err.message)),
+                    Math.min(backoff, 60000));
+      }), backoff);
     });
 
     // 心跳，防止中转把房间当成死房间；重连时要清掉，否则每重连一次多一个定时器
     heartbeat = setInterval(() => {
       if (!ctrl.destroyed) ctrl.write(JSON.stringify({ type: 'ping' }) + '\n');
-    }, 10000);
+    }, 5000);   // 中转判定超时是 5s*3=15s；以前 10s 一跳，丢一次心跳就会被误回收
     heartbeat.unref();
   });
 }

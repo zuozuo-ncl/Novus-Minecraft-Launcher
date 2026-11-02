@@ -45,6 +45,15 @@ target_compile_definitions(MCLauncherBootstrap PRIVATE
     _WIN32_WINNT=0x0601     # Windows 7 及以上
 )
 
+# 诊断用的 MCLAUNCHER_HTTP_MOCK 请求改写钩子：默认**不编进正式版**。
+# 它会按环境变量把下载地址改写到任意主机（含 JRE 包），正式版里等于一条
+# 静默的 RCE 入口，只有排障时才开：
+#     cmake -B build -DMCLAUNCHER_DEBUG_MOCK=ON
+option(MCLAUNCHER_DEBUG_MOCK "Enable the MCLAUNCHER_HTTP_MOCK rewrite hook (debug only)" OFF)
+if(MCLAUNCHER_DEBUG_MOCK)
+    target_compile_definitions(MCLauncherBootstrap PRIVATE MCLAUNCHER_DEBUG_MOCK)
+endif()
+
 # 链接所需的系统库
 #   winhttp   —— HTTP/HTTPS 下载
 #   shell32   —— ShellExecuteW / SHGetFolderPathW

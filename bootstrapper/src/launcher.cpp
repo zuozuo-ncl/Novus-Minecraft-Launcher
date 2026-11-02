@@ -196,6 +196,19 @@ std::string KnownJarHash(const std::wstring& version) {
 //   支持任意位数：1.0.0.1 > 1.0.0
 //   段内非数字后缀先截断（如 "1.0.0-beta" 当作 1.0.0 处理）
 // ---------------------------------------------------------------------------
+// 单个版本段：超过 9 位的数字按 LONG_MAX 处理时，多个溢出段会被当成相等，
+// 导致「按顺序而不是按大小」选中旧版本。这里改为饱和到 1e9（远超任何真实版本号）。
+static long ParseVersionPart(const std::wstring& digits) {
+    long v = 0;
+    for (wchar_t c : digits) {
+        if (v > 100000000L) {
+            return 1000000000L;
+        }
+        v = v * 10 + (c - L'0');
+    }
+    return v;
+}
+
 int CompareVersions(const std::wstring& a, const std::wstring& b) {
     auto parse = [](const std::wstring& v) {
         std::vector<long> parts;
@@ -206,7 +219,7 @@ int CompareVersions(const std::wstring& a, const std::wstring& b) {
                 cur.push_back(c);
             } else {
                 if (!cur.empty()) {
-                    parts.push_back(wcstol(cur.c_str(), nullptr, 10));
+                    parts.push_back(ParseVersionPart(cur));
                     cur.clear();
                 }
                 // 遇到 '-' 或非数字结束（如 1.0.0-beta）
@@ -216,7 +229,7 @@ int CompareVersions(const std::wstring& a, const std::wstring& b) {
             }
         }
         if (!cur.empty()) {
-            parts.push_back(wcstol(cur.c_str(), nullptr, 10));
+            parts.push_back(ParseVersionPart(cur));
         }
         return parts;
     };
@@ -511,6 +524,8 @@ StepResult FindLatestLocalJar(const AppPaths& paths,
     return StepResult::Ok;
 }
 
+static std::string ReadTrustedHash(const AppPaths& paths, const std::wstring& version);
+
 // ---------------------------------------------------------------------------
 // 确保 jar 存在
 // ---------------------------------------------------------------------------
@@ -637,6 +652,19 @@ StepResult EnsureJar(const AppPaths& paths,
         if (!hit) {
             Log::Write(L"下载后哈希计算失败，保留文件交由启动前校验");
         } else if (!Hs::EqualsIgnoreCase(actual, expected)) {
+            if (knownOfficial) {
+                // .sha256 与 jar 同域，远端可能整体被替换：只要本机有强锚点就按强锚点拒绝
+                std::string builtin = KnownJarHash(version);
+                if (!builtin.empty() && Hs::EqualsIgnoreCase(actual, builtin)) {
+                    Log::Write(L"远端 .sha256 与本机内置哈希冲突，以内置哈希为准：通过");
+                    goto download_verified;
+                }
+                std::string trusted = ReadTrustedHash(paths, version);
+                if (!trusted.empty() && Hs::EqualsIgnoreCase(actual, trusted)) {
+                    Log::Write(L"远端 .sha256 与本机信任记录冲突，以本机记录为准：通过");
+                    goto download_verified;
+                }
+            }
             Log::WriteUtf8("下载内容哈希不符！期望 %s，实际 %s", expected.c_str(), actual.c_str());
             // 带上大小与下载地址：CDN 节点缓存了旧文件时，响应头里的
             // Content-Length 是新文件的大小，但下下来的字节数是旧的 ——
@@ -658,6 +686,7 @@ if (outDetail) {
             }
             return StepResult::ChecksumMismatch;
         } else {
+download_verified:
             Log::Write(L"下载内容哈希校验通过");
         }
     } else {
@@ -858,9 +887,32 @@ StepResult VerifyJar(const AppPaths& paths,
     Log::WriteUtf8("jar 哈希: %s = %s", version.c_str(), actual.c_str());
 
     // 1) 官方 .sha256（HTTPS）
+    //
+    // 注意信任根：远端 .sha256 只做「弱锚点」。jar 和 .sha256 放在同一个域名下，
+    // 域名一旦被接管（过期、托管方投毒、从 git 历史拿到某版本哈希后一起替换），
+    // 远端校验就形同虚设。所以本地已有强锚点（内置表 / 本机信任表）时，
+    // 必须先和强锚点比对；强锚点缺失时才退回 .sha256。
     std::string official = QueryOfficialSha256(version);
     if (!official.empty()) {
+        std::string builtinEarly = KnownJarHash(version);
+        std::string trustedEarly = ReadTrustedHash(paths, version);
         if (Hs::EqualsIgnoreCase(actual, official)) {
+            if (!builtinEarly.empty() && !Hs::EqualsIgnoreCase(actual, builtinEarly)) {
+                Log::Write(L"校验失败：与官方 .sha256 一致，但与本机强锚点（内置表）不一致");
+                if (outDetail) {
+                    *outDetail = L"文件与远端 .sha256 一致，但与引导器内置哈希不一致，"
+                                 L"远端清单可能已被篡改。";
+                }
+                return StepResult::ChecksumMismatch;
+            }
+            if (!trustedEarly.empty() && !Hs::EqualsIgnoreCase(actual, trustedEarly)) {
+                Log::Write(L"校验失败：与官方 .sha256 一致，但与本机信任记录不一致");
+                if (outDetail) {
+                    *outDetail = L"文件与远端 .sha256 一致，但与本机已信任记录的哈希不一致，"
+                                 L"远端清单可能已被篡改。";
+                }
+                return StepResult::ChecksumMismatch;
+            }
             Log::Write(L"校验通过：与官方 .sha256 一致");
             return StepResult::Ok;
         }
@@ -906,17 +958,6 @@ StepResult VerifyJar(const AppPaths& paths,
     }
 
     // 3.5) 本机启动器登记过「这是我自己」的 jar（用户手动拷贝/离线安装时唯一的锚点）
-    if (SelectedFileIsOurs(paths, jarPath)) {
-        Log::Write(L"校验放行：该文件是本机启动器登记的当前运行文件");
-        return StepResult::Ok;
-    }
-
-    // 4) 本次会话内自己从固定 HTTPS 地址下载的 —— 放行一次（由 Java 启动后自行登记）
-    if (IsSelfDownloaded(jarPath)) {
-        Log::Write(L"没有可信锚点，但文件是本次运行从官方地址下载的，放行并等待启动器自行登记");
-        return StepResult::Ok;
-    }
-
     if (SelectedFileIsOurs(paths, jarPath)) {
         Log::Write(L"校验放行：该文件是本机启动器登记的当前运行文件");
         return StepResult::Ok;

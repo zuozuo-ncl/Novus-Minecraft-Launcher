@@ -48,10 +48,33 @@ public final class AppPaths {
      * 首次调用时会顺带做旧目录迁移 —— 引导器通常已经做过了，
      * 但直接 java -jar 运行时不经过引导器，这里需要兜底。
      */
+    /** 迁移完成标记（新目录里的空文件）。半途中断的迁移不会被当成「已完成」。 */
+    private static final String MIGRATE_MARKER = ".migrated-from-legacy";
+
     public static Path appDataDir() {
         Path dir = resolveDir();
         tryMigrateLegacy(dir);
         return dir;
+    }
+
+    /**
+     * 后台线程执行一次数据迁移，不阻塞 JavaFX 启动线程。
+     *
+     * 旧目录里可能有上千个 JRE 文件，在 FX 线程里同步复制会让窗口几十秒不出现。
+     */
+    public static void migrateInBackground() {
+        if (migrationTried) {
+            return;
+        }
+        Thread t = new Thread(() -> {
+            try {
+                tryMigrateLegacy(resolveDir());
+            } catch (Throwable e) {
+                logger.debug("后台迁移失败: {}", e.getMessage());
+            }
+        }, "appdata-migrate");
+        t.setDaemon(true);
+        t.start();
     }
 
     private static Path resolveDir() {
@@ -98,7 +121,19 @@ public final class AppPaths {
 
             try {
                 if (Files.exists(newDir)) {
-                    return;         // 新目录已存在，无需迁移
+                    // 以前只要新目录存在就认为迁移完成：半途被杀的迁移会留下
+                    // 一个不完整的新目录，之后永远不再补迁。现在以标记文件为准。
+                    if (!Files.exists(newDir.resolve(MIGRATE_MARKER))) {
+                        Path legacy = newDir.getParent() == null ? null
+                                : newDir.getParent().resolve(LEGACY_DIR_NAME);
+                        if (legacy != null && Files.isDirectory(legacy)) {
+                            logger.warn("数据目录不完整（上次迁移未完成），继续补全: {}", newDir);
+                        } else {
+                            return;
+                        }
+                    } else {
+                        return;         // 新目录已存在且迁移已完成
+                    }
                 }
                 Path parent = newDir.getParent();
                 if (parent == null) {
@@ -111,6 +146,9 @@ public final class AppPaths {
 
                 logger.info("检测到旧数据目录，开始迁移: {} -> {}", oldDir, newDir);
                 copyTree(oldDir, newDir);
+                Files.writeString(newDir.resolve(MIGRATE_MARKER),
+                        "migrated from " + oldDir + " at " + java.time.Instant.now(),
+                        java.nio.charset.StandardCharsets.UTF_8);
                 logger.info("旧数据迁移完成（旧目录保留未删除）");
 
             } catch (Exception e) {

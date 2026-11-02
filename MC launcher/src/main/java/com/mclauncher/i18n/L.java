@@ -175,8 +175,30 @@ public final class L {
         if (p == null) {
             return false;
         }
+        fillMissingFromOtherLanguages(lang, p);
         BUNDLES.put(lang.code, p);
         return true;
+    }
+
+    /**
+     * 非中文语言缺少的键用简体中文补齐。
+     *
+     * 以前缺键时直接显示键名（如 s_3ac9f0012b），界面上就是一串乱码般的英文；
+     * 语言之间键集合本来就不同步，缺几个很常见，回退到中文至少能看懂。
+     */
+    private static void fillMissingFromOtherLanguages(Lang lang, Properties p) {
+        if (lang == Lang.ZH_CN) {
+            return;
+        }
+        Properties zh = readBundle(Lang.ZH_CN);
+        if (zh == null) {
+            return;
+        }
+        for (String key : zh.stringPropertyNames()) {
+            if (!p.containsKey(key)) {
+                p.setProperty(key, zh.getProperty(key));
+            }
+        }
     }
 
     /** 从 classpath 读一份文案表；失败返回 null */

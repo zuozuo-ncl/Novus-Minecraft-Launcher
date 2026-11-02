@@ -43,7 +43,10 @@ public class FileUtils {
         if (dir != null) {
             Files.createDirectories(dir);
         }
-        Path tmp = target.resolveSibling(target.getFileName() + ".tmp");
+        // 临时文件名必须唯一：固定 ".tmp" 时两个线程同时写会交错成非法内容。
+        // 用「.tmp.<随机后缀>」后，各自完整写出，最后 rename 覆盖是原子的。
+        Path tmp = target.resolveSibling(target.getFileName() + ".tmp."
+                + Long.toHexString(java.util.concurrent.ThreadLocalRandom.current().nextLong() & 0xFFFFFFFFL));
         Files.writeString(tmp, content, java.nio.charset.StandardCharsets.UTF_8);
         try {
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING,

@@ -69,6 +69,7 @@ function hostUp() {
       }
     });
     ctrl.on('error', reject);
+    ctrl.on('close', () => reject(new Error('控制通道在就绪前关闭')));
   });
 }
 
@@ -218,6 +219,167 @@ async function main() {
     player.destroy(); ctrl2.destroy();
   }
 
+// ---------- 用例 7：VPN —— 服务器分配 IP/uuid + join token 鉴权 ----------
+  console.log('\n[7] VPN：join 需要 token，IP/uuid 由服务器分配');
+  {
+    const { frame, frameToHost } = require('./vpn-tunnel');
+    const hr = await post('/api/host', { name: 'vpn回归' });
+    check('VPN 用例开房成功', hr.status === 200, hr.status + ' ' + hr.raw);
+    const roomInfo = hr.json;
+    // 房主控制通道
+    const ctrl = net.connect(roomInfo.port, '127.0.0.1');
+    let cbuf = '';
+    const cmsgs = [];
+    ctrl.on('data', (d) => {
+      cbuf += d.toString();
+      let i;
+      while ((i = cbuf.indexOf('\n')) >= 0) {
+        const line = cbuf.slice(0, i); cbuf = cbuf.slice(i + 1);
+        try { cmsgs.push(JSON.parse(line)); } catch { /* 忽略 */ }
+      }
+    });
+    ctrl.on('error', () => {});
+    await new Promise((r) => ctrl.on('connect', r));
+    ctrl.write(MAGIC + JSON.stringify({ type: 'hello', room: roomInfo.room, token: roomInfo.token }) + '\n');
+    await sleep(300);
+
+    // 房主 VPN 通道（独立的控制连接会替换掉旧控制通道，所以这里的信令
+    // 必须复用上面那条 ctrl，而不是另起一条 hello）
+    const vhost = net.connect(roomInfo.port, '127.0.0.1');
+    const hostFrames = [];
+    let vbuf = Buffer.alloc(0);
+    vhost.on('data', (d) => {
+      vbuf = Buffer.concat([vbuf, d]);
+      while (vbuf.length >= 4) {
+        const len = vbuf.readUInt32LE(0);
+        if (vbuf.length < 4 + len) break;
+        hostFrames.push(vbuf.slice(4, 4 + len));
+        vbuf = vbuf.slice(4 + len);
+      }
+    });
+    vhost.on('error', () => {});
+    await new Promise((r) => vhost.on('connect', r));
+    vhost.write(MAGIC + JSON.stringify({ type: 'vpn-host', room: roomInfo.room, token: roomInfo.token }) + '\n');
+    await sleep(300);
+
+    // 房主要求为玩家 #1 签发 token
+    ctrl.write(JSON.stringify({ type: 'vpn-token', id: 1 }) + '\n');
+    await sleep(300);
+    const tok = cmsgs.find((m) => m.type === 'vpn-token' && m.id === 1);
+    check('房主拿到 join token', !!tok && typeof tok.token === 'string', JSON.stringify(cmsgs.slice(-3)));
+    check('服务器分配了 10.77.0.x 地址', !!tok && /^10\.77\.0\.[2-9]$/.test(tok.ip), tok && tok.ip);
+
+    // 第二个玩家应分到不同的地址
+    ctrl.write(JSON.stringify({ type: 'vpn-token', id: 2 }) + '\n');
+    await sleep(300);
+    const tok2 = cmsgs.find((m) => m.type === 'vpn-token' && m.id === 2);
+    check('两个玩家的虚拟 IP 不同', !!tok && !!tok2 && tok.ip !== tok2.ip, tok && tok && `${tok.ip} vs ${tok2 && tok2.ip}`);
+
+    // 无 token 的 join 必须被拒
+    const bad = net.connect(roomInfo.port, '127.0.0.1');
+    let badClosed = false;
+    bad.on('close', () => { badClosed = true; });
+    bad.on('error', () => {});
+    await new Promise((r) => bad.on('connect', r));
+    bad.write(MAGIC + JSON.stringify({ type: 'vpn-join', room: roomInfo.room, uuid: tok.uuid }) + '\n');
+    await sleep(300);
+    check('不带 token 的 vpn-join 被拒绝', badClosed);
+
+    // 错误口令也必须被拒
+    const badCode = await new Promise((resolve) => {
+      const c3 = net.connect(roomInfo.port, '127.0.0.1', () => {
+        c3.write(MAGIC + JSON.stringify({ type: 'vpn-claim', room: roomInfo.room, code: 'deadbeef' }) + '\n');
+      });
+      let d = '';
+      c3.on('data', (x) => { d += x; });
+      c3.on('close', () => resolve(d));
+      c3.on('error', () => resolve(''));
+    });
+    check('错误口令被拒绝', badCode.includes('口令无效'), badCode);
+
+
+    // 玩家先凭口令领取 token/uuid/ip，再带 token 正式加入
+    const claimResp = await new Promise((resolve) => {
+      const c2 = net.connect(roomInfo.port, '127.0.0.1', () => {
+        c2.write(MAGIC + JSON.stringify({ type: 'vpn-claim', room: roomInfo.room, code: tok.code }) + '\n');
+      });
+      let d = '';
+      c2.on('data', (x) => { d += x; });
+      c2.on('close', () => resolve(JSON.parse(d)));
+      c2.on('error', () => resolve({}));
+    });
+    check('凭口令换取到服务器分配的地址', claimResp.ip === tok.ip && !!claimResp.token, JSON.stringify(claimResp));
+    const joinTok = { token: claimResp.token || '', uuid: claimResp.uuid || tok.uuid, ip: claimResp.ip || tok.ip };
+
+    // 同一个口令不能用第二次
+    const again = await new Promise((resolve) => {
+      const c6 = net.connect(roomInfo.port, '127.0.0.1', () => {
+        c6.write(MAGIC + JSON.stringify({ type: 'vpn-claim', room: roomInfo.room, code: tok.code }) + '\n');
+      });
+      let d = '';
+      c6.on('data', (x) => { d += x; });
+      c6.on('close', () => resolve(d));
+      c6.on('error', () => resolve(''));
+    });
+    check('口令一次性（不能重复使用）', again.includes('口令无效'), again);
+
+
+    // 带 token 的 join：上行帧应带着玩家的虚拟 IP 到达房主
+    const peer = net.connect(roomInfo.port, '127.0.0.1');
+    peer.on('error', () => {});
+    await new Promise((r) => peer.on('connect', r));
+    peer.write(MAGIC + JSON.stringify({ type: 'vpn-join', room: roomInfo.room, uuid: joinTok.uuid, token: joinTok.token }) + '\n');
+    await sleep(400);
+    check('玩家连接已登记到中继', peer.writable && !peer.destroyed);
+    // 合法的 IPv4 报文（只填了版本和总长，校验和不对会被中继丢弃）
+    const ipPkt = Buffer.alloc(20);
+    ipPkt[0] = 0x45; ipPkt.writeUInt16BE(20, 2);
+    ipPkt.writeUInt8(17, 9);
+    ipPkt.writeUInt8(10, 12);
+    const peerIn = [];
+    peer.on('data', (d) => peerIn.push(d));
+    peer.pause();          // 先挂监听、暂停读取：这样之后的每个 chunk 都会被记下来
+    peer.write(frame(ipPkt));
+    await sleep(400);
+    // 房主侧按「包的来源地址」分发，前缀是玩家的虚拟 IP
+    const up = hostFrames.find((f) => f.length === 1 + joinTok.ip.length + 20);
+    check('房主收到的上行帧带有玩家的虚拟 IP',
+          !!up && up.slice(1, 1 + joinTok.ip.length).toString() === joinTok.ip,
+          up && up.slice(1, 1 + up[0]).toString());
+    check('房主收到 vpn-peer 通知', cmsgs.some((m) => m.type === 'vpn-peer' && m.uuid === joinTok.uuid), JSON.stringify(cmsgs).slice(0, 300));
+
+    // 同一 token 再用一次必须被拒
+    const reuse = net.connect(roomInfo.port, '127.0.0.1');
+    let reuseClosed = false;
+    reuse.on('close', () => { reuseClosed = true; });
+    reuse.on('error', () => {});
+    await new Promise((r) => reuse.on('connect', r));
+    reuse.write(MAGIC + JSON.stringify({ type: 'vpn-join', room: roomInfo.room, uuid: joinTok.uuid, token: joinTok.token }) + '\n');
+    await sleep(300);
+    check('同一 token 不能重复使用', reuseClosed);
+    const alive = await new Promise((resolve) => {
+      let d = '';
+      const t = setTimeout(() => resolve('timeout:' + d), 2000);
+      http.get({ host: '127.0.0.1', port: HTTP_PORT, path: '/health' }, (res) => {
+        res.on('data', (c) => { d += c; }); res.on('end', () => { clearTimeout(t); resolve(d); });
+      }).on('error', (e) => { clearTimeout(t); resolve('err ' + e.message); });
+    });
+
+    // 房主 → 玩家方向：中继把 {ipLen}{ip}{packet} 去掉前缀后转给玩家。
+    // 注意：房主丢帧的判定是「前缀必须是已登记的玩家」—— 这里用仍然在线的
+    // joinTok.ip 发一帧，由新开的探针玩家（不暂停读取）来验证。
+    vhost.write(frameToHost(joinTok.ip, ipPkt));
+    await sleep(100);
+    peer.resume();         // 恢复读取后，缓冲里的数据会以 data 事件送达
+    await sleep(600);
+    const down = Buffer.concat(peerIn);
+
+    check('玩家收到房主下发的帧',
+          down.length === 24 && down.readUInt32LE(0) === 20, down.toString('hex').slice(0, 40));
+
+    peer.destroy(); bad.destroy(); reuse.destroy(); vhost.destroy(); ctrl.destroy();
+  }
+
   // ---------- 用例 5：房间数上限 ----------
   console.log('\n[5] 速率限制');
   {
@@ -241,6 +403,7 @@ async function main() {
     });
     check('/health 返回 rooms/players/rss', typeof h.rooms === 'number' && typeof h.players === 'number' && typeof h.rss === 'number', JSON.stringify(h));
   }
+
 
   mc.close(); relay.kill();
   console.log(`\n=== 通过 ${pass}，失败 ${fail} ===`);

@@ -186,7 +186,17 @@ public class ModalHost {
     /**
      * 关闭最上层弹窗
      */
+    /**
+     * 关闭最上层弹窗（必须在 JavaFX 线程调用）
+     *
+     * 后台线程误调时改投 runLater：弹窗栈与场景图的修改必须和点击事件串行，
+     * 以前后台线程直接改在这里是没有任何保护的。
+     */
     public void close() {
+        if (!javafx.application.Platform.isFxApplicationThread()) {
+            javafx.application.Platform.runLater(this::close);
+            return;
+        }
         Panel panel = stack.poll();
         if (panel == null) {
             return;
@@ -227,6 +237,13 @@ public class ModalHost {
         if (content == null || stack.isEmpty()) {
             return false;
         }
+        if (!javafx.application.Platform.isFxApplicationThread()) {
+            // 本面板仍在栈里：调用方认为「已收起」，点击事件应立刻被挡住，
+            // 真正的移除投递到 FX 线程执行
+            removeNodeNow(content);
+            javafx.application.Platform.runLater(() -> closePanel(content));
+            return true;
+        }
         // ArrayDeque 的 iterator 是「栈顶 -> 栈底」，先关上面的层，再关目标层
         Panel target = null;
         for (Panel panel : stack) {
@@ -243,6 +260,20 @@ public class ModalHost {
         }
         close();
         return true;
+    }
+
+    /** 把某个内容的弹窗节点立刻移出场景图（只用于跨线程的临时隐藏） */
+    private void removeNodeNow(javafx.scene.layout.Region content) {
+        for (Panel p : stack) {
+            if (p.content == content) {
+                root.getChildren().remove(p.node);
+                if (stack.size() == 1) {
+                    root.setVisible(false);
+                    root.setManaged(false);
+                }
+                return;
+            }
+        }
     }
 
     /** 指定内容的面板当前是否正显示 */

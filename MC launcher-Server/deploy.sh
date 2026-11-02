@@ -87,9 +87,32 @@ remote_install() {
     log_info "依赖安装完成"
 }
 
+# 远程配置 ADMIN_TOKEN
+#
+# 以前 --setup 完全不处理 ADMIN_TOKEN：按文档部署后写接口一律 503，
+# 管理员还以为服务坏了。这里自动生成一次随机令牌写入 .env（600），
+# 已存在则沿用。
+setup_admin_token() {
+    local env_file="$REMOTE_DIR/.env"
+    local existing
+    existing=$(ssh "$REMOTE_USER@$REMOTE_HOST" "test -f '$env_file' && grep -E '^ADMIN_TOKEN=' '$env_file' | cut -d= -f2- || true" 2>/dev/null || true)
+    if [ -n "$existing" ]; then
+        log_info "沿用已有的 ADMIN_TOKEN"
+        ADMIN_TOKEN_VALUE="$existing"
+    else
+        ADMIN_TOKEN_VALUE=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' 
+')
+        ssh "$REMOTE_USER@$REMOTE_HOST" "umask 077; mkdir -p '$REMOTE_DIR'; printf 'ADMIN_TOKEN=%s
+' '$ADMIN_TOKEN_VALUE' > '$env_file'; chmod 600 '$env_file'"
+        log_info "已生成管理令牌并写入 $env_file（600）"
+    fi
+    log_info "Web 管理页需要填写的令牌：$ADMIN_TOKEN_VALUE"
+}
+
 # 远程配置 systemd
 remote_setup_systemd() {
     log_info "配置 systemd 服务..."
+    setup_admin_token
     
     # 上传 service 文件
     scp "$LOCAL_DIR/mc-launcher-server.service" "$REMOTE_USER@$REMOTE_HOST:/tmp/"

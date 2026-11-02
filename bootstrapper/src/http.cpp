@@ -18,6 +18,8 @@
 
 namespace {
 
+using Http::AllowRedirectFn;   // 内部辅助函数要引用它
+
 constexpr DWORD kChunkSize = 64 * 1024;     // 64KB
 constexpr DWORD kResolveTimeoutMs = 15000;
 constexpr DWORD kConnectTimeoutMs = 20000;
@@ -25,25 +27,30 @@ constexpr DWORD kSendTimeoutMs    = 30000;
 constexpr DWORD kRecvTimeoutMs    = 60000;
 
 // ---------------------------------------------------------------------------
-//  请求拦截钩子（仅用于诊断）
+//  请求拦截钩子（仅诊断，**只在定义了 MCLAUNCHER_DEBUG_MOCK 的调试构建里存在**）
 //
-//  线上反馈「下载到的 jar 哈希不对，但源站文件是对的」这类问题时，
-//  外部工具（curl 等）复现不出来，只有引导器自己的请求路径能复现。
-//  这里允许用环境变量把指定 URL 前缀的请求改写到另一个地址，形态与
-//  Charles/Fiddler 的 Map Local 类似，但不需要装证书，也不影响正常用户
-//  （环境变量不存在时每次调用只多一次 GetEnvironmentVariableW）。
+//  历史问题：这个钩子在正式版里也会生效，任何本机进程只要写一个用户级
+//  环境变量 MCLAUNCHER_HTTP_MOCK=...，就能把 JRE / jar / .sha256 的下载
+//  全部改写到攻击者主机，而 JRE 包解压后会被直接执行 —— 等于一条静默的
+//  RCE 入口。诊断钩子只能存在于调试构建：
 //
+//      cmake -B build -DMCLAUNCHER_DEBUG_MOCK=ON
+//
+//  用法与 Charles/Fiddler 的 Map Local 类似：
 //    MCLAUNCHER_HTTP_MOCK = <前缀>=<目标前缀>[;<前缀>=<目标前缀>...]
-//
 //  例：把 CDN 上的 jar 请求改写到 COS 源站，判断问题是否出在 CDN：
 //    set MCLAUNCHER_HTTP_MOCK=https://3984235.xyz/=https://xxx.cos.ap-guangzhou.myqcloud.com/
 // ---------------------------------------------------------------------------
 std::wstring ApplyMockRedirect(const std::wstring& url) {
+#if !defined(MCLAUNCHER_DEBUG_MOCK)
+    (void)url;
+    return url;
+#else
     DWORD n = GetEnvironmentVariableW(L"MCLAUNCHER_HTTP_MOCK", nullptr, 0);
     if (n == 0) {
         return url;
     }
-    std::wstring spec(n, L'\0');
+    std::wstring spec(n, static_cast<wchar_t>(0));
     DWORD got = GetEnvironmentVariableW(L"MCLAUNCHER_HTTP_MOCK", &spec[0], n);
     spec.resize(got);
 
@@ -55,12 +62,15 @@ std::wstring ApplyMockRedirect(const std::wstring& url) {
                                                    ? std::wstring::npos : semi - start);
         size_t eq = rule.find(L'=');
         if (eq != std::wstring::npos) {
+            // 即使调试构建，也只允许把 https 改写到 https（禁止降级到明文）
             std::wstring from = rule.substr(0, eq);
             std::wstring to = rule.substr(eq + 1);
-            if (!from.empty() && out.compare(0, from.size(), from) == 0) {
+            const bool fromHttps = from.rfind(L"https://", 0) == 0;
+            const bool toHttps = to.rfind(L"https://", 0) == 0;
+            if (!from.empty() && (!fromHttps || toHttps)
+                && out.compare(0, from.size(), from) == 0) {
                 std::wstring rest = out.substr(from.size());
                 out = to + rest;
-                // 目标写成主机（如 https://x.cos...）时补一个分隔符
                 if (!to.empty() && to.back() != L'/' && !rest.empty() &&
                     rest[0] != L'/') {
                     out.insert(to.size(), L"/");
@@ -74,6 +84,7 @@ std::wstring ApplyMockRedirect(const std::wstring& url) {
         start = semi + 1;
     }
     return out;
+#endif
 }
 
 // RAII：自动关闭 WinHTTP 句柄
@@ -148,9 +159,17 @@ StepResult OpenRequest(const std::wstring& url,
                        WinHttpHandle& outSession,
                        WinHttpHandle& outConnect,
                        WinHttpHandle& outRequest,
-                       std::wstring& errMsg) {
+                       std::wstring& errMsg,
+                       AllowRedirectFn allowUrl = nullptr) {
     // 诊断钩子：环境变量存在时可能改写到别的地址（正常用户不生效）
     const std::wstring effectiveUrl = ApplyMockRedirect(url);
+
+    // 首跳同样要过白名单（下载 JRE 时，Adoptium API 返回的 link 字段也是「外部给的地址」）
+    if (allowUrl && !allowUrl(effectiveUrl)) {
+        errMsg = L"下载地址不在允许的源列表内，已拒绝: " + effectiveUrl;
+        Log::WriteF(L"拒绝下载地址: %s", effectiveUrl.c_str());
+        return StepResult::NetworkError;
+    }
 
     std::wstring host, path;
     INTERNET_PORT port = 0;
@@ -219,8 +238,9 @@ StepResult SendAndReceive(const std::wstring& url,
                           WinHttpHandle& outRequest,
                           DWORD& outStatus,
                           std::wstring& errMsg,
-                          int redirectDepth = 0) {
-    StepResult r = OpenRequest(url, method, outSession, outConnect, outRequest, errMsg);
+                          int redirectDepth = 0,
+                          AllowRedirectFn allowRedirect = nullptr) {
+    StepResult r = OpenRequest(url, method, outSession, outConnect, outRequest, errMsg, allowRedirect);
     if (r != StepResult::Ok) {
         return r;
     }
@@ -292,6 +312,25 @@ StepResult SendAndReceive(const std::wstring& url,
             location = base + location;
         }
 
+        // 调用方给的域名白名单：不允许就中止（例如 JRE 包只允许官方/CDN 域名，
+        // 且必须仍是 https）。以前这里无条件跟随，包括降级到 http://
+        if (allowRedirect && !allowRedirect(location)) {
+            errMsg = L"重定向目标不在允许的下载源列表内，已拒绝: " + location;
+            Log::WriteF(L"拒绝重定向: %s", location.c_str());
+            DrainResponse(outRequest);
+            return StepResult::NetworkError;
+        }
+        const bool locLowerHttps = location.rfind(L"https://", 0) == 0
+                                   || location.rfind(L"HTTPS://", 0) == 0;
+        const bool curHttps = url.rfind(L"https://", 0) == 0
+                              || url.rfind(L"HTTPS://", 0) == 0;
+        if (curHttps && !locLowerHttps) {
+            errMsg = L"拒绝把 HTTPS 请求降级重定向到非 HTTPS 地址: " + location;
+            Log::WriteF(L"拒绝降级重定向: %s", location.c_str());
+            DrainResponse(outRequest);
+            return StepResult::NetworkError;
+        }
+
         Log::WriteF(L"跟随重定向 -> %s", location.c_str());
 
         // 释放旧句柄前，必须排空响应体，避免污染连接池
@@ -301,9 +340,10 @@ StepResult SendAndReceive(const std::wstring& url,
         outRequest = WinHttpHandle();
         outConnect = WinHttpHandle();
         outSession = WinHttpHandle();
+        // 跟随重定向可能改变域名：需要白名单的调用方（JRE 下载）据此拒绝
         return SendAndReceive(location, method,
                               outSession, outConnect, outRequest,
-                              outStatus, errMsg, redirectDepth + 1);
+                              outStatus, errMsg, redirectDepth + 1, allowRedirect);
     }
 
     return StepResult::Ok;
@@ -466,7 +506,7 @@ StepResult GetText(const std::wstring& url,
     std::wstring errMsg;
 
     StepResult r = SendAndReceive(url, L"GET", session, connect, request,
-                                  status, errMsg);
+                                  status, errMsg, 0, nullptr);
     if (r != StepResult::Ok) {
         Log::WriteF(L"GetText 失败: %s", errMsg.c_str());
         return r;
@@ -479,8 +519,12 @@ StepResult GetText(const std::wstring& url,
     }
 
     // 逐块读取，按 UTF-8 累积（调用方的 JSON 都是 ASCII/UTF-8）
+    //
+    // 响应体上限：版本接口、.sha256 都只有几 KB。以前没有任何上限，
+    // 被劫持的服务器返回超大响应体会把内存吃光（32 位进程直接 bad_alloc）。
     std::string utf8;
     std::vector<char> buf(kChunkSize);
+    const size_t kMaxTextBytes = 4 * 1024 * 1024;   // 4 MB
 
     for (;;) {
         DWORD avail = 0;
@@ -502,6 +546,11 @@ StepResult GetText(const std::wstring& url,
             break;
         }
         utf8.append(buf.data(), read);
+        if (utf8.size() > kMaxTextBytes) {
+            Log::WriteF(L"响应体超过上限（%zu 字节），已中止: %s", utf8.size(), url.c_str());
+            DrainResponse(request);
+            return StepResult::NetworkError;
+        }
     }
 
     // UTF-8 -> 宽字符
@@ -530,7 +579,8 @@ StepResult GetText(const std::wstring& url,
 StepResult DownloadFile(const std::wstring& url,
                         const std::wstring& destPath,
                         ProgressFn progress,
-                        volatile bool* cancelFlag) {
+                        volatile bool* cancelFlag,
+                        AllowRedirectFn allowUrl) {
     Log::WriteF(L"开始下载: %s", url.c_str());
 
     // 先确保目标目录存在
@@ -544,7 +594,7 @@ StepResult DownloadFile(const std::wstring& url,
     std::wstring errMsg;
 
     StepResult r = SendAndReceive(url, L"GET", session, connect, request,
-                                  status, errMsg);
+                                  status, errMsg, 0, allowUrl);
     if (r != StepResult::Ok) {
         Log::WriteF(L"下载失败: %s", errMsg.c_str());
         return r;

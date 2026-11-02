@@ -1,6 +1,5 @@
 package com.mclauncher.ui.window;
 
-
 import com.mclauncher.i18n.L;
 import com.mclauncher.network.Downloader;
 import com.mclauncher.network.UpdateClient;
@@ -14,6 +13,7 @@ import javafx.scene.layout.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.function.Consumer;
 
@@ -210,6 +210,16 @@ public class UpdateDialog {
                 if (expected == null && info.sha256ByVersion != null) {
                     expected = info.sha256ByVersion.get(targetVersion);
                 }
+                if (expected == null) {
+                    // 接口没下发哈希时，去文件服务器取同目录的 .sha256（弱兜底）；
+                    // 仍然取不到就拒绝安装，不再「只验 ZIP 魔数」放行
+                    Platform.runLater(() -> progressLabel.setText("正在获取官方校验值…"));
+                    expected = client.fetchOfficialSha256(targetVersion);
+                }
+                if (expected == null) {
+                    throw new IOException("拿不到该版本官方 SHA-256，为安全起见已拒绝安装。"
+                            + "请稍后重试或联系作者。");
+                }
                 // 事务式安装：下载+校验，再把「清单登记 + 信任表登记」一次性写好
                 com.mclauncher.update.VersionManifest manifest =
                         com.mclauncher.update.VersionManifest.load();
@@ -260,8 +270,16 @@ public class UpdateDialog {
                     // 登记到版本清单：新版本尚未验证可用（usable=false），
                     // 要等它真正跑起来、界面显示成功后才由 LauncherApp 标为可用。
                     // 这样「下载完但一启动就崩」的坏版本能被自动回退掉。
-                    registerInManifest(targetVersion, jar,
-                            com.mclauncher.config.ConfigManager.staticLauncherVersion());
+                    // installVersion 已经用 recordDownloaded 登记好（usable=false，
+                    // 并把本版本哈希放进 pendingTrusted）；这里只需 save() 落盘，
+                    // 它会把清单、selected.json、trusted-hashes.json 一并写出
+                    // installVersion 已把「清单 + 信任表」写进 manifest 实例；
+                    // save() 才会真正落盘（并把 pendingTrusted 刷进 trusted-hashes.json）
+                    try {
+                        manifest.save();
+                    } catch (Exception e2) {
+                        logger.warn("保存版本清单失败: {}", e2.getMessage());
+                    }
 
                     // 按钮切换：下载按钮退场，换成「立即重启」
                     downloadButton.setVisible(false);
@@ -363,43 +381,4 @@ public class UpdateDialog {
         laterButton.setDisable(false);
     }
 
-    /**
-     * 把刚下载的版本登记进版本清单
-     *
-     * 只登记、不标记可用 —— 它还没被实际运行验证过。
-     * 同时把 current 指向它，这样重启后会优先跑新版本。
-     *
-     * 不向上抛异常：清单写入失败不该阻止用户使用刚下好的版本，
-     * 最坏情况只是回退机制少了这条记录。
-     */
-    /** 当前版本（清单里的 current）：登记时保留它，避免把 current 覆盖成未验证的新版本 */
-    private void registerInManifest(String version, Path jar, String keepCurrent) {
-        try {
-            com.mclauncher.update.VersionManifest m =
-                    com.mclauncher.update.VersionManifest.load();
-            m.syncWithDisk();
-
-            com.mclauncher.update.VersionManifest.Entry e =
-                    m.findOrCreate(version, jar.getFileName().toString());
-            e.usable = false;       // 待验证
-            e.failures = 0;
-
-            // 这里**不设** pendingSince —— 真正的「试用开始」由 LauncherApp
-            // 在下次启动时记录；否则用户选了「稍后重启」，标记会一直挂着，
-            // 下次启动被误判成「上次崩溃了」。
-            //
-            // 也**不改** current：新版本还没跑过，不能让引导器下次直接拉它。
-            // 下一轮启动会先做「上次是否崩溃」检查：正常 -> LauncherApp
-            // 把 current 切到运行中的版本；崩溃 -> 回退到旧版本。
-            if (keepCurrent != null && !keepCurrent.isBlank()) {
-                m.current = keepCurrent;
-            }
-
-            m.save();
-            logger.info("新版本 {} 已登记到版本清单（待验证）", version);
-
-        } catch (Exception ex) {
-            logger.warn("登记新版本到清单失败（不影响使用）: {}", ex.getMessage());
-        }
-    }
 }

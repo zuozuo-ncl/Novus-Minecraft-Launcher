@@ -13,6 +13,8 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.concurrent.*;
 
 /**
@@ -149,6 +151,14 @@ public class MicrosoftAuth {
                     throw new IOException("用户取消了授权");
                 } else if ("bad_verification_code".equals(errorCode)) {
                     throw new IOException("设备代码无效，请重新开始登录");
+                } else if (isTransientOAuthError(e.getMessage())) {
+                    // 429 / 5xx / temporarily_unavailable：服务端暂时不可用，
+                    // 以前一律当致命错误中止，用户只能从头再来
+                    logger.debug("设备码轮询遇到临时错误，稍后重试: {}", e.getMessage());
+                    if (callback != null) {
+                        callback.onPending();
+                    }
+                    continue;
                 }
                 throw e;
             }
@@ -231,7 +241,14 @@ public class MicrosoftAuth {
         body.addProperty("RelyingParty", "rp://api.minecraftservices.com/");
         body.addProperty("TokenType", "JWT");
 
-        String response = httpClient.postJson(XSTS_AUTH_URL, body);
+        String response;
+        try {
+            response = httpClient.postJson(XSTS_AUTH_URL, body);
+        } catch (IOException e) {
+            // XSTS 失败时 401 响应体里带 XErr，不解析的话用户只会看到「401」
+            String friendly = describeXstsError(e.getMessage());
+            throw new IOException(friendly != null ? friendly : e.getMessage(), e);
+        }
         JsonObject json = JsonParser.parseString(response).getAsJsonObject();
 
         XstsResponse xsts = new XstsResponse();
@@ -241,6 +258,42 @@ public class MicrosoftAuth {
                 .get("uhs").getAsString());
 
         return xsts;
+    }
+
+    /** 把 XSTS 的 XErr 翻译成用户能看懂的说明 */
+    static String describeXstsError(String message) {
+        if (message == null) {
+            return null;
+        }
+        int i = message.indexOf("XErr");
+        if (i < 0) {
+            return null;
+        }
+        String tail = message.substring(i);
+        StringBuilder digits = new StringBuilder();
+        for (int k = 0; k < tail.length(); k++) {
+            char c = tail.charAt(k);
+            if (c >= '0' && c <= '9') {
+                digits.append(c);
+            } else if (digits.length() > 0) {
+                break;
+            }
+        }
+        switch (digits.toString()) {
+            case "2148916233":
+                return "该微软账号还没有 Xbox 档案。请先用这个账号登录一次 https://www.xbox.com 创建档案后再试";
+            case "2148916235":
+                return "该账号所在地区不支持 Xbox Live / Minecraft，无法登录";
+            case "2148916236":
+            case "2148916237":
+                return "该账号需要先完成年龄验证（家长控制），请到 https://account.xbox.com 处理";
+            case "2148916238":
+                return "该账号是未成年人账号，必须加入家庭组后才能使用";
+            case "2148916227":
+                return "该账号已被 Xbox Live 封禁";
+            default:
+                return null;
+        }
     }
 
     /**
@@ -338,6 +391,15 @@ public class MicrosoftAuth {
         );
         account.setClientId(clientId);
 
+        // 账号过期后由 AccountManager 用它自动刷新（见 refreshAccessToken）
+        account.setRefresher(a -> {
+            try {
+                return refresh(a);
+            } catch (IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        });
+
         if (callback != null) {
             callback.onStatus(L.t("s_943dc1528f") + profile.getName());
         }
@@ -345,6 +407,77 @@ public class MicrosoftAuth {
         logger.info("微软登录完成: {}", profile.getName());
         return account;
     }
+
+    /**
+     * 用 refresh_token 换新的 Minecraft access token（刷新整条 Xbox 链路）
+     *
+     * 返回新的 Account 字段，调用方负责加锁并落盘。
+     */
+    public Account refresh(Account old) throws IOException {
+        String rt = old.getRefreshToken();
+        String cid = old.getClientId() != null && !old.getClientId().isBlank() ? old.getClientId() : clientId;
+        if (rt == null || rt.isBlank() || cid == null || cid.isBlank()) {
+            throw new IOException("账号缺少 refresh_token 或 client_id，需要重新登录");
+        }
+        this.clientId = cid;
+
+        Map<String, String> form = new HashMap<>();
+        form.put("client_id", cid);
+        form.put("grant_type", "refresh_token");
+        form.put("refresh_token", rt);
+        form.put("scope", SCOPE);
+
+        MicrosoftTokenResponse msToken;
+        try {
+            String resp = httpClient.postForm(TOKEN_URL, form);
+            msToken = gson.fromJson(resp, MicrosoftTokenResponse.class);
+        } catch (IOException e) {
+            String code = extractOAuthError(e.getMessage());
+            if ("invalid_grant".equals(code)) {
+                throw new IOException("登录已失效（refresh_token 过期或被撤销），请重新登录");
+            }
+            throw e;
+        }
+        if (msToken == null || msToken.getAccessToken() == null) {
+            throw new IOException("刷新微软令牌失败：响应中没有 access_token");
+        }
+
+        String xbl = authenticateXboxLive(msToken.getAccessToken());
+        XstsResponse xsts = authorizeXsts(xbl);
+        String mcToken = authenticateMinecraft(xsts.getToken(), xsts.getUhs());
+
+        Account fresh = Account.createMicrosoft(old.getUsername(), old.getUuid(),
+                mcToken,
+                msToken.getRefreshToken() != null ? msToken.getRefreshToken() : rt,
+                System.currentTimeMillis() + 24 * 60 * 60 * 1000L);
+        fresh.setId(old.getId());
+        fresh.setClientId(cid);
+        fresh.setSkinSite(old.getSkinSite());
+        fresh.setXuid(old.getXuid());
+        logger.info("已刷新微软账号令牌: {}", old.getUsername());
+        return fresh;
+    }
+
+    /** 设备码轮询里可以重试的错误（429 / 5xx / 明确声明 temporarily_unavailable） */
+    static boolean isTransientOAuthError(String message) {
+        if (message == null) {
+            return false;
+        }
+        String code = extractOAuthError(message);
+        if ("temporarily_unavailable".equals(code) || "server_error".equals(code)) {
+            return true;
+        }
+        // HttpClientUtils 把状态码拼在消息里：「表单提交失败: 429 - <url> ...」
+        Matcher m = HTTP_STATUS.matcher(message);
+        if (m.find()) {
+            int status = Integer.parseInt(m.group(1));
+            return status == 429 || status >= 500;
+        }
+        return false;
+    }
+
+    /** 从 "表单提交失败: 429 - url" / "POST 请求失败: 503 - url" 里取状态码 */
+    private static final Pattern HTTP_STATUS = Pattern.compile("失败: (\\d{3})");
 
     // ==================== 数据模型 ====================
 

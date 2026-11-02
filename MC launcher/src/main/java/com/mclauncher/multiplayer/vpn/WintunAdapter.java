@@ -66,6 +66,19 @@ public final class WintunAdapter implements AutoCloseable {
     private Pointer adapter;
     /** volatile：close() 可能来自另一线程，转发循环要能立刻看到 null */
     private volatile Pointer session;
+    /**
+     * 会话的读写锁。
+     *
+     * close() 可能在任意线程（VPN 断开 / 窗口关闭）里 EndSession，而收发包线程
+     * 随时可能还在 ReceivePacket / AllocateSendPacket —— 不互斥的话驱动会读写
+     * 已经释放的会话指针，直接原生 ACCESS_VIOLATION，整个启动器崩溃。
+     * nativeLock 只保护 native 调用本身（收包拷贝完立刻释放），等待事件时绝不持有。
+     */
+    private final Object nativeLock = new Object();
+    /** 正在 native 调用中的线程数（用于 close 前等待它们退出） */
+    private final java.util.concurrent.atomic.AtomicInteger inNative =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private volatile boolean closing;
     /** 网卡 GUID（Wintun 自己生成的），用于 netsh 配置 */
     private String luid;
 
@@ -205,30 +218,42 @@ public final class WintunAdapter implements AutoCloseable {
      * 捕获错误 code 保证不因竞态崩溃（驱动返回 ERROR_NO_MORE_ITEMS 表示暂无数据）。
      */
     public byte[] receive() {
-        Pointer s = session;
+        if (closing) {
+            return null;
+        }
         Wintun w = libOrNull();
-        if (s == null || w == null) {
+        if (w == null) {
             return null;
         }
-        IntByReference size = new IntByReference();
-        Pointer p;
+        inNative.incrementAndGet();
         try {
-            p = w.WintunReceivePacket(s, size);
-        } catch (Throwable e) {
-            // 会话刚被关闭
-            return null;
-        }
-        if (p == null) {
-            return null;
-        }
-        try {
-            return p.getByteArray(0, size.getValue());
-        } finally {
-            try {
-                w.WintunReleaseReceivePacket(s, p);
-            } catch (Throwable ignored) {
-                // 同上
+            synchronized (nativeLock) {
+                Pointer s = session;
+                if (s == null || closing) {
+                    return null;
+                }
+                IntByReference size = new IntByReference();
+                Pointer p;
+                try {
+                    p = w.WintunReceivePacket(s, size);
+                } catch (Throwable e) {
+                    return null;
+                }
+                if (p == null) {
+                    return null;
+                }
+                try {
+                    return p.getByteArray(0, size.getValue());
+                } finally {
+                    try {
+                        w.WintunReleaseReceivePacket(s, p);
+                    } catch (Throwable ignored) {
+                        // 同上
+                    }
+                }
             }
+        } finally {
+            inNative.decrementAndGet();
         }
     }
 
@@ -238,20 +263,33 @@ public final class WintunAdapter implements AutoCloseable {
 
     /** 发送一个 IP 包；缓冲区满时返回 false（调用方稍后重试） */
     public boolean send(byte[] packet) {
-        if (session == null) {
+        if (session == null || closing) {
             return false;
         }
         Wintun w = libOrNull();
         if (w == null) {
             return false;
         }
-        Pointer p = w.WintunAllocateSendPacket(session, packet.length);
-        if (p == null) {
+        inNative.incrementAndGet();
+        try {
+            synchronized (nativeLock) {
+                Pointer s = session;
+                if (s == null || closing) {
+                    return false;
+                }
+                Pointer p = w.WintunAllocateSendPacket(s, packet.length);
+                if (p == null) {
+                    return false;
+                }
+                p.write(0, packet, 0, packet.length);
+                w.WintunSendPacket(s, p);
+                return true;
+            }
+        } catch (Throwable t) {
             return false;
+        } finally {
+            inNative.decrementAndGet();
         }
-        p.write(0, packet, 0, packet.length);
-        w.WintunSendPacket(session, p);
-        return true;
     }
 
     /** 读数据时用的事件句柄（可 WaitForSingleObject 等待，避免忙等） */
@@ -267,14 +305,35 @@ public final class WintunAdapter implements AutoCloseable {
     // ---------------------------------------------------------------
     @Override
     public void close() {
+        closing = true;
         Wintun w = libOrNull();
-        if (session != null && w != null) {
-            w.WintunEndSession(session);
-            session = null;
+        // 等还在 native 调用里的线程退出（最多 2 秒），再 EndSession
+        long deadline = System.currentTimeMillis() + 2000;
+        while (inNative.get() > 0 && System.currentTimeMillis() < deadline) {
+            try {
+                Thread.sleep(5);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
         }
-        if (adapter != null && w != null) {
-            w.WintunCloseAdapter(adapter);
-            adapter = null;
+        synchronized (nativeLock) {
+            if (session != null && w != null) {
+                try {
+                    w.WintunEndSession(session);
+                } catch (Throwable ignored) {
+                    // 会话可能已被驱动回收
+                }
+                session = null;
+            }
+            if (adapter != null && w != null) {
+                try {
+                    w.WintunCloseAdapter(adapter);
+                } catch (Throwable ignored) {
+                    // 同上
+                }
+                adapter = null;
+            }
         }
     }
 

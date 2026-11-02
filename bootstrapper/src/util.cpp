@@ -710,19 +710,25 @@ void Write(const std::wstring& msg) {
         GetLocalTime(&st);
 
         wchar_t line[2200];
-        _snwprintf_s(line, _countof(line), _TRUNCATE,
-                     L"[%04d-%02d-%02d %02d:%02d:%02d] %s\r\n",
+        // 时间前缀单独拼，正文只放进剩余空间：以前把整条消息（可能含服务端返回的
+        // 超长字符串）一直往格式串里塞，_TRUNCATE 会从中间截断，结果连日期都丢了
+        wchar_t stamp[64];
+        _snwprintf_s(stamp, _countof(stamp), _TRUNCATE,
+                     L"[%04d-%02d-%02d %02d:%02d:%02d] ",
                      st.wYear, st.wMonth, st.wDay,
-                     st.wHour, st.wMinute, st.wSecond,
-                     msg.c_str());
+                     st.wHour, st.wMinute, st.wSecond);
+        _snwprintf_s(line, _countof(line), _TRUNCATE, L"%s%s\r\n", stamp, msg.c_str());
 
         // UTF-16 -> UTF-8
         int u8len = WideCharToMultiByte(CP_UTF8, 0, line, -1,
                                         nullptr, 0, nullptr, nullptr);
         if (u8len > 1) {
-            std::string u8(static_cast<size_t>(u8len - 1), '\0');   // 去掉结尾 \0
+            // 缓冲要留出结尾 '\0' 的位置（u8len 是含终止符的长度）：
+            // 以前按 u8len-1 分配却按 u8len 写入，最后一个字节越界
+            std::string u8(static_cast<size_t>(u8len), '\0');
             WideCharToMultiByte(CP_UTF8, 0, line, -1,
                                 u8.data(), u8len, nullptr, nullptr);
+            u8.resize(static_cast<size_t>(u8len - 1));   // 去掉结尾 \0
 
             // 追加写入
             HANDLE h = CreateFileW(g_logPath.c_str(),
@@ -736,10 +742,9 @@ void Write(const std::wstring& msg) {
                 // 首次创建时写 UTF-8 BOM，方便记事本正确识别编码
                 if (GetFileSize(h, nullptr) == 0) {
                     const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
-                    DWORD written = 0;
-                    WriteFile(h, bom, 3, &written, nullptr);
+                    DWORD bw = 0;
+                    WriteFile(h, bom, sizeof(bom), &bw, nullptr);
                 }
-
                 DWORD written = 0;
                 WriteFile(h, u8.data(), static_cast<DWORD>(u8.size()),
                           &written, nullptr);

@@ -187,6 +187,18 @@ public class VersionManifest {
      */
     public synchronized void recordDownloaded(String version, String fileName,
                                               java.util.Map<String, String> trustedHashes) {
+        recordDownloaded(version, fileName, trustedHashes, null);
+    }
+
+    /**
+     * 记录刚下载的版本，并可指定「current」（待验证的新版本不覆盖当前版本）。
+     *
+     * UpdateDialog 以前自己 load 一份实例再 save，pendingTrusted 永远为空，
+     * 导致下载的新版本从不写入信任表。统一走这里。
+     */
+    public synchronized void recordDownloaded(String version, String fileName,
+                                              java.util.Map<String, String> trustedHashes,
+                                              String keepCurrent) {
         Entry e = findOrCreate(version, fileName);
         if (e != null) {
             e.usable = false;       // 待验证：真正跑起来后由 LauncherApp 标为可用
@@ -198,6 +210,9 @@ public class VersionManifest {
                     pendingTrusted.put(en.getKey(), en.getValue().toLowerCase());
                 }
             }
+        }
+        if (keepCurrent != null && !keepCurrent.isBlank()) {
+            this.current = keepCurrent;
         }
         logger.info("记录已下载版本: {} ({})", version, fileName);
     }
@@ -217,7 +232,6 @@ public class VersionManifest {
         }
     }
 
-    /** 把暂存的信任条目合并进 trusted-hashes.json（原子写） */
     private void flushTrusted() {
         if (pendingTrusted.isEmpty()) {
             return;
