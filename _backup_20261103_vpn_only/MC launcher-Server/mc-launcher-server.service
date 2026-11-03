@@ -1,0 +1,71 @@
+# MC Launcher Server - Systemd 服务配置
+# 适用于 Ubuntu 18.04+ / Debian 10+ / CentOS 7+
+
+# ==================== 安装步骤 ====================
+# 1. 复制此文件到系统目录:
+#    sudo cp mc-launcher-server.service /etc/systemd/system/
+#
+# 2. 修改配置中的用户和路径 (见下方 [Service] 部分)
+#
+# 3. 重载 systemd:
+#    sudo systemctl daemon-reload
+#
+# 4. 启用开机自启:
+#    sudo systemctl enable mc-launcher-server
+#
+# 5. 启动服务:
+#    sudo systemctl start mc-launcher-server
+#
+# 6. 查看状态:
+#    sudo systemctl status mc-launcher-server
+#
+# 7. 查看日志:
+#    sudo journalctl -u mc-launcher-server -f
+# ==================================================
+
+[Unit]
+Description=MC Launcher Update Server
+Documentation=https://github.com/your-repo/mc-launcher-server
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 修改为实际运行用户 (不要用 root)
+User=www
+Group=www
+# 修改为实际项目路径（**路径含空格时必须加引号**）
+WorkingDirectory="/www/wwwroot/MC launcher-Server"
+# 管理令牌等敏感配置放这里（deploy.sh --setup 会自动生成）
+EnvironmentFile=-/www/wwwroot/MC launcher-Server/.env
+# Node.js：用 env 查找，避免不同发行版路径不同（/usr/bin/node 并不总是存在）
+ExecStart=/usr/bin/env node server.js
+# 重启策略
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# 环境变量
+Environment=NODE_ENV=production
+Environment=PORT=5003
+
+# 资源限制
+LimitNOFILE=65535
+LimitNPROC=4096
+
+# 安全配置
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths="/www/wwwroot/MC launcher-Server"
+ReadWritePaths="/www/wwwroot/MC launcher-Server/logs"
+
+# 日志输出到 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mc-launcher-server
+
+[Install]
+WantedBy=multi-user.target

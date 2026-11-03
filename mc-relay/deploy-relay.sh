@@ -15,7 +15,8 @@ if [ -z "$SERVER" ]; then
 fi
 REMOTE_DIR="/opt/mc-relay"
 HTTP_PORT="${HTTP_PORT:-8080}"
-RANGE="${RANGE:-40000-40999}"
+# VPN 帧端口 = HTTP_PORT + 1（房主/玩家的长连接都连这里）
+VPN_PORT="${VPN_PORT:-$((HTTP_PORT + 1))}"
 
 echo "=== 部署到 $SERVER ==="
 
@@ -55,7 +56,7 @@ User=$USER
 WorkingDirectory=$REMOTE_DIR
 EnvironmentFile=$REMOTE_DIR/.env
 Environment=HTTP_PORT=$HTTP_PORT
-Environment=RANGE=$RANGE
+Environment=VPN_PORT=$VPN_PORT
 Environment=HOST=0.0.0.0
 ExecStart=/usr/bin/env node $REMOTE_DIR/relay-server.js
 Restart=always
@@ -77,12 +78,12 @@ ssh "admin@$SERVER" "sudo systemctl daemon-reload && sudo systemctl enable --now
 echo "[4/5] 防火墙"
 ssh "admin@$SERVER" "if command -v ufw >/dev/null && sudo ufw status 2>/dev/null | grep -q active; then
   sudo ufw allow $HTTP_PORT/tcp comment 'mc-relay api' >/dev/null
-  sudo ufw allow $RANGE/tcp comment 'mc-relay tunnels' >/dev/null
+  sudo ufw allow $VPN_PORT/tcp comment 'mc-relay vpn frames' >/dev/null
   echo '  ufw 已放行'
 else
   echo '  ufw 未启用 —— 需要去云控制台安全组放行:'
-  echo '    TCP $HTTP_PORT      （申请房间 API）'
-  echo '    TCP $RANGE （端口池，玩家连这里）'
+  echo '    TCP $HTTP_PORT      （申请房间 API + 房主控制通道）'
+  echo '    TCP $VPN_PORT      （VPN 帧端口，房主/玩家长连接）'
 fi"
 
 # 5. 自检

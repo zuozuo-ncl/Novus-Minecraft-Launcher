@@ -66,6 +66,10 @@ public final class VpnSession implements AutoCloseable {
 
     /** 房主：游戏进程侧接到的 VPN 连接 */
     private final LinkedBlockingQueue<Socket> gameSockets = new LinkedBlockingQueue<>();
+    /** 房主：u 层网关收到的「发往本机 MC」的数据块，由 pairLoop 写进上面的连接 */
+    private final LinkedBlockingQueue<byte[]> gatewayQueue = new LinkedBlockingQueue<>();
+    /** 虚拟地址 10.77.0.1 在房主隧道里的登记名：代表「本机 MC」这一端 */
+    private static final String GATEWAY_UUID = "ncl-local-gateway";
     /** 房主：等待接入的玩家 */
     private final LinkedBlockingQueue<VpnTunnel.Peer> playerQueue = new LinkedBlockingQueue<>();
 
@@ -213,6 +217,9 @@ public final class VpnSession implements AutoCloseable {
         controlThread.setDaemon(true);
         controlThread.start();
 
+        // 2.5) 隧道把「发往 10.77.0.1」的包交给网关队列（写进本机 MC）
+        tunnel.setGatewaySink(this::enqueueGatewayPacket);
+
         // 3) 配对线程
         Thread pair = new Thread(this::pairLoop, "vpn-host-pair");
         pair.setDaemon(true);
@@ -233,6 +240,12 @@ public final class VpnSession implements AutoCloseable {
         }
     }
 
+    /**
+     * 房主自己的 MC 客户端连进局域网端口。
+     *
+     * 真实生成的邀请码只在这里产生。**不要**拿这条连接去连别人：
+     * 它是要加入某个已有房间的房主 MC 客户端，服务它的是该房间的 peer 列表。
+     */
     private void onEntrant(Socket local) {
         try {
             VpnTunnel.Peer peer = requestNewPeer();
@@ -240,13 +253,12 @@ public final class VpnSession implements AutoCloseable {
                 local.close();
                 return;
             }
-            inviter.accept(peer);
+            if (inviter != null) {
+                inviter.accept(peer);
+            }
             playerQueue.offer(peer);
-            // 房主自己的 MC 客户端 → 经虚拟网卡连到该玩家的 10.77.0.N:P+1
-            Socket out = new Socket();
-            out.connect(new InetSocketAddress(peer.ip, gameForwardPort), 5000);
-            out.setTcpNoDelay(true);
-            newPumpThreads(local, out);
+            logger.info("房主侧有玩家客户端接入（来自 {}），已生成邀请 code={}，虚拟地址 {}",
+                    local.getRemoteSocketAddress(), peer.code, peer.ip);
         } catch (Exception e) {
             logger.debug("玩家接入失败: {}", e.getMessage());
             try { local.close(); } catch (IOException ignored) { }
@@ -380,32 +392,71 @@ public final class VpnSession implements AutoCloseable {
             }
             return;
         }
+        VpnTunnel.Peer peer = playerQueue.poll();
+        if (peer == null) {
+            logger.warn("收到本机游戏进程的 VPN 接入，但没有等待中的玩家");
+            closeQuietly(sock);
+            return;
+        }
+        // 这位玩家发往本机虚拟地址的包，由我们的后台线程取走并写到本机 MC
+        try {
+            tunnel.registerPeer(GATEWAY_UUID, VpnNetworkConfig.HOST_IP);
+        } catch (RuntimeException ignored) {
+            // registerPeer 失败不影响主流程
+        }
         gameSockets.offer(sock);
+        logger.info("VPN 玩家 {} 已接到本机 MC", peer.ip);
+    }
+
+    /** 网关收到的 IP 包 → 只取 TCP 负载，交给 pairLoop 写进本机 MC 的连接 */
+    private void enqueueGatewayPacket(byte[] ip) {
+        try {
+            int ihl = (ip[0] & 0x0f) * 4;
+            int tot = ((ip[2] & 0xff) << 8) | (ip[3] & 0xff);
+            int end = Math.min(tot, ip.length);
+            if (ihl + 20 > end) {
+                return;
+            }
+            int flags = ip[ihl + 13] & 0xff;
+            if ((flags & 0x01) != 0) {
+                // FIN：本机 MC 那边也该结束了
+                Socket g = gameSockets.peek();
+                if (g != null) {
+                    try { g.shutdownOutput(); } catch (IOException ignored) { }
+                }
+                return;
+            }
+            if (end > ihl + 20) {
+                gatewayQueue.offer(java.util.Arrays.copyOfRange(ip, ihl + 20, end));
+            }
+        } catch (RuntimeException ignored) {
+            // 畸形包直接丢弃
+        }
     }
 
     private void pairLoop() {
+        if (tunnel == null) {
+            return;
+        }
         while (!closed) {
+            Socket game;
+            byte[] data;
             try {
-                Socket game = gameSockets.poll(500, TimeUnit.MILLISECONDS);
-                if (game == null) {
+                data = gatewayQueue.poll(200, TimeUnit.MILLISECONDS);
+                game = gameSockets.peek();
+                if (data == null || game == null) {
                     continue;
                 }
-                VpnTunnel.Peer peer = playerQueue.poll(8, TimeUnit.SECONDS);
-                if (peer == null) {
-                    logger.warn("收到 VPN 转发连接，但没有等待中的玩家，已断开");
-                    closeQuietly(game);
-                    continue;
-                }
-                Socket out = new Socket();
-                out.connect(new InetSocketAddress(peer.ip, gameForwardPort), 3000);
-                out.setTcpNoDelay(true);
-                logger.info("VPN 玩家 {} 的转发连接已配对", peer.ip);
-                newPumpThreads(out, game);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
+            }
+            try {
+                game.getOutputStream().write(data);
+                game.getOutputStream().flush();
             } catch (IOException e) {
-                logger.debug("游戏进程连接配对失败: {}", e.getMessage());
+                try { gameSockets.remove(game); } catch (RuntimeException ignored) { }
+                closeQuietly(game);
             }
         }
     }

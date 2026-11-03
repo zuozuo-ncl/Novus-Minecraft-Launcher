@@ -158,12 +158,13 @@ node server.js          # 默认 5005
 
 ---
 
-## mc-relay —— 联机中继
+## mc-relay —— 联机中继（VPN 专用）
 
-- 传统中继房主/玩家模型：房主申请房间 → 朋友连公网端口 → 双向转发
-- 新增 **虚拟局域网模式**（`vpn-room.js` + `vpn-tunnel.js`）：房主与玩家各一条长连接，服务器只做帧交换。每个连接有空闲 60 秒超时
+- **不再支持端口转发**：旧版「房主申请房间 → 朋友连公网端口」模型对 MC 联机实际不可用，已移除。
+- **只保留虚拟局域网模式**（`vpn-room.js` + `vpn-tunnel.js`）：房主与玩家各一条长连接，服务器只做帧交换。
+- **两个端口**：`HTTP_PORT`（8080，API + 房主控制通道信令）以及 `VPN_PORT`（HTTP_PORT + 1，房主/玩家 VPN 帧）。每个 VPN 连接有空闲 60 秒超时。
 
-主要环境变量：`HTTP_PORT`（8080）、`RANGE`（40000-40999）、`API_KEY`、`MAX_PLAYERS`（20）、`MAX_ROOMS`（100）、`VPN_IDLE_TIMEOUT_MS`（60000）。
+主要环境变量：`HTTP_PORT`（8080）、`VPN_PORT`（8081）、`API_KEY`、`MAX_ROOMS`（100）、`VPN_IDLE_TIMEOUT_MS`（60000）。
 
 ---
 

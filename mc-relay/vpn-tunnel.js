@@ -13,7 +13,7 @@
  *   {"type":"vpn-token","id":N}，服务器回 {"type":"vpn-token","id":N,"token","uuid","ip"}，
  *   房主再把这个 token/uuid 转给对应玩家。vpn-join 必须带 token，且一票一用。
  *
- * 房间用现有 createRoom 分配（复用端口池、速率限制、控制通道心跳），
+ * 房间由 /api/host 创建；VPN 帧走 HTTP_PORT + 1，与 HTTP 分开端口。
  * 区别是 **不再监听端口**，所有流量都通过上面这两条 TCP 长连接。
  *
  * 转发规则

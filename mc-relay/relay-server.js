@@ -1,42 +1,12 @@
 #!/usr/bin/env node
 /**
- * MC 联机中转服务器
- * ===================
+ * MC 联机中继（VPN 专用）
  *
- * 解决「没有公网 IP 的玩家想开 Minecraft 服务器」的问题。
+ * 房主和玩家各建一条 TCP 长连接到本服务器，按「虚拟 IP」交换 IP 包。
+ * **不再监听玩家端口**，不再提供端口转发 / 二进制申请。
  *
- * 原理
- * ----
- * NAT 只拦入站、不拦出站。所以让房主**主动连出**到本服务器，
- * 本服务器把朋友们的入站连接转发给房主：
- *
- *     房主启动器 ──① 申请房间(HTTP)──► 本服务器
- *                ◄─ 返回端口 40001 ──
- *     房主启动器 ──② 建立控制通道(TCP:40001)──► 本服务器
- *     朋友       ──③ 连接 39.106.60.15:40001 ──► 本服务器 ──► 房主 → MC:25565
- *
- * 连接区分
- * --------
- * 同一个端口既有玩家也有房主自己的通道，靠**固定魔数**区分：
- *
- *     房主的每条连接都以 "MCRELAY\n" 开头，新浪客户端不可能发这个。
- *
- * 握手格式（魔数之后是一行 JSON，以 \n 结尾）：
- *
- *     控制通道：MCRELAY\n{"type":"hello","room":"a1b2c3","token":"..."}\n
- *     数据通道：MCRELAY\n{"type":"data","room":"a1b2c3","id":7}\n
- *
- * 控制通道之后是"信令"（每行一条 JSON），数据通道之后是纯字节流。
- *
- * 可靠性设计（都是踩过的坑，别删）
- * --------------------------------
- * - 玩家连接在数据通道建立前**暂停读取**（pause），也就是不让 Node 从内核
- *   缓冲区读走 —— 否则那段时间到达的数据会因为"没有 data 监听器"被丢弃。
- *   MC 客户端连上后会连发 handshake + login start，跨多个 TCP 段。
- * - 静默连接超时：连上却不发任何数据（端口扫描/半开扫描）的连接会被回收。
- * - pending 超时：房主迟迟不建数据通道时，玩家连接不会无限挂着。
- * - 控制通道重连时，只有"当前生效的那条"断开才回收房间。
- * - 正常关闭用 end() 走半关闭，保留对端待发送的数据。
+ *   房主启动器 ──①申请房间(HTTP /api/host)──► 中继 ◄──② VPN 长连接(vpn-host)
+ *   玩家启动器 ──③凭口令领 token(vpn-claim)──► 中继 ◄──④ VPN 长连接(vpn-join)
  */
 'use strict';
 
@@ -53,25 +23,16 @@ const {
 // ============ 配置 ============
 const HTTP_PORT = Number(process.env.HTTP_PORT || 8080);
 const HOST = process.env.HOST || '0.0.0.0';
-const [PORT_MIN, PORT_MAX] = (process.env.RANGE || '40000-40999').split('-').map(Number);
 const API_KEY = process.env.API_KEY || ''; // 可选：API 密钥，用于保护写接口
 
 /** 房主握手魔数 */
 const MAGIC = 'MCRELAY';
 
-/** 房间里最多同时在线玩家（防止单房间撑爆中转） */
-const MAX_PLAYERS_PER_ROOM = Number(process.env.MAX_PLAYERS || 20);
 /** 同时允许存在的房间数 */
 const MAX_ROOMS = Number(process.env.MAX_ROOMS || 100);
 
 /** 建房间后多久内必须建立控制通道 */
 const HANDSHAKE_TIMEOUT_MS = 30_000;
-/** 连接建立后多久内必须发出第一块数据（防端口扫描堆积） */
-const SILENT_TIMEOUT_MS = 10_000;
-/** 玩家连上后多久内必须建立数据通道 */
-const PENDING_TIMEOUT_MS = 30_000;
-/** 房主打招呼（ACK）允许的时间：收到玩家后如果房主一直没回应，也要给玩家一个交代 */
-const CONFIRM_HINT_MS = 8_000;
 /** 心跳间隔与容忍倍数 */
 // 5 秒：房主每 5 秒 ping 一次，超过 15 秒没收到才判定断开。
 // 这个间隔同时也是「与 NAT 保持活跃」的节奏，太大会被部分路由器提前回收表项。
@@ -80,14 +41,6 @@ const HEARTBEAT_MISS = 3;
 /** 建房间的速率限制：每个 IP 每分钟最多几次 */
 const HOST_RATE_LIMIT = 10;
 const HOST_RATE_WINDOW_MS = 60_000;
-/** 单个 IP 每分钟允许的玩家接入次数（超过后直接断开，不通知房主） */
-const JOIN_RATE_LIMIT = Number(process.env.JOIN_RATE_LIMIT || 6);
-const JOIN_RATE_WINDOW_MS = 60_000;
-/** 手动封禁的玩家 IP，逗号分隔（环境变量 BLOCK_IPS） */
-const BLOCK_IPS = new Set(
-  (process.env.BLOCK_IPS || '')
-    .split(',').map((s) => s.trim()).filter(Boolean)
-);
 
 /**
  * CORS 允许的来源。
@@ -107,39 +60,16 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ============ 房间状态 ============
 
-/** 玩家容量只统计「房主已确认接入」的玩家（pending 里未确认的不占名额） */
-function countConfirmed(room) {
-  let n = 0;
-  for (const e of room.pending.values()) {
-    if (e.confirmed) n++;
-  }
-  return n;
-}
-
 /**
  * room = {
- *   roomId, token, port,
- *   name, maxPlayers,
- *   control:      Socket|null  当前生效的控制通道
- *   pending:      Map<id, {sock, timer}>  等待数据通道的玩家
- *   dataSockets:  Map<id, Socket>         已建立的数据通道
- *   server:       net.Server   监听玩家端口
- *   nextId:       number
+ *   roomId, token, name,
+ *   control: Socket|null   房主控制通道（心跳 + 签发邀请）
+ *   vpn:     VpnRoom|null  VPN 房间（房主/玩家长连接，见 vpn-room.js）
  *   createdAt, lastSeen
  * }
  */
 const rooms = new Map();
-const portOwner = new Map();
 const hostRate = new Map();     // ip -> { count, windowStart }
-/**
- * 正在释放、暂不能重新分配的端口。
- *
- * server.close() 是异步的：停止 accept 后还要等现存连接全部关闭才触发
- * 'close' 事件、真正释放端口。allocPort 必须跳过这些端口，否则会把
- * 还没释放的端口分给新房间，listen 报 EADDRINUSE 并连带把新房间关掉。
- */
-const releasingPorts = new Set();
-const joinRate = new Map();     // 玩家接入：ip -> { count, resetAt }
 
 // ============ 工具 ============
 
@@ -164,32 +94,6 @@ function json(req, res, code, obj) {
 /** 控制通道排队上限：房主不读时不无限占内存 */
 const MAX_CONTROL_BUFFER = 256 * 1024;
 
-/**
- * 给玩家发一个 Minecraft「登录断开」包（state=login 下 0x00）。
- *
- * 此时玩家已经发过握手与 login start，处于 login 状态。发完之后客户端会
- * 把这段文本显示出来，比直接断线更容易看懂。
- *
- * 注意：玩家 socket 在等待期间是 pause 的，这里只写不读，不影响 unshift 的数据。
- */
-function sendLoginDisconnect(sock, reason) {
-  if (!sock || sock.destroyed || !sock.writable) return;
-  try {
-    const text = Buffer.from(JSON.stringify({ text: '§c' + reason }) + '\n', 'utf8');
-    // 包 = varint(长度) + 0x00(Login Disconnect) + varint(文本长度) + 文本
-    const body = Buffer.concat([Buffer.from([0x00]), varIntBuf(text.length), text]);
-    sock.write(Buffer.concat([varIntBuf(body.length), body]));
-  } catch { /* 玩家可能已经断开 */ }
-}
-
-function varIntBuf(v) {
-  const out = [];
-  while (v >= 0x80) { out.push((v & 0x7f) | 0x80); v >>>= 7; }
-  out.push(v);
-  return Buffer.from(out);
-}
-
-/** 只往还活着的 socket 写 */
 function safeWrite(sock, data) {
   if (sock && !sock.destroyed && sock.writable) {
     try {
@@ -209,399 +113,55 @@ function safeWrite(sock, data) {
   return false;
 }
 
-/**
- * 优雅关闭一个 socket
- *
- * 先 end() 让对端收到 FIN，把排队的写缓冲发完；
- * 2 秒内没关掉再强拆（防止对端不响应导致连接泄漏）。
- */
-function closeGracefully(sock) {
-  if (!sock || sock.destroyed) return;
-  try {
-    sock.end();
-  } catch { /* 忽略 */ }
-  const t = setTimeout(() => {
-    try { sock.destroy(); } catch { /* 忽略 */ }
-  }, 2000);
-  t.unref();
-  sock.once('close', () => clearTimeout(t));
-}
-
 // ============ 房间生命周期 ============
 
-function allocPort() {
-  // 使用集合差集更高效：先找出已用端口，再从范围中筛选。
-  // 正在释放（句柄尚未关闭）的端口也不能分配，否则 listen 会 EADDRINUSE。
-  const usedPorts = new Set([...portOwner.keys(), ...releasingPorts]);
-  for (let p = PORT_MIN; p <= PORT_MAX; p++) {
-    if (!usedPorts.has(p)) return p;
-  }
-  return null;
-}
-
 /**
- * 创建房间并开始监听玩家端口
- *
- * HTTP 与二进制两种申请方式共用。
+ * 创建房间（VPN 模式：不分配端口、不监听玩家端口）
  */
-function createRoom(name, port) {
+function createRoom(name) {
   const roomId = crypto.randomBytes(3).toString('hex');
   const token = crypto.randomBytes(16).toString('hex');
   const room = {
     roomId,
     token,
-    port,
-    // 房间名会出现在 /api/rooms 里：去掉控制字符，限制成可打印文本
     name: String(name || '未命名房间').replace(/[\u0000-\u001f\u007f<>]/g, '').slice(0, 32)
           || '未命名房间',
-    // 与真实的容量判断（MAX_PLAYERS_PER_ROOM）保持一致；
-    // 以前写死 8，列表里显示 8 但实际能进 20
-    maxPlayers: MAX_PLAYERS_PER_ROOM,
     control: null,
-    pending: new Map(),
-    pendingJoins: [],
-    dataSockets: new Map(),
-    nextId: 1,
+    vpn: null,
     createdAt: Date.now(),
     lastSeen: Date.now(),
     missedPings: 0,
   };
-  room.server = listenRoom(room);
   rooms.set(roomId, room);
-  portOwner.set(port, roomId);
-  log(`分配房间 ${roomId} 端口 ${port}`);
+  log(`创建 VPN 房间 ${roomId}`);
   return room;
 }
 
+/** 回收房间：清超时定时器、断控制通道、关 VPN 连接 */
 function closeRoom(roomId, reason) {
   const room = rooms.get(roomId);
   if (!room) return;
   log(`回收房间 ${roomId} (${reason})`);
   rooms.delete(roomId);
-  portOwner.delete(room.port);
-  // 握手超时定时器要一起清掉；以前它没挂在 room 上，房间提前关闭后还会残留到超时
   if (room.handshakeTimer) {
     clearTimeout(room.handshakeTimer);
     room.handshakeTimer = null;
   }
-
-  // 监听端口异步释放：先标记 releasing，等 server 'close' 事件后才放回端口池
-  releaseRoomServer(room);
-  // 控制通道：直接断（不需要优雅，通道没有用户数据）
   try { room.control && room.control.destroy(); } catch { /* 忽略 */ }
-
-  for (const [, p] of room.pending) {
-    clearTimeout(p.timer);
-    closeGracefully(p.sock);
-  }
-  room.pending.clear();
-
-  for (const [, s] of room.dataSockets) {
-    closeGracefully(s);
-  }
-  room.dataSockets.clear();
-
-  // VPN 连接也一并关闭
   if (room.vpn) {
     room.vpn.close('房间回收', null);
     room.vpn = null;
   }
 }
 
-/**
- * 关闭房间监听端口，等句柄真正释放后再把端口放回池。
- *
- * 之前 closeRoom 直接 server.close() 就删掉端口映射，allocPort 可能在
- * 句柄关闭前把同一端口分给新房间 → EADDRINUSE → listen-error 连新房间
- * 一起被关掉。现在：
- *   1. 端口加入 releasingPorts，allocPort 跳过；
- *   2. closeAllConnections() 主动断开现存连接（否则半开连接会让 close 一直等）；
- *   3. 'close' 事件到达后解除标记；30 秒兜底防止事件丢失导致端口永久占用。
- */
-function releaseRoomServer(room) {
-  const server = room.server;
-  if (!server) return;
-  releasingPorts.add(room.port);
-  const markReleased = () => releasingPorts.delete(room.port);
-  try {
-    if (typeof server.closeAllConnections === 'function') {
-      server.closeAllConnections();
-    }
-    if (typeof server.closeIdleConnections === 'function') {
-      // 半关闭（对端 FIN 已到、本方还没 end）的连接不会被 closeAllConnections 处理
-      server.closeIdleConnections();
-    }
-    server.close(markReleased);
-  } catch {
-    markReleased();
-    return;
-  }
-  // 最多 2 秒就把端口放回池子。以前兜底 30 秒：攻击者「建房间 + 不走握手」，
-  // 每次都能让一个端口 30~60 秒不可用，几个 IP 就能把端口池耗光。
-  setTimeout(markReleased, 2_000).unref();
-}
-
-/** IPv4-mapped IPv6 地址归一化（::ffff:1.2.3.4 → 1.2.3.4） */
-function normalizeIp(ip) {
-  if (!ip) return '';
-  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-}
+// ============ 控制通道 ============
 
 /**
- * 玩家接入的 IP 级限流 / 黑名单。
+ * 房主的控制通道（魔数 + hello）。
  *
- * 公网扫描器会反复连房间端口并发送握手，每个连接都弹房主确认框，
- * 正常玩家根本没法用。超过阈值的连接直接断开、不通知房主；
- * BLOCK_IPS 中的地址一律拒绝。
- *
- * @returns true 放行；false 直接断开
+ * 只承载信令：心跳 ping/pong，以及「为某位玩家签发 VPN 邀请」的 vpn-token 请求。
+ * 玩家实际的数据走 vpn-host / vpn-join 两条长连接（见 vpn-room.js）。
  */
-function playerJoinAllowed(ip) {
-  const addr = normalizeIp(ip);
-  if (!addr) return true;
-  if (BLOCK_IPS.has(addr)) return false;
-  const now = Date.now();
-  const rec = joinRate.get(addr);
-  if (!rec || now >= rec.resetAt) {
-    joinRate.set(addr, { count: 1, resetAt: now + JOIN_RATE_WINDOW_MS });
-    return true;
-  }
-  rec.count += 1;
-  return rec.count <= JOIN_RATE_LIMIT;
-}
-
-// ============ 玩家端口 ============
-
-/**
- * 为一个房间开监听端口
- *
- * 进来的连接有两种：
- *   1. 玩家（MC 客户端）—— 通知房主建立数据通道
- *   2. 房主自己建的控制/数据通道 —— 以魔数开头
- *
- * 判别方式：**暂停读取**，看第一块数据是否以魔数开头。
- * 暂停期间数据留在内核缓冲区，不会丢；判定后再决定交给谁。
- */
-function listenRoom(room) {
-  const server = net.createServer((sock) => {
-    sock.setNoDelay(true);
-
-    // 连上却不发数据（端口扫描）→ 直接回收
-    // 注意：silentTimer 在派发后（无论玩家还是隧道）都会 clear；
-    // 隧道方向若只收到半截魔数，改由 onTunnelConnection 的握手超时兜底。
-    // socket 处于 pause 时，对端发来的一两个字节不会触发 'data'，但会出现在
-    // readableLength 里。以前这种情况一直撑到 10 秒超时才断 —— 扫描器靠
-    // 「每个连接只发 1 字节」就能低成本占满句柄、并把路由表里的房间数吃满。
-    // 真玩家/真房主一定会在 10 秒内发出 >=4 字节（MAGIC 或 MC 握手），否则照样断开。
-    let earlyBytes = false;
-    const silentTimer = setTimeout(() => {
-      const earlyBytes = sock.readableLength > 1;
-      if (!earlyBytes) {
-        log(`房间 ${room.roomId} 静默连接超时 from ${sock.remoteAddress}`);
-        sock.destroy();
-      }
-    }, SILENT_TIMEOUT_MS);
-
-    // 先暂停：数据留在内核缓冲区，下面判定完再 resume
-
-    // 关键：上面已经 pause 过 socket，这里**不能**再 resume()。
-    // 以前紧接着 resume()，结果魔数连接在「removeListener → 重新挂监听」之间
-    // 数据就已经被读走（data 事件没人监听 → 静默丢失），房主的隧道握手永远等不到：
-    // 表现为「房主已连接」之后立刻断开。其余分支（VPN/HTTP）在交接前
-    // 本来就保证暂停，也都不受影响；玩家分支自己会 unshift + pause。
-    sock.pause();
-
-    const onFirst = (chunk) => {
-      clearTimeout(silentTimer);
-      sock.removeListener('data', onFirst);
-
-      // 魔数匹配（处理半包：可能是 "MCR" 这种前缀）
-      const cmpLen = Math.min(chunk.length, MAGIC.length);
-      const isMagA = chunk.slice(0, cmpLen).toString('latin1') === MAGIC.slice(0, cmpLen);
-      if (cmpLen < MAGIC.length && isMagA) {
-        // 只收到魔数的一部分：等剩余部分。
-        // 用 once 继续，但必须重新挂上一种兜底超时 —— 否则对端发个 "MCR"
-        // 就消失，这个连接会永久占着句柄。
-        const partialTimer = setTimeout(() => {
-          log(`房间 ${room.roomId} 半包握手超时 ${sock.remoteAddress}`);
-          sock.destroy();
-        }, SILENT_TIMEOUT_MS);
-        partialTimer.unref();
-        sock.once('data', (more) => {
-          clearTimeout(partialTimer);
-          onFirst(Buffer.concat([chunk, more]));
-        });
-        sock.once('close', () => clearTimeout(partialTimer));
-        return;
-      }
-      if (isMagA) {
-        // 房主的隧道连接：把已经读到的数据直接交给握手逻辑，
-        // 不要再 unshift（那会触发一次多余的 data 事件，和后续监听打架）
-        onTunnelConnection(sock, chunk);
-        return;
-      }
-
-      // ---- 玩家连接 ----
-      // IP 限流 / 黑名单先拦：扫描器反复握手时不再给房主弹确认框
-      if (!playerJoinAllowed(sock.remoteAddress)) {
-        log(`房间 ${room.roomId} 拒绝高频/黑名单连接 from ${sock.remoteAddress}`);
-        sock.destroy();
-        return;
-      }
-      if (room.dataSockets.size + countConfirmed(room) >= MAX_PLAYERS_PER_ROOM) {
-        log(`房间 ${room.roomId} 已满，拒绝新玩家`);
-        sock.destroy();
-        return;
-      }
-
-      const id = room.nextId++;
-      // confirmed=false：房主还没确认接入。未确认的玩家不占容量 ——
-      // 以前连一下不发任何东西的连接也算人数，几个 IP 就能把房间「占满」。
-      const entry = { sock, timer: null, confirmed: false };
-      // 房主迟迟不建数据通道：超时回收，玩家不会无限挂着
-      entry.timer = setTimeout(() => {
-        if (room.pending.get(id) === entry) {
-          log(`房间 ${room.roomId} 玩家 #${id} 等待房主确认超时（${PENDING_TIMEOUT_MS / 1000} 秒）`);
-          room.pending.delete(id);
-          // 先尝试把原因送到玩家手里（MC 登录断开包），再关连接
-          sendLoginDisconnect(sock, '房主没有在 30 秒内确认，请重新加入');
-          setTimeout(() => closeGracefully(sock), 300);
-        }
-      }, PENDING_TIMEOUT_MS);
-      entry.timer.unref();
-
-      // 这一块已经被 onFirst 读出来了。放回去再 pause，数据才真正留在缓冲区里，
-      // 等 attachData 挂好 pipe 后 resume 就能被正常读出。
-      sock.unshift(chunk);
-      sock.pause();
-      room.pending.set(id, entry);
-      log(`房间 ${room.roomId} 新玩家接入 id=${id} from ${sock.remoteAddress}`);
-
-      // 玩家已经连上、还没收到房主的数据通道时，先发一句「正在等待房主确认」。
-      // 以前这里什么都没发（注释说有，实际没有），玩家只能干等 30 秒超时。
-      // 这是给玩家 MC 客户端的「登录断开」提示包：显示完后客户端会断开。
-      // 房主的数据通道建立后，客户端需要重新连接（中继不再自动接管已断开的连接）。
-      sendLoginDisconnect(sock, '正在等待房主确认，请稍候…');
-      if (room.control) {
-        entry.timer.refresh();
-      }
-
-      sock.on('error', () => {});
-      sock.on('close', () => {
-        clearTimeout(entry.timer);
-        if (room.pending.get(id) === entry) {
-          room.pending.delete(id);
-        }
-      });
-
-      // 通知房主（带上玩家地址，房主据此做接入确认 / 白名单）
-      playerJoin(room, id, sock.remoteAddress || '');
-    };
-
-    sock.on('data', onFirst);
-    sock.on('error', () => clearTimeout(silentTimer));
-    sock.resume();      // 必须 resume，否则收不到 data 事件
-  });
-
-  server.on('error', (e) => {
-    log(`房间 ${room.roomId} 监听失败: ${e.message}`);
-    closeRoom(room.roomId, 'listen-error');
-  });
-  server.listen(room.port, HOST, () => {
-    log(`房间 ${room.roomId} 监听 ${HOST}:${room.port}`);
-  });
-  return server;
-}
-
-// ============ 房主隧道 ============
-
-/**
- * 房主连过来的连接：解析魔数后的一行 JSON，决定是控制通道还是数据通道
- */
-function onTunnelConnection(sock, firstChunk) {
-  let buf = '';
-
-  // 握手阶段总超时：连上、发了半截魔数或半截 JSON 后再也不动的连接
-  // 以前会永久挂着（房间端口上任何不完整握手都算），耗尽文件句柄。
-  const handshakeTimer = setTimeout(() => {
-    log(`隧道握手超时 ${sock.remoteAddress}`);
-    sock.destroy();
-  }, HANDSHAKE_TIMEOUT_MS);
-  handshakeTimer.unref();
-
-  const onData = (chunk) => {
-    buf += chunk.toString('utf8');
-    const idx = buf.indexOf('\n');
-    if (idx < 0) {
-      if (buf.length > 8192) sock.destroy();
-      return;
-    }
-    clearTimeout(handshakeTimer);
-    sock.removeListener('data', onData);
-
-    const line = buf.slice(0, idx);
-    const rest = buf.slice(idx + 1);
-
-    // 去掉行首的魔数（同一行内，魔数后面紧跟 JSON）
-    const body = line.startsWith(MAGIC) ? line.slice(MAGIC.length) : line;
-
-    let msg;
-    try {
-      msg = JSON.parse(body);
-    } catch {
-      sock.destroy();
-      return;
-    }
-
-    // 魔数之后若还有数据（房主连发），放回去
-    if (rest.length) sock.unshift(Buffer.from(rest, 'utf8'));
-
-    if (msg.type === 'hello') {
-      attachControl(sock, msg);
-    } else if (msg.type === 'data') {
-      attachData(sock, msg);
-    } else if (msg.type === 'vpn-host' || msg.type === 'vpn-join' || msg.type === 'vpn-claim') {
-      // VPN 连接和普通房间共用同一个端口与魔数：
-      // 以前只认 hello/data，房主的 VPN 握手会走到「未知类型 → 断开」，
-      // 导致 VPN 联机根本连不上。这里与 frontServer 的 VPN 识别保持一致。
-      sock.removeAllListeners('data');
-      // 交给 VPN 时只传消息体：handleVpnConnection 自己解析 body 并查 rooms
-      handleVpnConnection(sock, body, rooms, log, Buffer.from(rest, 'utf8'));
-    } else {
-      sock.destroy();
-    }
-  };
-
-  sock.on('data', onData);
-  sock.on('error', () => clearTimeout(handshakeTimer));
-  if (firstChunk && firstChunk.length) {
-    onData(firstChunk);
-  }
-  sock.resume();
-}
-
-/**
- * 把「新玩家接入」告诉房主。
- *
- * 房间端口在控制通道建立前就已经在监听：真实 MC 客户端连上后会**立刻**发握手，
- * 经常比房主的控制通道还早到。早期实现此时只打一行「无控制通道，无法通知房主」
- * 就放弃，那条玩家连接便一直挂到 30 秒超时 —— 表现就是「点允许之前对端就失败」。
- *
- * 现在改为排队：控制通道一建立就补发全部待通知的玩家。
- *
- * @returns true 已发出 / 已排队
- */
-function playerJoin(room, id, from) {
-  const msg = JSON.stringify({ type: 'join', id, from }) + '\n';
-  if (room.control && safeWrite(room.control, msg)) {
-    return true;
-  }
-  if (!room.pendingJoins) room.pendingJoins = [];
-  room.pendingJoins.push({ id, from });
-  log(`房间 ${room.roomId} 玩家 #${id} 到达时控制通道未就绪，已排队（共 ${room.pendingJoins.length} 个）`);
-  return true;
-}
-
 function attachControl(sock, msg) {
   const room = rooms.get(msg.room);
   if (!room || room.token !== msg.token) {
@@ -614,7 +174,6 @@ function attachControl(sock, msg) {
   room.lastSeen = Date.now();
   room.missedPings = 0;
 
-  // 旧通道：先摘掉监听器再销毁，否则它的 close 事件会把整个房间带走
   if (old && old !== sock) {
     old.__isControl = false;
     old.removeAllListeners('close');
@@ -624,33 +183,29 @@ function attachControl(sock, msg) {
   sock.__isControl = true;
   sock.__room = room;
 
-  // 只有「当前生效的那条」断开才回收房间
   sock.on('close', () => {
     if (sock.__room && sock.__room.control === sock) {
       closeRoom(sock.__room.roomId, '控制通道断开');
     }
   });
 
-  // 心跳：房主定期发 ping，超时回收（避免死连接占着端口）
-  // 同一通道也承载 VPN 信令（vpn-token），按 JSON 逐条解析，不再用 includes 子串匹配
+  // 心跳：房主定期发 ping，超时回收。同一通道也承载 VPN 信令（vpn-token）
   let hb = '';
   sock.on('data', (chunk) => {
     room.lastSeen = Date.now();
     room.missedPings = 0;
     hb += chunk.toString('utf8');
-    // 按行处理，避免跨段导致判断出错
     let i;
     while ((i = hb.indexOf('\n')) >= 0) {
       const line = hb.slice(0, i);
       hb = hb.slice(i + 1);
       if (!line.trim()) continue;
       let m = null;
-      try { m = JSON.parse(line); } catch { /* 忽略非 JSON 行，例如 ping 之后的空白 */ }
+      try { m = JSON.parse(line); } catch { /* 忽略 */ }
       const type = m && typeof m.type === 'string' ? m.type : '';
       if (type === 'ping') {
         safeWrite(sock, JSON.stringify({ type: 'pong' }) + '\n');
       } else if (type === 'vpn-token') {
-        // 房主要求为某个即将接入的玩家签发 VPN join token
         const id = Number(m.id);
         if (Number.isInteger(id)) issueJoinToken(room, id, log);
       }
@@ -659,142 +214,57 @@ function attachControl(sock, msg) {
   });
 
   log(`房间 ${room.roomId} 控制通道就绪`);
-  safeWrite(sock, JSON.stringify({ type: 'hello-ok', port: room.port }) + '\n');
-
-  // 补发「控制通道建立前就到了」的玩家
-  if (room.pendingJoins && room.pendingJoins.length) {
-    const backlog = room.pendingJoins.splice(0);
-    log(`房间 ${room.roomId} 补发 ${backlog.length} 个待通知的玩家`);
-    for (const j of backlog) {
-      // 玩家可能已经超时断开：pending 里没有就跳过
-      if (!room.pending.has(j.id)) continue;
-      safeWrite(sock, JSON.stringify({ type: 'join', id: j.id, from: j.from }) + '\n');
-    }
-  }
+  safeWrite(sock, JSON.stringify({ type: 'hello-ok' }) + '\n');
 }
 
-function attachData(sock, msg) {
-  const room = rooms.get(msg.room);
-
-  // 必须校验 token：否则知道房间号的任何人就能抢走玩家的连接
-  if (!room || room.token !== msg.token) {
-    sock.destroy();
-    return;
+function maybeHandleControl(sock, headBuf) {
+  const nl = headBuf.indexOf(0x0a);
+  if (nl <= 0 || nl > 1024) return false;
+  const line = headBuf.slice(0, nl).toString('utf8').trim();
+  if (!line.startsWith(MAGIC)) return false;
+  const body = line.slice(MAGIC.length);
+  if (!body.includes('"hello"')) return false;
+  let msg;
+  try {
+    msg = JSON.parse(body);
+  } catch {
+    return false;
   }
-
-  const entry = room.pending.get(msg.id);
-  if (!entry) {
-    sock.destroy();
-    return;
-  }
-  entry.confirmed = true;
-  room.pending.delete(msg.id);
-  clearTimeout(entry.timer);
-  const client = entry.sock;
-
-  sock.setNoDelay(true);
-  room.dataSockets.set(msg.id, sock);
-
-  // 内核收发缓冲区：Node 没有公开的 setRecvBufferSize/setSendBufferSize
-  // （net.Socket 上不存在这两个方法，bufferSize 也只是只读属性）。
-  // 要调大必须在系统层做，例如在服务器 /etc/sysctl.conf 里：
-  //   net.core.rmem_max = 4194304
-  //   net.core.wmem_max = 4194304
-  //   net.ipv4.tcp_rmem = 4096 87380 4194304
-  //   net.ipv4.tcp_wmem = 4096 65536 4194304
-  // 应用层能做的只有下面这些：立即发送（关 Nagle）+ 保活。
-  sock.setNoDelay(true);
-  try { sock.setKeepAlive(true, 10_000); } catch { /* 平台不支持 */ }
-
-  // 手动转发，**不要用 .pipe()**。
-  //
-  // Node 的 pipe() 在源端收到 end 时会自动 end() 目标端：MC 登录握手时
-  // 客户端发完 Login Start 就停住等回包，只要这一侧出现一次 EOF（半关闭、
-  // 网络波动），pipe 就把房主的数据通道也 end 掉，接着 cleanup 双端 close，
-  // 玩家端表现为「登录中一闪就断开 / 会话无效」—— 这是联机秒断的根因。
-  //
-  // 改成监听 data + end：只 write 和 end()（半关闭），真正的回收交给
-  // close / error 事件。
-  //
-  // 必须处理背压：write() 返回 false 表示对端缓冲区已满，此时继续读只会让
-  // 本进程内存无限增长（大流量下卡顿、内存暴涨，甚至 OOM）。正确做法是
-  // 暂停读取源端，等目标端触发 'drain' 再恢复。
-  //
-  // 注意两个边界：
-  //   · 已经 pause 时不要重复 pause（否则 resume 次数对不上）；
-  //   · 目标端已经结束/销毁时，'drain' 永远不会来，恢复不了，直接放弃这条通道。
-  let clientPaused = false;
-  let sockPaused = false;
-
-  // 注意：**不能**用 `!stream.isPaused()` 当作「可以 resume」的判断。
-  // 被 pause 过的流 isPaused() 返回 true，加个取反就永远不会调用 resume ——
-  // 连接一旦触发背压就会永久卡住（实测：每次传输卡在 78% 左右，30 秒超时）。
-  // 只需要保证「pause 和 resume 成对」，用我们自己的标志位就够了。
-  const resumeClient = () => {
-    if (!clientPaused) return;
-    clientPaused = false;
-    if (!client.destroyed) {
-      try { client.resume(); } catch { /* 已关闭 */ }
-    }
-  };
-  const resumeSock = () => {
-    if (!sockPaused) return;
-    sockPaused = false;
-    if (!sock.destroyed) {
-      try { sock.resume(); } catch { /* 已关闭 */ }
-    }
-  };
-
-  client.on('data', (chunk) => {
-    if (sock.destroyed || !sock.writable) return;
-    const canWrite = sock.write(chunk);
-    if (!canWrite && !clientPaused && !client.destroyed) {
-      clientPaused = true;
-      client.pause();
-      sock.once('drain', resumeClient);
-    }
-  });
-  sock.on('data', (chunk) => {
-    if (client.destroyed || !client.writable) return;
-    const canWrite = client.write(chunk);
-    if (!canWrite && !sockPaused && !sock.destroyed) {
-      sockPaused = true;
-      sock.pause();
-      client.once('drain', resumeSock);
-    }
-  });
-  // 半关闭：一端说完了，只关闭对端的写方向，读方向继续
-  client.on('end', () => {
-    if (!sock.destroyed) sock.end();
-  });
-  sock.on('end', () => {
-    if (!client.destroyed) client.end();
-  });
-  // 对端关闭后 drain 不会再触发：把可能停住的另一侧恢复，让 close 事件正常走到
-  client.on('close', () => {
-    if (sockPaused && !sock.destroyed) resumeSock();
-  });
-  sock.on('close', () => {
-    if (clientPaused && !client.destroyed) resumeClient();
-  });
-  client.resume();
-
-  let closed = false;
-  const cleanup = () => {
-    if (closed) return;
-    closed = true;
-    room.dataSockets.delete(msg.id);
-    closeGracefully(client);
-    closeGracefully(sock);
-  };
-  client.on('close', cleanup);
-  sock.on('close', cleanup);
-  // 出错时才主动关两端；正常 half-close 走上面的 end 处理
-  client.on('error', cleanup);
-  sock.on('error', cleanup);
-
-  log(`房间 ${room.roomId} 数据通道建立 id=${msg.id}`);
+  if (!msg || msg.type !== 'hello') return false;
+  attachControl(sock, msg);
+  return true;
 }
+
+/** HTTP 端口上的 TCP 嗅探：hello 交控制通道，其余交给 HTTP 解析器 */
+const controlServer = net.createServer((sock) => {
+  sock.setNoDelay(true);
+  sock.pause();
+  const timer = setTimeout(() => { try { sock.destroy(); } catch { /* 忽略 */ } }, 10_000);
+  timer.unref();
+  let head = Buffer.alloc(0);
+  const onData = (chunk) => {
+    head = Buffer.concat([head, chunk]);
+    if (head.length < 4) return;
+    clearTimeout(timer);
+    sock.removeListener('data', onData);
+    if (maybeHandleControl(sock, head)) {
+      // 已交给控制通道
+    } else {
+      sock.setTimeout(30_000, () => { try { sock.destroy(); } catch { /* 忽略 */ } });
+      sock.unshift(head);
+      httpServer.emit('connection', sock);
+    }
+  };
+  sock.on('data', onData);
+  sock.on('error', () => clearTimeout(timer));
+  sock.on('close', () => clearTimeout(timer));
+  sock.resume();
+});
+
+controlServer.on('error', (e) => {
+  log('HTTP 监听失败: ' + e.message);
+  process.exit(1);
+});
 
 // ============ HTTP API ============
 
@@ -817,20 +287,16 @@ function handleHost(req, res, body) {
   if (rooms.size >= MAX_ROOMS) {
     return json(req, res, 503, { error: '房间数量已达上限，请稍后再试' });
   }
-  const port = allocPort();
-  if (port === null) {
-    return json(req, res, 503, { error: '端口池已满，请稍后再试' });
-  }
 
-  // 限时内必须建立控制通道。定时器挂在 room 上，closeRoom 时能主动清掉
-  const room = createRoom(String((body && body.name) || '未命名房间'), port);
+  // VPN 模式：不分配端口。房主随后用 vpn-host 长连接把房间激活。
+  const room = createRoom(String((body && body.name) || '未命名房间'));
   room.handshakeTimer = setTimeout(() => {
     const r = rooms.get(room.roomId);
     if (r && !r.control) closeRoom(room.roomId, '握手超时');
   }, HANDSHAKE_TIMEOUT_MS);
   room.handshakeTimer.unref();
 
-  json(req, res, 200, { room: room.roomId, token: room.token, port });
+  json(req, res, 200, { room: room.roomId, token: room.token });
 }
 
 function handleList(req, res) {
@@ -840,9 +306,8 @@ function handleList(req, res) {
     list.push({
       room: r.roomId,
       name: r.name,
-      port: r.port,
-      players: r.dataSockets.size,
-      maxPlayers: r.maxPlayers,
+      players: r.vpn ? r.vpn.peers.size : 0,
+      maxPlayers: MAX_VPN_PEERS,
       uptime: Math.floor((Date.now() - r.createdAt) / 1000),
     });
   }
@@ -900,9 +365,7 @@ const httpServer = http.createServer((req, res) => {
     return json(req, res, 200, {
       ok: true,
       rooms: rooms.size,
-      players: [...rooms.values()].reduce((n, r) => n + r.dataSockets.size
-                                                   + countConfirmed(r), 0),
-      ports: `${PORT_MIN}-${PORT_MAX}`,
+      players: [...rooms.values()].reduce((n, r) => n + (r.vpn ? r.vpn.peers.size : 0), 0),
       uptime: Math.floor(process.uptime()),
       rss: Math.round(process.memoryUsage().rss / 1048576),
     });
@@ -911,160 +374,29 @@ const httpServer = http.createServer((req, res) => {
   json(req, res, 404, { error: 'not found' });
 });
 
-// ============ 二进制申请协议（纯 TCP，供 WAF 后的隧道使用） ============
+// ============ VPN 帧端口 ============
 //
-// 有些部署环境前面挂了 WAF，会把带 HTTP 特征的流量整段拦掉。
-// 所以除了 HTTP API，这里再提供一个**纯二进制**的申请通道：
-//
-//   房主 → 中转：  "MCRQ" [房间名长度 uint16 BE] [房间名 UTF-8]
-//   中转 → 房主：  "MCRO" [room 8B ascii] [token 32B ascii] [port uint32 BE]
-//                 失败时： "MCRE" [错误信息长度 uint16 BE] [错误信息]
-//
-// 全程没有 HTTP 关键字，WAF 不会拦。
+// 房主/玩家的 VPN 长连接走 **HTTP_PORT + 1**（可用 VPN_PORT 覆盖）。
+// 与 HTTP 分开端口，HTTP 请求永远不会被误判成 VPN 握手。
 
-const BIN_MAGIC_REQ = 'MCRQ';
-const BIN_MAGIC_OK = 'MCRO';
-const BIN_MAGIC_ERR = 'MCRE';
-
-/** 二进制申请端口：默认 HTTP_PORT + 1 */
-const BIN_PORT = Number(process.env.BIN_PORT || (HTTP_PORT + 1));
+const VPN_PORT = Number(process.env.VPN_PORT || (HTTP_PORT + 1));
 
 /**
- * 处理一次二进制申请（数据可能分多次到达）
- *
- * @param sock       连接
- * @param prefetched 已经读到的字节（至少含 4 字节魔数）
- */
-function handleBinHandshake(sock, prefetched) {
-  let buf = prefetched;
-
-  const tryParse = () => {
-    if (buf.length < 6) return false;
-    const nameLen = buf.readUInt16BE(4);
-    if (buf.length < 6 + nameLen) return false;
-
-    // 房间名最长 32 字节（UTF-8 下约 10 个汉字）。以前不校验上限：
-    // 未确认的连接每个都能申请 64KB 缓冲，而且限流要等解析完才生效
-    const name = nameLen > 32
-      ? null
-      : (buf.slice(6, 6 + nameLen).toString('utf8') || '未命名房间');
-    const ip = sock.remoteAddress || 'unknown';
-
-    if (name === null) { replyErr(sock, '房间名过长'); return true; }
-    // 与 HTTP 接口一致：配置了 API_KEY 时，二进制申请也要带密钥
-    //   MCRQ [nameLen u16] [name] [keyLen u16] [key]
-    if (API_KEY_REQUIRED) {
-      const keyLenAt = 6 + nameLen;
-      if (buf.length < keyLenAt + 2) return false;
-      const keyLen = buf.readUInt16BE(keyLenAt);
-      if (buf.length < keyLenAt + 2 + keyLen) return false;
-      const key = buf.slice(keyLenAt + 2, keyLenAt + 2 + keyLen).toString('utf8');
-      const a = Buffer.from(key, 'utf8');
-      const bkey = Buffer.from(API_KEY, 'utf8');
-      if (a.length !== bkey.length || !crypto.timingSafeEqual(a, bkey)) {
-        replyErr(sock, '无效的 API 密钥');
-        return true;
-      }
-    }
-
-    if (rateLimited(ip)) { replyErr(sock, '请求过于频繁，请稍后再试'); return true; }
-    if (rooms.size >= MAX_ROOMS) { replyErr(sock, '房间数量已达上限'); return true; }
-    const port = allocPort();
-    if (port === null) { replyErr(sock, '端口池已满'); return true; }
-
-    const room = createRoom(name, port);
-    log(`[BIN] 分配房间 ${room.roomId} 端口 ${port} 来自 ${ip}`);
-
-    const out = Buffer.alloc(4 + 8 + 32 + 4);
-    out.write(BIN_MAGIC_OK, 0, 'latin1');
-    out.write(room.roomId.padEnd(8, ' '), 4, 'latin1');
-    out.write(room.token.padEnd(32, ' '), 12, 'latin1');
-    out.writeUInt32BE(port, 44);
-    safeWrite(sock, out);
-
-    setTimeout(() => { try { sock.destroy(); } catch { /* 忽略 */ } }, 500).unref();
-    return true;
-  };
-
-  // 二进制申请帧最多 6 + 32 字节。以前上限 1024：未确认的连接每个都能
-  // 攒到 1KB 才被断，少量 IP 就能占住大量缓冲。
-  const MAX_BIN_FRAME = 6 + 96 + 2 + 256;
-
-  if (tryParse()) return;
-
-  const onMore = (chunk) => {
-    buf = Buffer.concat([buf, chunk]);
-    if (tryParse()) {
-      sock.removeListener('data', onMore);
-    } else if (buf.length > MAX_BIN_FRAME) {
-      replyErr(sock, '请求格式不正确');
-      sock.removeListener('data', onMore);
-    }
-  };
-  sock.on('data', onMore);
-  // 未完成握手的连接最多留 10 秒（与 frontServer 的静默超时一致）
-  const t = setTimeout(() => { try { sock.destroy(); } catch { /* 忽略 */ } }, 10_000);
-  t.unref();
-  sock.once('close', () => clearTimeout(t));
-  sock.resume();
-}
-
-
-function replyErr(sock, msg) {
-  const b = Buffer.from(msg, 'utf8');
-  const out = Buffer.alloc(6 + b.length);
-  out.write(BIN_MAGIC_ERR, 0, 'latin1');
-  out.writeUInt16BE(b.length, 4);
-  b.copy(out, 6);
-  safeWrite(sock, out);
-  setTimeout(() => { try { sock.destroy(); } catch { /* 忽略 */ } }, 300).unref();
-}
-
-// ============ 单端口双协议 ============
-//
-// 同一个端口同时接受：
-//   - 二进制申请（以 "MCRQ" 开头）—— WAF 环境唯一可用的方式
-//   - HTTP API（其余流量）        —— 自建环境方便调试
-//
-// 做法：自己监听端口，先看首 4 字节，再决定交给谁。
-
-/** HTTP 连接空闲超时（防止慢速攻击长期占句柄） */
-const HTTP_IDLE_TIMEOUT_MS = 30_000;
-
-/**
- * VPN 连接识别：房主/玩家连到 HTTP 端口后，第一行是
- *   MCRELAY{"type":"vpn-host",...}  或  MCDATA{"type":"vpn-join",...}
- * 与房间协议共用 MAGIC 前缀，所以挂在同一个分发点上。
+ * VPN 连接识别：第一行必须是「魔数 + 合法 JSON」，
+ * 且 type 是 vpn-host / vpn-join / vpn-claim。
  */
 function maybeHandleVpn(sock, headBuf) {
-  // VPN 口令领取是短连接：先识别，否则会被当成普通魔数连接一直等到超时
-  {
-    const claimNl = headBuf.indexOf(0x0a);
-    if (claimNl > 0 && claimNl <= 1024) {
-      const t = headBuf.slice(0, claimNl).toString('utf8').trim();
-      if (t.startsWith('MCRELAY') && t.includes('"vpn-claim"')) {
-        handleVpnConnection(sock, t.slice(t.indexOf('{')), rooms, log, Buffer.alloc(0));
-        return true;
-      }
-    }
-  }
-  // 握手是第一行 JSON，**必须按字节找换行**：用字符串转换会破坏后面的二进制帧
-  const nl = headBuf.indexOf(0x0a);
-  if (nl < 0) return false;
-  if (nl > 1024) return false;                 // 合法握手行远小于 1KB
-  const line = headBuf.slice(0, nl).toString('utf8');
-  // 以前用 includes 子串匹配：任何含 "vpn-join" 字样的 HTTP 请求都会被当成 VPN 断开。
-  // 现在要求「魔数 + 合法 JSON + type 字段」。
-  if (!looksLikeVpnHandshake(line)) return false;
 
+  const nl = headBuf.indexOf(0x0a);
+  if (nl <= 0 || nl > 1024) return false;
+  const line = headBuf.slice(0, nl).toString('utf8').trim();
+  if (!looksLikeVpnHandshake(line) && !line.startsWith(MAGIC + '{"type":"vpn-claim"')) return false;
   const body = line.startsWith(MAGIC) ? line.slice(MAGIC.length) : line.replace(/^MCDATA/, '');
-  // 同一块里已经读到的帧数据（可能为空）：原样交给 VPN，不能丢
-  const rest = headBuf.slice(nl + 1);
-  handleVpnConnection(sock, body, rooms, log, rest);
+  handleVpnConnection(sock, body, rooms, log, headBuf.slice(nl + 1));
   return true;
 }
 
-const frontServer = net.createServer((sock) => {
+const vpnServer = net.createServer((sock) => {
   sock.setNoDelay(true);
   sock.pause();
 
@@ -1072,25 +404,14 @@ const frontServer = net.createServer((sock) => {
   timer.unref();
 
   let head = Buffer.alloc(0);
-
   const onData = (chunk) => {
     head = Buffer.concat([head, chunk]);
     if (head.length < 4) return;
     clearTimeout(timer);
     sock.removeListener('data', onData);
 
-    if (head.slice(0, 4).toString('latin1') === BIN_MAGIC_REQ) {
-      handleBinHandshake(sock, head);
-    } else if (maybeHandleVpn(sock, head)) {
-      // 已交给 VPN 处理
-    } else {
-      // 交给 HTTP 解析器：慢速攻击（发齐 4 字节后一个字节一个字节地拖）
-      // 会让连接长期占着句柄，这里给 http 侧设置空闲超时
-      sock.setTimeout(HTTP_IDLE_TIMEOUT_MS, () => {
-        try { sock.destroy(); } catch { /* 忽略 */ }
-      });
-      sock.unshift(head);
-      httpServer.emit('connection', sock);
+    if (!maybeHandleVpn(sock, head)) {
+      try { sock.destroy(); } catch { /* 忽略 */ }
     }
   };
 
@@ -1100,21 +421,13 @@ const frontServer = net.createServer((sock) => {
   sock.resume();
 });
 
-frontServer.on('error', (e) => {
-  log('监听失败: ' + e.message);
+vpnServer.on('error', (e) => {
+  log('VPN 端口监听失败: ' + e.message);
   process.exit(1);
 });
 
-frontServer.listen(HTTP_PORT, HOST, () => {
-  log(`中转监听 ${HOST}:${HTTP_PORT}  （二进制申请 + HTTP API）`);
-  log(`隧道端口池 ${PORT_MIN}-${PORT_MAX}  最多 ${MAX_ROOMS} 个房间`);
-  log(`玩家接入限流 ${JOIN_RATE_LIMIT} 次/${JOIN_RATE_WINDOW_MS / 1000} 秒` +
-    (BLOCK_IPS.size ? `  黑名单: ${[...BLOCK_IPS].join(',')}` : ''));
-  if (!API_KEY_REQUIRED) {
-    log('[警告] 未配置 API_KEY：/api/host 与 /api/rooms 对任何来源开放，' +
-        '任意网页都可通过访客浏览器匿名建房/枚举房间。请设置 API_KEY 并让客户端带上 X-Api-Key。');
-  }
-  log(`跨域白名单: ${CORS_ORIGINS.size ? [...CORS_ORIGINS].join(',') : '（关闭，原生客户端不需要 CORS）'}`);
+vpnServer.listen(VPN_PORT, HOST, () => {
+  log(`VPN 帧端口监听 ${HOST}:${VPN_PORT}`);
 });
 
 /**
@@ -1141,6 +454,20 @@ httpServer.headersTimeout = 15_000;
 httpServer.requestTimeout = 30_000;
 httpServer.timeout = 60_000;
 
+httpServer.on('error', (e) => {
+  log('HTTP 监听失败: ' + e.message);
+  process.exit(1);
+});
+
+controlServer.listen(HTTP_PORT, HOST, () => {
+  log(`VPN 中继 HTTP 监听 ${HOST}:${HTTP_PORT}  最多 ${MAX_ROOMS} 个房间`);
+  if (!API_KEY_REQUIRED) {
+    log('[警告] 未配置 API_KEY：/api/host 与 /api/rooms 对任何来源开放，' +
+        '任意网页都可通过访客浏览器匿名建房/枚举房间。请设置 API_KEY 并让客户端带上 X-Api-Key。');
+  }
+  log(`跨域白名单: ${CORS_ORIGINS.size ? [...CORS_ORIGINS].join(',') : '（关闭，原生客户端不需要 CORS）'}`);
+});
+
 // 心跳超时 + 速率限制记录清理
 setInterval(() => {
   const now = Date.now();
@@ -1152,10 +479,6 @@ setInterval(() => {
   for (const [ip, rec] of hostRate) {
     if (now - rec.start > HOST_RATE_WINDOW_MS * 2) hostRate.delete(ip);
   }
-  // 玩家接入限流窗口过期后清掉，避免 Map 无限增长
-  for (const [ip, rec] of joinRate) {
-    if (now >= rec.resetAt) joinRate.delete(ip);
-  }
 }, HEARTBEAT_MS).unref();
 
 // ============ 退出 ============
@@ -1166,7 +489,7 @@ function shutdown(sig) {
   shuttingDown = true;
   log(`收到 ${sig}，关闭所有房间`);
   for (const id of [...rooms.keys()]) closeRoom(id, 'server-shutdown');
-  httpServer.close(() => process.exit(0));
+  vpnServer.close(() => controlServer.close(() => httpServer.close(() => process.exit(0))));
   setTimeout(() => process.exit(1), 5000).unref();
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));

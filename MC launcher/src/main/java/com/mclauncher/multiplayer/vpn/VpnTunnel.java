@@ -64,6 +64,8 @@ public final class VpnTunnel implements AutoCloseable {
     private final AtomicLong tx = new AtomicLong();
     private volatile Socket sock;
     private volatile OutputStream out;
+    /** 房主侧：目的地是 10.77.0.1（本机 MC）的包交给它，而不写回 Wintun */
+    private volatile java.util.function.Consumer<byte[]> gatewaySink;
     private volatile boolean stopping;
 
     /** 房主侧：虚拟 IP -> 玩家 uuid */
@@ -157,6 +159,10 @@ public final class VpnTunnel implements AutoCloseable {
     public boolean isRunning() { return running.get(); }
     public String uuid() { return uuid; }
 
+    public void setGatewaySink(java.util.function.Consumer<byte[]> sink) {
+        this.gatewaySink = sink;
+    }
+
     // ---------------------------------------------------------------
     //  启动
     // ---------------------------------------------------------------
@@ -239,6 +245,17 @@ public final class VpnTunnel implements AutoCloseable {
                 if (!isIpv4(ip)) {
                     logger.debug("丢弃非 IPv4 的 VPN 帧（{} 字节）", ip.length);
                     continue;
+                }
+                if (gatewaySink != null && role == Role.HOST && ip.length >= 20
+                        && ip[16] == 10 && ip[17] == 77 && ip[18] == 0 && ip[19] == 1) {
+                    // 目的地是本机虚拟地址：交给房主侧的 u 层网关（写进本机 MC），
+                    // 而不是再塞回 Wintun —— 否则包会绕回虚拟网卡、发不到本机 MC
+                    try {
+                        gatewaySink.accept(ip);
+                        continue;
+                    } catch (RuntimeException ignored) {
+                        // 网关不可用就按普通包处理
+                    }
                 }
                 if (!adapter.send(ip)) {
                     // 发送环满：驱动侧没有空间，丢包（MC 是 TCP，会重传）
