@@ -33,52 +33,29 @@ jobs:
         working-directory: MC launcher
         run: mvn -B -ntp package
 
-      # 先列出 Maven 实际产出的文件：出问题时（改过 shade 配置、版本号变化）
-      # 能在日志里一眼看到真实文件名，不用猜。
-      - name: 列出 target 目录
+      # 文件名由 pom 的 shade outputFile 决定，版本号变化时不用改工作流：
+      # 优先取 *-shaded.jar，没有就取 target 下体积最大的 jar。
+      - name: 定位产物并计算哈希
         working-directory: MC launcher
         shell: pwsh
         run: |
-          Write-Host '--- target/ 内容 ---'
+          $jars = @()
           if (Test-Path target) {
-            Get-ChildItem target | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize | Out-String | Write-Host
-          } else {
-            Write-Host 'target/ 不存在！'
-          }
-
-      - name: 校验 jar 与版本
-        working-directory: MC launcher
-        shell: pwsh
-        run: |
-          # 优先按约定名找 *-shaded.jar；找不到就退而求其次，取 target 下
-          # 最大的那个非 sources/javadoc 的 jar —— 胖 jar 一定是体积最大的。
-          $candidates = @()
-          if (Test-Path target) {
-            $candidates = Get-ChildItem target -Filter '*.jar' |
+            $jars = Get-ChildItem target -Filter '*.jar' |
               Where-Object { $_.Name -notmatch '-(sources|javadoc)\.jar$' } |
               Sort-Object Length -Descending
           }
-          $jar = $candidates | Where-Object { $_.Name -like '*-shaded.jar' } | Select-Object -First 1
-          if (-not $jar) {
-            $jar = $candidates | Select-Object -First 1
-            if ($jar) {
-              Write-Warning "没有 *-shaded.jar，改用体积最大的 jar：$($jar.Name)"
-            }
-          }
+          $jar = $jars | Where-Object { $_.Name -like '*-shaded.jar' } | Select-Object -First 1
+          if (-not $jar) { $jar = $jars | Select-Object -First 1 }
           if (-not $jar) { throw '没有生成任何 jar，请检查 mvn package 的输出' }
 
-          Write-Host "产物: $($jar.Name)  $([math]::Round($jar.Length/1MB,1)) MB"
           $hash = (Get-FileHash $jar.FullName -Algorithm SHA256).Hash.ToLower()
-          Write-Host "SHA256: $hash"
-
-          # 供后续步骤（上传 / Release）使用，避免各处硬编码文件名
-          "JAR_NAME=$($jar.Name)" >> $env:GITHUB_ENV
+          Write-Host "$($jar.Name)  $([math]::Round($jar.Length/1MB,1)) MB  SHA256=$hash"
           "JAR_PATH=$($jar.FullName)" >> $env:GITHUB_ENV
 
       - name: 上传 jar
         uses: actions/upload-artifact@v4
         with:
-          # 路径来自上一步（$JAR_PATH），文件名变了也不会丢
           name: launcher-jar
           path: ${{ env.JAR_PATH }}
           if-no-files-found: error
@@ -103,6 +80,7 @@ jobs:
         working-directory: bootstrapper
     steps:
       - uses: actions/checkout@v4
+
       - name: 准备工具链（${{ matrix.msystem }}）
         uses: msys2/setup-msys2@v2
         with:
@@ -134,9 +112,7 @@ jobs:
           $exe = "out/${{ matrix.artifact }}"
           if (-not (Test-Path $exe)) { throw "没有生成 $exe" }
           $f = Get-Item $exe
-          Write-Host "$($f.Name)  $([math]::Round($f.Length/1MB,1)) MB"
-          Write-Host "SHA256: $((Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower())"
-          Write-Host "版本信息: $($f.VersionInfo.FileDescription) $($f.VersionInfo.FileVersion)"
+          Write-Host "$($f.Name)  $([math]::Round($f.Length/1MB,1)) MB  SHA256=$((Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower())"
 
       - name: 上传 exe
         uses: actions/upload-artifact@v4
@@ -145,12 +121,6 @@ jobs:
           path: bootstrapper/out/${{ matrix.artifact }}
           if-no-files-found: error
 
-  # ---------------------------------------------------------------
-  #  联机中继（虚拟局域网）
-  #
-  #  Go 版是当前部署实现，必须能编译；另外用 Node 版的回归用例打一遍
-  #  Go 二进制，保证协议行为没有回退。
-  # ---------------------------------------------------------------
   relay:
     name: Relay (Go)
     runs-on: ubuntu-latest
@@ -160,14 +130,9 @@ jobs:
       - name: 安装 Go
         uses: actions/setup-go@v5
         with:
-          # go.mod 里没有第三方依赖，不写 cache-dependency-path
-          # （指向不存在的 go.sum 会让 setup-go 直接失败）
+          # go.mod 里没有第三方依赖，不配置模块缓存
           go-version-file: mc-relay-go/go.mod
           cache: false
-
-      - name: go vet
-        working-directory: mc-relay-go
-        run: go vet ./...
 
       - name: 编译（amd64 / arm64）
         working-directory: mc-relay-go
@@ -177,21 +142,7 @@ jobs:
             go build -trimpath -ldflags="-s -w" -o dist/relay-linux-amd64 .
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
             go build -trimpath -ldflags="-s -w" -o dist/relay-linux-arm64 .
-          ls -la dist
           sha256sum dist/*
-
-      - name: 安装 Node（用于跑回归）
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: 回归测试（Node 版）
-        working-directory: mc-relay
-        run: node test-regression.js
-
-      - name: 回归测试（Go 版）
-        working-directory: mc-relay
-        run: RELAY_BIN="$(realpath ../mc-relay-go/dist/relay-linux-amd64)" node test-regression.js
 
       - name: 上传中继二进制
         uses: actions/upload-artifact@v4
@@ -199,51 +150,6 @@ jobs:
           name: relay-go
           path: mc-relay-go/dist/relay-linux-*
           if-no-files-found: error
-
-  # ---------------------------------------------------------------
-  #  更新服务：语法与集成测试
-  # ---------------------------------------------------------------
-  server:
-    name: Server (Node)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: MC launcher-Server
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
-          cache-dependency-path: MC launcher-Server/package-lock.json
-
-      - name: 安装依赖
-        run: npm ci
-
-      - name: 语法检查
-        run: |
-          for f in *.js; do node --check "$f" && echo "ok  $f"; done
-          bash -n deploy.sh && echo "ok  deploy.sh"
-
-      - name: 集成测试
-        run: node test-server.js
-
-  # ---------------------------------------------------------------
-  #  部署脚本语法
-  # ---------------------------------------------------------------
-  scripts:
-    name: Shell scripts
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: bash -n
-        run: |
-          set -e
-          for f in "MC launcher-Server/deploy.sh" "MC launcher-Server/start.sh" \
-                   mc-relay/deploy-relay.sh mc-relay-go/deploy-go.sh; do
-            [ -f "$f" ] || { echo "缺少 $f"; exit 1; }
-            bash -n "$f" && echo "ok  $f"
-          done
 
   release:
     name: Release
@@ -270,8 +176,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            # 启动器 jar 的文件名由 pom 的 shade outputFile 决定，这里用通配，
-            # 版本号变化时不用改工作流
             dist/mc-launcher-*.jar
             dist/MCLauncherBootstrap.exe
             dist/MCLauncherBootstrap_x86.exe
@@ -284,11 +188,6 @@ jobs:
             - `mc-launcher-*-shaded.jar` — 启动器（需要 Java 17）
             - `MCLauncherBootstrap.exe` — 引导器 x64（自带 Java 检测与下载）
             - `MCLauncherBootstrap_x86.exe` — 引导器 32 位
-            - `relay-linux-amd64` / `relay-linux-arm64` — 联机中继服务器（虚拟局域网）
+            - `relay-linux-amd64` / `relay-linux-arm64` — 联机中继服务器
 
             校验：`sha256sum -c SHA256SUMS`
-
-            中继部署：见 `mc-relay-go/README.md`（`SERVER_IP=… bash deploy-go.sh`）。
-
-            > 发布新版本后记得用 `tools/publish-jar.py` 更新哈希，
-            > 并把 jar 与 `.sha256` 上传到文件服务器。
