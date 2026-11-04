@@ -55,6 +55,8 @@ public final class MirrorPool {
         volatile boolean supportsRange;
         /** 是否可用作下载源（USTC/官方节点排除） */
         volatile boolean usable;
+        /** 是否透传 assets 资源（实测只有 BMCLAPI2 可用） */
+        final boolean assets;
         /** 连续失败次数 */
         final AtomicInteger failures = new AtomicInteger(0);
         /** 已被分配的文件数（用于负载均衡） */
@@ -68,6 +70,18 @@ public final class MirrorPool {
             this.safeConcurrency = safeConcurrency;
             this.supportsRange = supportsRange;
             this.usable = usable;
+            this.assets = false;
+        }
+
+        Mirror(String name, String baseUrl, long speed, int safeConcurrency,
+               boolean supportsRange, boolean usable, boolean assets) {
+            this.name = name;
+            this.baseUrl = baseUrl;
+            this.speed = speed;
+            this.safeConcurrency = safeConcurrency;
+            this.supportsRange = supportsRange;
+            this.usable = usable;
+            this.assets = assets;
         }
 
         public String getName() { return name; }
@@ -76,6 +90,7 @@ public final class MirrorPool {
         public int getSafeConcurrency() { return safeConcurrency; }
         public boolean isSupportsRange() { return supportsRange; }
         public boolean isUsable() { return usable; }
+        public boolean supportsAssets() { return assets; }
 
         @Override
         public String toString() {
@@ -83,26 +98,44 @@ public final class MirrorPool {
         }
     }
 
-    /** 实测数据构建的站点表 */
+    /**
+     * 实测数据构建的站点表（2026-11-04 实测）
+     *
+     * | 站点 | 库文件 /maven | assets | Range | 备注 |
+     * |------|--------------|--------|-------|------|
+     * | 上海交大 | 200 | 404 | ✓ | |
+     * | 南阳理工 | 200 | 404 | ✓ | |
+     * | 河南教育网 | 200 | 404 | ✓ | |
+     * | 哈工大 | 200 | 404 | ✓ | |
+     * | 南京大学 | 200 | 404 | ✓ | |
+     * | 齐鲁工大 | 200 | 404 | ✓ | |
+     * | 中科大 | 200 | 404 | ✗ | 回退用 |
+     * | BMCLAPI2 | 200 | 200 | ✓ | 唯一支持 assets |
+     * | 重庆大学 | 认证网关 | 认证网关 | - | 不可程序化使用 |
+     * | 浙江大学 | 超时 404 | 404 | - | 不纳入 |
+     */
     private static final Mirror[] KNOWN_MIRRORS = {
-            // 主力站点：快且并发无限制
-            new Mirror(L.t("s_25c10df594"), "https://mirror.nyist.edu.cn/bmclapi",
-                    28110000L, 64, true, true),
-            new Mirror(L.t("s_932a38944f"), "https://mirror.sjtu.edu.cn/bmclapi",
-                    25070000L, 64, true, true),
-            new Mirror(L.t("s_84e4e5819b"), "https://mirrors.ha.edu.cn/bmclapi",
-                    10230000L, 16, true, true),
-            new Mirror(L.t("s_cca18e0f90"), "https://mirrors.hit.edu.cn/bmclapi",
-                    7710000L, 32, true, true),
-            new Mirror(L.t("s_c1ab796dcc"), "https://mirrors.qlu.edu.cn/bmclapi",
-                    1920000L, 8, true, true),
+        // ---- 库文件主力站（会走多镜像轮询） ----
+        new Mirror(L.t("s_25c10df594"), "https://mirror.nyist.edu.cn/bmclapi",
+                28110000L, 64, true, true),
+        new Mirror(L.t("s_932a38944f"), "https://mirror.sjtu.edu.cn/bmclapi",
+                25070000L, 64, true, true),
+        new Mirror(L.t("s_84e4e5819b"), "https://mirrors.ha.edu.cn/bmclapi",
+                10230000L, 16, true, true),
+        new Mirror(L.t("s_cca18e0f90"), "https://mirrors.hit.edu.cn/bmclapi",
+                7710000L, 32, true, true),
+        new Mirror(L.t("s_cf39e8d34b"), "https://mirror.nju.edu.cn/bmclapi",
+                12000000L, 32, true, true),
+        new Mirror(L.t("s_c1ab796dcc"), "https://mirrors.qlu.edu.cn/bmclapi",
+                1920000L, 8, true, true),
 
-            // 以下站点保留在列表中用于「回退」与展示，
-            // 但 usable=false：4 并发即 429，不能参与并发下载
-            new Mirror(L.t("s_6d49a81d12"), "https://mirrors.ustc.edu.cn/bmclapi",
-                    5410000L, 1, false, false),
-            new Mirror(L.t("s_531fea1e60"), "https://bmclapi2.bangbang93.com/maven",
-                    9080000L, 1, true, false),
+        // ---- assets 资源：只有 BMCLAPI2 透传 ----
+        new Mirror(L.t("s_531fea1e60"), "https://bmclapi2.bangbang93.com",
+                9080000L, 4, true, true, true),
+
+        // ---- 回退用 ----
+        new Mirror(L.t("s_6d49a81d12"), "https://mirrors.ustc.edu.cn/bmclapi",
+                5410000L, 1, false, false),
     };
 
     private static final MirrorPool INSTANCE = new MirrorPool();
@@ -244,9 +277,9 @@ public final class MirrorPool {
     /**
      * 拼接 assets 资源 URL
      *
-     * 镜像站的 assets 结构是**扁平**的：/assets/<hash>
-     * 而 BMCLAPI 官方节点是两级的：/assets/<前两位>/<hash>
-     * 混用会 404。
+     * 实测：各高校镜像**不透传** assets（全部 404），只有 BMCLAPI2 可用；
+     * BMCLAPI2 的结构是两级的 /assets/<前两位>/<hash>。
+     * 直接走扁平路径 /assets/<hash> 会 404。
      */
     public String buildAssetUrl(Mirror mirror, String hash) {
         if (mirror == null || hash == null || hash.length() < 2) {
@@ -261,7 +294,9 @@ public final class MirrorPool {
         if (!base.endsWith("/")) {
             base = base + "/";
         }
-        return base + "assets/" + hash;
+        // BMCLAPI2 的资源路径是 /assets/<前两位>/<hash>；
+        // 各高校镜像并不透传 assets，所以这里只对 BMCLAPI2 生效
+        return base + "assets/" + hash.substring(0, 2) + "/" + hash;
     }
 
     private static final java.util.regex.Pattern HASH_RE =

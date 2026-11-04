@@ -1,0 +1,225 @@
+package main
+
+import (
+	"encoding/binary"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strings"
+	"time"
+)
+
+const (
+	host    = "39.106.60.15"
+	httpP   = 8080
+	vpnP    = 8081
+	apiKey  = "UHGduyo8dy9Yd7t8ydfvt7p&^%$&*^578d5cto8*6dtv6rdtd^Tv7YTlt7il7flytitLTli77ftrf6vI%T6gtv^^5rfv&tr7dr6vdu6r"
+)
+
+type msg map[string]any
+
+func post(path string, body any, withKey bool) (int, string) {
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("http://%s:%d%s", host, httpP, path), strings.NewReader(string(b)))
+	req.Header.Set("Content-Type", "application/json")
+	if withKey {
+		req.Header.Set("X-Api-Key", apiKey)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err.Error()
+	}
+	defer resp.Body.Close()
+	d, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(d)
+}
+
+func dialVPN() net.Conn {
+	c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, vpnP), 8*time.Second)
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
+func dialHTTP() net.Conn {
+	c, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", host, httpP), 8*time.Second)
+	if err != nil {
+		panic(err)
+	}
+	return c
+}
+
+// 读一行（控制通道）
+func readLine(c net.Conn, d time.Duration) (msg, error) {
+	c.SetReadDeadline(time.Now().Add(d))
+	var buf []byte
+	one := make([]byte, 1)
+	for {
+		n, err := c.Read(one)
+		if err != nil {
+			return nil, err
+		}
+		if n == 1 {
+			if one[0] == '\n' {
+				var m msg
+				json.Unmarshal(buf, &m)
+				return m, nil
+			}
+			buf = append(buf, one[0])
+		}
+	}
+}
+
+func writeFrame(c net.Conn, payload []byte) {
+	var h [4]byte
+	binary.LittleEndian.PutUint32(h[:], uint32(len(payload)))
+	c.Write(append(h[:], payload...))
+}
+
+func readFrame(c net.Conn, d time.Duration) ([]byte, error) {
+	c.SetReadDeadline(time.Now().Add(d))
+	var h [4]byte
+	if _, err := io.ReadFull(c, h[:]); err != nil {
+		return nil, err
+	}
+	n := binary.LittleEndian.Uint32(h[:])
+	f := make([]byte, n)
+	_, err := io.ReadFull(c, f)
+	return f, err
+}
+
+func ipPkt() []byte {
+	p := make([]byte, 20)
+	p[0] = 0x45
+	binary.BigEndian.PutUint16(p[2:4], 20)
+	p[9] = 17
+	p[12] = 10
+	p[13] = 77
+	return p
+}
+
+func ok(name string, cond bool, detail any) {
+	mark := "✓"
+	if !cond {
+		mark = "✗"
+	}
+	fmt.Printf("  %s %s", mark, name)
+	if detail != nil {
+		fmt.Printf("  -> %v", detail)
+	}
+	fmt.Println()
+}
+
+func main() {
+	fmt.Println("[1] 带密钥建房")
+	st, body := post("/api/host", map[string]any{"name": "verify-go"}, true)
+	var room msg
+	json.Unmarshal([]byte(body), &room)
+	ok("POST /api/host 200", st == 200, body)
+	ok("返回 room + token", room["room"] != nil && room["token"] != nil, "")
+	ok("不返回 port（新版协议）", room["port"] == nil, "")
+	rid, _ := room["room"].(string)
+	tok, _ := room["token"].(string)
+	if st != 200 {
+		return
+	}
+
+	fmt.Println("[2] 控制通道 hello")
+	ctl := dialHTTP()
+	defer ctl.Close()
+	ctl.Write([]byte("MCRELAY" + `{"type":"hello","room":"` + rid + `","token":"` + tok + `"}` + "\n"))
+	m, err := readLine(ctl, 5*time.Second)
+	ok("收到 hello-ok", err == nil && m["type"] == "hello-ok", m)
+
+	fmt.Println("[3] 没有 vpn-host 时签发邀请应失败")
+	ctl.Write([]byte(`{"type":"vpn-token","id":1}` + "\n"))
+	m, _ = readLine(ctl, 5*time.Second)
+	ok("收到 vpn-token-error", m != nil && m["type"] == "vpn-token-error", m)
+
+	fmt.Println("[4] 房主 VPN 长连接")
+	vh := dialVPN()
+	defer vh.Close()
+	vh.Write([]byte("MCRELAY" + `{"type":"vpn-host","room":"` + rid + `","token":"` + tok + `"}` + "\n"))
+	time.Sleep(500 * time.Millisecond)
+
+	fmt.Println("[5] 签发邀请")
+	ctl.Write([]byte(`{"type":"vpn-token","id":2}` + "\n"))
+	m, _ = readLine(ctl, 5*time.Second)
+	ok("收到 vpn-token", m != nil && m["type"] == "vpn-token", m)
+	if m == nil {
+		return
+	}
+	code, _ := m["code"].(string)
+	ip1, _ := m["ip"].(string)
+	ok("分配了 10.77.0.x", strings.HasPrefix(ip1, "10.77.0."), ip1)
+
+	fmt.Println("[6] 错误口令领取应被拒")
+	bad := dialVPN()
+	bad.Write([]byte("MCRELAY" + `{"type":"vpn-claim","room":"` + rid + `","code":"deadbeef"}` + "\n"))
+	bad.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 200)
+	n, _ := bad.Read(buf)
+	ok("返回「口令无效」", strings.Contains(string(buf[:n]), "口令无效"), strings.TrimSpace(string(buf[:n])))
+	bad.Close()
+
+	fmt.Println("[7] 正确口令领取")
+	cl := dialVPN()
+	cl.Write([]byte("MCRELAY" + `{"type":"vpn-claim","room":"` + rid + `","code":"` + code + `"}` + "\n"))
+	var claim msg
+	cl.SetReadDeadline(time.Now().Add(5 * time.Second))
+	d, _ := io.ReadAll(cl)
+	json.Unmarshal(d, &claim)
+	ok("拿到 token/uuid/ip", claim["token"] != nil && claim["uuid"] != nil && claim["ip"] != nil, strings.TrimSpace(string(d)))
+	cl.Close()
+	ptok, _ := claim["token"].(string)
+	puuid, _ := claim["uuid"].(string)
+
+	fmt.Println("[8] 同一口令不能复用")
+	re := dialVPN()
+	re.Write([]byte("MCRELAY" + `{"type":"vpn-claim","room":"` + rid + `","code":"` + code + `"}` + "\n"))
+	re.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _ = re.Read(buf)
+	ok("第二次被拒", strings.Contains(string(buf[:n]), "口令无效"), strings.TrimSpace(string(buf[:n])))
+	re.Close()
+
+	fmt.Println("[9] 玩家加入（vpn-join）并收 vpn-peer 通知")
+	peer := dialVPN()
+	defer peer.Close()
+	peer.Write([]byte("MCRELAY" + `{"type":"vpn-join","room":"` + rid + `","uuid":"` + puuid + `","token":"` + ptok + `"}` + "\n"))
+	m, _ = readLine(ctl, 5*time.Second)
+	ok("控制通道收到 vpn-peer", m != nil && m["type"] == "vpn-peer", m)
+
+	fmt.Println("[10] 玩家 → 房主 上行帧")
+	writeFrame(peer, ipPkt())
+	f, err := readFrame(vh, 5*time.Second)
+	if err == nil && len(f) > 1+len(ip1) {
+		prefix := string(f[1 : 1+int(f[0])])
+		ok("房主收到上行帧，前缀是玩家虚拟 IP", prefix == ip1, fmt.Sprintf("prefix=%s len=%d", prefix, len(f)))
+	} else {
+		ok("房主收到上行帧", false, err)
+	}
+
+	fmt.Println("[11] 房主 → 玩家 下行帧")
+	frame := append([]byte{byte(len(ip1))}, []byte(ip1)...)
+	frame = append(frame, ipPkt()...)
+	writeFrame(vh, frame)
+	f, err = readFrame(peer, 5*time.Second)
+	ok("玩家收到下行帧", err == nil && len(f) == 20 && f[0] == 0x45, err)
+
+	fmt.Println("[12] 同 token 重复加入被拒")
+	dup := dialVPN()
+	dup.Write([]byte("MCRELAY" + `{"type":"vpn-join","room":"` + rid + `","uuid":"` + puuid + `","token":"` + ptok + `"}` + "\n"))
+	dup.SetReadDeadline(time.Now().Add(3 * time.Second))
+	_, err = dup.Read(buf)
+	ok("连接被断开", err != nil, err)
+	dup.Close()
+
+	fmt.Println("[13] /health")
+	resp, _ := http.Get(fmt.Sprintf("http://%s:%d/health", host, httpP))
+	d, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	ok("/health 200 且带 rooms/players", resp.StatusCode == 200 && strings.Contains(string(d), "rooms"), strings.TrimSpace(string(d)))
+}

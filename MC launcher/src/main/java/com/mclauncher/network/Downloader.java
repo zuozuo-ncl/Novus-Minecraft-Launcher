@@ -41,6 +41,9 @@ public class Downloader {
     private static final int MAX_RETRIES = 5;
     private static final long RETRY_DELAY_MS = 1000;
 
+    /** 等待下载许可的最长时间：超时后调用方换镜像，而不是原地死等 */
+    private static final long ACQUIRE_TIMEOUT_MS = 20_000;
+
     /**
      * 启用多线程分块下载的最小文件大小。
      * 小于该值分块的额外请求开销大于收益。
@@ -393,9 +396,9 @@ public class Downloader {
                         // 退避：限流时等待显著更久（尊重该 host 的冷却状态）
                         long backoff;
                         if (isThrottled) {
-                            backoff = Math.max(
-                                    RETRY_DELAY_MS * attempt * 5L,
-                                    throttle.isThrottled(url) ? 5_000L : 0L);
+                            // 指数退避 + 抖动：1s、2s、4s、8s（封顶）
+                            long base = Math.min(8_000L, RETRY_DELAY_MS << Math.min(attempt - 1, 3));
+                            backoff = base + java.util.concurrent.ThreadLocalRandom.current().nextLong(500);
                             logger.info("被限流，等待 {} ms 后重试（保留已下载的 {} KB）",
                                     backoff, partial / 1024);
                         } else {
@@ -929,35 +932,44 @@ public class Downloader {
      *
      * 注意：调用方负责 close 返回的 Response。
      */
+    /**
+     * 执行请求（带全局限流控制）
+     *
+     * 关键：许可只在「等待响应头」期间占用，拿到 Response 后立即归还。
+     * 以前放在 finally 里、要等整个响应体读完（甚至文件写完）才释放，
+     * 结果 443 个资源文件只有几十个能同时在跑，后面的全部堵在许可上 ——
+     * 这就是「越到后面越慢」的主要原因。
+     *
+     * 注意：调用方负责 close 返回的 Response。
+     */
     private Response executeThrottled(Request request) throws IOException {
         String url = request.url().toString();
+        boolean acquired = false;
         try {
-            // 60 秒超时：够等，但不会无限期卡住。
-            // 超时意味着该 host 已被占满，调用方会换下一个源重试。
-            throttle.acquire(url, 60_000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("下载许可等待超时或已取消", e);
-        }
+            throttle.acquire(url, ACQUIRE_TIMEOUT_MS);
+            acquired = true;
 
-        boolean success = false;
-        try {
             Response response = httpClient.newCall(request).execute();
 
             if (response.code() == 429 || response.code() == 403) {
-                // 被限流：立即上报。按 host 独立降级，不影响其它站点
                 throttle.reportThrottled(url, response.code());
+            } else if (response.code() >= 400) {
+                // 404/5xx 不参与「成功计数」，也不触发降级
+                if (response.code() >= 500) {
+                    throttle.reportThrottled(url, response.code());
+                }
             } else {
-                success = true;
                 throttle.reportSuccess(url);
             }
-
             return response;
+        } catch (IOException e) {
+            throw e;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException(L.t("s_5f76edc5de"), e);
         } finally {
-            throttle.release(url);
-
-            if (!success) {
-                // 失败分支无需额外处理，限流状态已在上方更新
+            if (acquired) {
+                throttle.release(url);
             }
         }
     }

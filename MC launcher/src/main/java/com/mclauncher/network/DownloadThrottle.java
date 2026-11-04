@@ -84,6 +84,8 @@ public final class DownloadThrottle {
         final AtomicInteger successStreak = new AtomicInteger(0);
         /** 累计被限流次数，用于诊断 */
         final AtomicInteger throttleCount = new AtomicInteger(0);
+        /** 连续失败次数（连接失败/404），达到阈值后暂时不再被选中 */
+        final AtomicInteger failures = new AtomicInteger(0);
 
         HostState(String host, int initialLimit) {
             this.host = host;
@@ -227,14 +229,29 @@ public final class DownloadThrottle {
     }
 
     /**
+     * 报告一次失败：把排除期拉长，避免一直往一个坏站点上撞
+     */
+    public void reportFailure(String url) {
+        HostState st = stateFor(url);
+        st.failures.incrementAndGet();
+    }
+
+    /** 某 host 是否刚连续失败，暂不应再选它 */
+    public boolean isBadHost(String url) {
+        HostState st = hosts.get(hostOf(url));
+        return st != null && st.failures.get() >= 3;
+    }
+
+    /**
      * 报告一次成功（用于缓慢恢复该 host 的额度）
      */
     public void reportSuccess(String url) {
         HostState st = stateFor(url);
+        st.failures.set(0);
         int streak = st.successStreak.incrementAndGet();
 
-        // 每 50 次成功 +1（恢复要慢：被限流的代价远大于多一个并发的收益）
-        if (streak >= 50) {
+        // 每 20 次成功 +1：老版本恢复要慢得像摊上事儿，会把一次限流吃上半天
+        if (streak >= 20) {
             st.successStreak.set(0);
             int oldLimit = st.limit.get();
             if (oldLimit < PER_HOST_MAX) {

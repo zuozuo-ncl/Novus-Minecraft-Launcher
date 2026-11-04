@@ -586,10 +586,20 @@ public final class VpnSession implements AutoCloseable {
                     s.getInputStream(), StandardCharsets.UTF_8));
             String line = r.readLine();
             if (line == null) {
-                throw new IOException("中继没有响应");
+                throw new IOException("中继没有响应（它可能是旧版中继，没有 VPN 帧端口）");
             }
-            com.google.gson.JsonObject resp = com.google.gson.JsonParser.parseString(line)
-                    .getAsJsonObject();
+            if (!line.trim().startsWith("{")) {
+                // 跑到了 HTTP 端口上：说明中继没有把这条连接当成 VPN 握手
+                throw new IOException("中继返回的不是 VPN 应答（" + preview(line)
+                        + "）。常见原因：中继是旧版（端口转发），或 VPN 帧端口 "
+                        + (relayPort + 1) + " 没有开放。");
+            }
+            com.google.gson.JsonObject resp;
+            try {
+                resp = com.google.gson.JsonParser.parseString(line).getAsJsonObject();
+            } catch (RuntimeException e) {
+                throw new IOException("中继应答格式不正确：" + preview(line), e);
+            }
             if (resp.has("error")) {
                 throw new IOException("加入失败：" + resp.get("error").getAsString());
             }
@@ -597,6 +607,21 @@ public final class VpnSession implements AutoCloseable {
                     resp.get("ip").getAsString(),
                     resp.get("uuid").getAsString()};
         }
+    }
+
+    /**
+     * 加入失败时给出可操作的说明（界面直接显示这句话，不要抛 Java 异常类名）。
+     */
+    private static IOException joinError(String detail, Throwable cause) {
+        return new IOException(detail, cause);
+    }
+
+    /** 截取一段文本用于错误提示（去掉换行，最多 120 字符） */    private static String preview(String s) {
+        if (s == null) {
+            return "(空)";
+        }
+        String one = s.replaceAll("\\s+", " ").trim();
+        return one.length() <= 120 ? one : one.substring(0, 120) + "…";
     }
 
     // ---------------------------------------------------------------
@@ -665,7 +690,21 @@ public final class VpnSession implements AutoCloseable {
             if (code != 200) {
                 throw new IOException("申请房间失败 HTTP " + code + ": " + resp);
             }
-            var o = com.google.gson.JsonParser.parseString(resp).getAsJsonObject();
+            com.google.gson.JsonObject o;
+            try {
+                o = com.google.gson.JsonParser.parseString(resp).getAsJsonObject();
+            } catch (RuntimeException e) {
+                throw new IOException("中继返回了无法解析的内容（可能不是本启动器的联机中继）："
+                        + preview(resp), e);
+            }
+            // 旧版（端口转发）中继会返回 port 字段：它没有 VPN 帧端口，连不上
+            if (o.has("port")) {
+                throw new IOException("当前联机中继仍是旧版（端口转发），"
+                        + "本启动器只支持虚拟局域网，请先把中继升级到新版：\n" + host + ":" + port);
+            }
+            if (!o.has("room") || !o.has("token")) {
+                throw new IOException("中继应答缺少 room/token：" + preview(resp));
+            }
             return new String[]{o.get("room").getAsString(), o.get("token").getAsString()};
         } finally {
             c.disconnect();

@@ -670,6 +670,9 @@ public class ConfigManager {
             }
         }
         List<GameDirectory> dirs = getGameDirectories();
+        if (!dirs.isEmpty()) {
+            logger.warn("激活的游戏目录 {} 不存在，回退到: {}", activeId, dirs.get(0).getRootPathString());
+        }
         return dirs.isEmpty() ? null : dirs.get(0);
     }
 

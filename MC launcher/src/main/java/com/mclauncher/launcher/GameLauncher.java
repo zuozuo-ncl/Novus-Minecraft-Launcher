@@ -40,7 +40,16 @@ public class GameLauncher {
      */
     private static final String LANG_ZH_CN = "zh_cn";
 
-    private final Path gameDir;
+    /**
+     * 当前游戏目录。
+     *
+     * 不能像早先那样在构造时固定成 config.getGameDir()：那时启动器刚起来，
+     * 用户还没在「目录管理」里选目录，拿到的是默认的数据目录下 minecraft 子目录。
+     * 之后用户添加/切换目录，启动游戏仍然去旧路径找版本 JSON，
+     * 表现为「版本 JSON 不存在 …\NCL_Launcher\minecraft\versions…」。
+     * 现在每次启动游戏都按当前配置重新解析。
+     */
+    private volatile Path gameDir;
     private final Path launcherDir;
 
     private Process gameProcess;
@@ -78,7 +87,6 @@ public class GameLauncher {
     public GameLauncher(ConfigManager config, Path launcherDir) {
         this.config = config;
         this.launcherDir = launcherDir;
-        this.gameDir = config.getGameDir();
     }
 
     /**
@@ -133,6 +141,9 @@ public class GameLauncher {
     public boolean launch(String versionId, Account account, String javaPath,
                           java.util.function.UnaryOperator<Account> refresher) {
         try {
+            // 每次启动都按当前配置解析游戏目录：用户可能刚在界面里切换过目录
+            this.gameDir = config.getGameDir();
+            logger.info("游戏目录: {}", gameDir);
             if (account != null && refresher != null
                     && account.getType() == Account.Type.MICROSOFT && account.isTokenExpired()) {
                 try {

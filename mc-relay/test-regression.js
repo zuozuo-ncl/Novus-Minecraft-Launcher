@@ -141,10 +141,16 @@ async function newRoom(name) {
 }
 
 async function main() {
-  const relay = spawn(process.execPath, [path.join(__dirname, 'relay-server.js')], {
-    env: { ...process.env, HTTP_PORT: String(HTTP_PORT), HOST: '127.0.0.1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  // 由环境变量决定被测实现：RELAY_BIN 指向 Go 二进制时测 Go 版
+  const relay = process.env.RELAY_BIN
+    ? spawn(process.env.RELAY_BIN, [], {
+        env: { ...process.env, HTTP_PORT: String(HTTP_PORT), VPN_PORT: String(HTTP_PORT + 1), HOST: '127.0.0.1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    : spawn(process.execPath, [path.join(__dirname, 'relay-server.js')], {
+        env: { ...process.env, HTTP_PORT: String(HTTP_PORT), HOST: '127.0.0.1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
   let relayLog = '';
   relay.stdout.on('data', (d) => { relayLog += d; });
   relay.stderr.on('data', (d) => { relayLog += d; });

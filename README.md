@@ -158,15 +158,28 @@ node server.js          # 默认 5005
 
 ---
 
-## mc-relay —— 联机中继（VPN 专用）
+## mc-relay —— 联机中继（虚拟局域网）
 
-- **不再支持端口转发**：旧版「房主申请房间 → 朋友连公网端口」模型对 MC 联机实际不可用，已移除。
-- **只保留虚拟局域网模式**（`vpn-room.js` + `vpn-tunnel.js`）：房主与玩家各一条长连接，服务器只做帧交换。
-- **两个端口**：`HTTP_PORT`（8080，API + 房主控制通道信令）以及 `VPN_PORT`（HTTP_PORT + 1，房主/玩家 VPN 帧）。每个 VPN 连接有空闲 60 秒超时。
+两种实现，协议完全一致，择一部署即可（客户端不用区分）：
 
-主要环境变量：`HTTP_PORT`（8080）、`VPN_PORT`（8081）、`API_KEY`、`MAX_ROOMS`（100）、`VPN_IDLE_TIMEOUT_MS`（60000）。
+| 目录 | 实现 | 说明 |
+|---|---|---|
+| `mc-relay/` | Node.js | 原版，保留作为参考与回退；`_backup-node-js/` 是切换前的完整快照 |
+| `mc-relay-go/` | Go | 当前部署版本：单文件二进制，服务器不需要装 Node |
 
----
+- **只支持虚拟局域网**：旧版「房主申请房间 → 朋友连公网端口」对 MC 联机实际不可用，已移除。
+- **两个端口**：`HTTP_PORT`（8080，API + 房主控制通道）与 `VPN_PORT`（HTTP_PORT + 1，VPN 帧）。
+- **API_KEY**：配置后 `/api/host`、`/api/rooms` 需要 `X-Api-Key`；不配置则对外开放（会打警告）。
+  客户端从 `-Dmclauncher.relayApiKey=xxx` 或环境变量 `MC_RELAY_API_KEY` 读取。
+- 部署（Go 版）：
+
+  ```bash
+  cd mc-relay-go
+  SERVER_IP=1.2.3.4 bash deploy-go.sh
+  ```
+
+  脚本会自动生成/沿用 `API_KEY` 写入服务器 `/opt/mc-relay/.env`，并安装 systemd 服务。
+- 回归测试：`cd mc-relay && node test-regression.js`，用 `RELAY_BIN=<二进制>` 可测 Go 版。
 
 ## 常见问题
 

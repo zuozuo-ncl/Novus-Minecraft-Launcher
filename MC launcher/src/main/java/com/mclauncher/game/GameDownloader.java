@@ -272,7 +272,8 @@ public class GameDownloader {
         int libraryFailed = 0;
         for (Future<Boolean> future : futures) {
             try {
-                if (!Boolean.TRUE.equals(future.get(2, TimeUnit.MINUTES))) {
+                // 单个文件最多等 10 分钟：慢速链路上的几 MB 文件，2 分钟不够
+                if (!Boolean.TRUE.equals(future.get(10, TimeUnit.MINUTES))) {
                     libraryFailed++;
                 }
             } catch (TimeoutException e) {
@@ -907,18 +908,27 @@ public class GameDownloader {
                     MirrorPool pool = MirrorPool.getInstance();
 
                     if (pool.isEnabled()) {
-                        MirrorPool.Mirror m = pool.next();
-                        if (m != null) {
+                        // 依次尝试可用镜像（next() 会把失败多的站排到后面），
+                        // 一个站失败就换下一个，而不是立刻掉到官方源等慢速链路
+                        for (int mi = 0; mi < 3 && (result == null || !result.isSuccess()); mi++) {
+                            MirrorPool.Mirror m = pool.next();
+                            if (m == null) {
+                                break;
+                            }
                             String mirrorUrl = pool.buildAssetUrl(m, hash);
-                            result = downloader.download(mirrorUrl, objectPath, null);
-                            if (result.isSuccess()) {
+                            if (mirrorUrl == null) {
+                                continue;
+                            }
+                            Downloader.DownloadResult r = downloader.download(mirrorUrl, objectPath, null);
+                            if (r != null && r.isSuccess()) {
                                 pool.reportSuccess(m);
-                            } else {
-                                pool.reportFailure(m);
-                                try {
-                                    Files.deleteIfExists(objectPath);
-                                } catch (IOException ignored) {
-                                }
+                                result = r;
+                                break;
+                            }
+                            pool.reportFailure(m);
+                            try {
+                                Files.deleteIfExists(objectPath);
+                            } catch (IOException ignored) {
                             }
                         }
                     }
@@ -973,7 +983,7 @@ public class GameDownloader {
         int notOk = 0;
         for (Future<Boolean> future : futures) {
             try {
-                if (!Boolean.TRUE.equals(future.get(3, TimeUnit.MINUTES))) {
+                if (!Boolean.TRUE.equals(future.get(10, TimeUnit.MINUTES))) {
                     notOk++;
                 }
             } catch (TimeoutException e) {
