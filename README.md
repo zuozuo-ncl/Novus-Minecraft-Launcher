@@ -171,12 +171,6 @@ node server.js          # 默认 5005
 - **两个端口**：`HTTP_PORT`（8080，API + 房主控制通道）与 `VPN_PORT`（HTTP_PORT + 1，VPN 帧）。
 - **API_KEY**：配置后 `/api/host`、`/api/rooms` 需要 `X-Api-Key`；不配置则对外开放（会打警告）。
   客户端从 `-Dmclauncher.relayApiKey=xxx` 或环境变量 `MC_RELAY_API_KEY` 读取。
-- 部署（Go 版）：
-
-  ```bash
-  cd mc-relay-go
-  SERVER_IP=1.2.3.4 bash deploy-go.sh
-  ```
 
   脚本会自动生成/沿用 `API_KEY` 写入服务器 `/opt/mc-relay/.env`，并安装 systemd 服务。
 - 回归测试：`cd mc-relay && node test-regression.js`，用 `RELAY_BIN=<二进制>` 可测 Go 版。
