@@ -57,21 +57,46 @@ public final class VpnSession implements AutoCloseable {
     private final LinkedBlockingQueue<String[]> controlOutbox = new LinkedBlockingQueue<>();
     private volatile OutputStream controlOut;
 
-    /** 房主：转发口 = 局域网端口 + 1 */
+    /** 房主：玩家要连的端口 = 局域网端口 + 1（本机 MC 自己占用局域网端口） */
     private volatile int gameForwardPort;
     /** 房主：本地玩家入口监听（玩家 MC 连进来时触发） */
     private java.net.ServerSocket forwardServer;
     private ExecutorService forwardPool;
     private final AtomicInteger forwardSeq = new AtomicInteger();
 
-    /** 房主：游戏进程侧接到的 VPN 连接 */
-    private final LinkedBlockingQueue<Socket> gameSockets = new LinkedBlockingQueue<>();
-    /** 房主：u 层网关收到的「发往本机 MC」的数据块，由 pairLoop 写进上面的连接 */
-    private final LinkedBlockingQueue<byte[]> gatewayQueue = new LinkedBlockingQueue<>();
+    /**
+     * 房主侧网关：玩家经 VPN 发往本机 MC 的 TCP 连接。
+     *
+     * 以前是「一个全局 pending 队列 + 一个全局 socket 队列」，按到达顺序配对，
+     * 结果多位玩家同时在线时 A 的数据会被写进 B 的 MC 连接。现在严格按四元组寻址：
+     *
+     *   key = 源虚拟IP:源端口  （玩家 MC 发起连接时的本地端口）
+     *
+     * 同一个玩家的新连接到来时才建立一条到 127.0.0.1:mcPort 的新连接并登记 key；
+     * 之后的字节只写回它自己那条。FIN 只结束属于自己的那条。
+     */
+    private static final class GatewayConn {
+        final String srcIp;
+        final int srcPort;
+        final Socket toMc;
+        final java.io.OutputStream out;
+        GatewayConn(String srcIp, int srcPort, Socket toMc) throws IOException {
+            this.srcIp = srcIp;
+            this.srcPort = srcPort;
+            this.toMc = toMc;
+            this.out = toMc.getOutputStream();
+        }
+        void close() {
+            try { toMc.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    private final java.util.concurrent.ConcurrentHashMap<String, GatewayConn> gatewayConns =
+            new java.util.concurrent.ConcurrentHashMap<>();
+    /** 本机 MC 监听的局域网端口（玩家要连的目标） */
+    private volatile int localMcPort;
     /** 虚拟地址 10.77.0.1 在房主隧道里的登记名：代表「本机 MC」这一端 */
     private static final String GATEWAY_UUID = "ncl-local-gateway";
-    /** 房主：等待接入的玩家 */
-    private final LinkedBlockingQueue<VpnTunnel.Peer> playerQueue = new LinkedBlockingQueue<>();
 
     /** 玩家：本地端口转发监听 */
     private ServerSocket peerServer;
@@ -191,6 +216,7 @@ public final class VpnSession implements AutoCloseable {
     private void startHostSide(String relayHost, int relayPort, String roomId, String roomToken,
                                String apiKey, int localMcPort) {
         this.gameForwardPort = playerPort(localMcPort);
+        this.localMcPort = localMcPort;
 
         // 1) 本地玩家入口
         try {
@@ -217,13 +243,8 @@ public final class VpnSession implements AutoCloseable {
         controlThread.setDaemon(true);
         controlThread.start();
 
-        // 2.5) 隧道把「发往 10.77.0.1」的包交给网关队列（写进本机 MC）
-        tunnel.setGatewaySink(this::enqueueGatewayPacket);
-
-        // 3) 配对线程
-        Thread pair = new Thread(this::pairLoop, "vpn-host-pair");
-        pair.setDaemon(true);
-        pair.start();
+        // 2.5) 隧道把「发往 10.77.0.1」的包交给网关（按四元组写进对应玩家的本机 MC 连接）
+        tunnel.setGatewaySink(this::routeGatewayPacket);
     }
 
     private void acceptEntrants() {
@@ -256,12 +277,13 @@ public final class VpnSession implements AutoCloseable {
             if (inviter != null) {
                 inviter.accept(peer);
             }
-            playerQueue.offer(peer);
             logger.info("房主侧有玩家客户端接入（来自 {}），已生成邀请 code={}，虚拟地址 {}",
                     local.getRemoteSocketAddress(), peer.code, peer.ip);
         } catch (Exception e) {
             logger.debug("玩家接入失败: {}", e.getMessage());
-            try { local.close(); } catch (IOException ignored) { }
+        } finally {
+            // 这条本地连接只用于触发「开一张邀请」，真正的数据走 VPN，留着就是句柄泄漏
+            closeQuietly(local);
         }
     }
 
@@ -382,82 +404,100 @@ public final class VpnSession implements AutoCloseable {
     }
 
     /**
-     * 房主：游戏进程转发器接住一个来自 VPN 的连接。
-     * 调用方必须已经把预读字节写回 sock。这里只负责配对。
+     * 房主：游戏进程转发器接住一个来自 VPN 的 TCP 连接。
+     *
+     * 调用方（GameLauncher）已经把本机 MC 写回来的字节回放给玩家，
+     * 并把这条连到本机 MC 的 socket 交过来。这里按「来源虚拟 IP + 源端口」
+     * 登记，之后该玩家发往 10.77.0.1 的字节只写进这一条。
+     *
+     * @param srcIp   玩家虚拟 IP（10.77.0.N）
+     * @param srcPort 玩家 MC 发起连接时使用的本地端口
+     * @param sock    已连到本机 MC 的 socket
      */
-    public void gamePeerReady(Socket sock) {
-        if (!"host".equals(role) || sock == null) {
+    public void registerGatewayConn(String srcIp, int srcPort, Socket sock) {
+        if (!"host".equals(role) || sock == null || srcIp == null) {
             if (sock != null) {
                 closeQuietly(sock);
             }
             return;
         }
-        VpnTunnel.Peer peer = playerQueue.poll();
-        if (peer == null) {
-            logger.warn("收到本机游戏进程的 VPN 接入，但没有等待中的玩家");
+        String key = gatewayKey(srcIp, srcPort);
+        GatewayConn conn;
+        try {
+            conn = new GatewayConn(srcIp, srcPort, sock);
+        } catch (IOException e) {
+            logger.debug("网关连接登记失败: {}", e.getMessage());
             closeQuietly(sock);
             return;
         }
-        // 这位玩家发往本机虚拟地址的包，由我们的后台线程取走并写到本机 MC
-        try {
-            tunnel.registerPeer(GATEWAY_UUID, VpnNetworkConfig.HOST_IP);
-        } catch (RuntimeException ignored) {
-            // registerPeer 失败不影响主流程
+        GatewayConn old = gatewayConns.put(key, conn);
+        if (old != null) {
+            // 同一四元组重新建立：旧的那条已经没用了
+            old.close();
         }
-        gameSockets.offer(sock);
-        logger.info("VPN 玩家 {} 已接到本机 MC", peer.ip);
+        logger.info("VPN 网关登记连接 {}:{} -> 本机 MC", srcIp, srcPort);
     }
 
-    /** 网关收到的 IP 包 → 只取 TCP 负载，交给 pairLoop 写进本机 MC 的连接 */
-    private void enqueueGatewayPacket(byte[] ip) {
+    private static String gatewayKey(String ip, int port) {
+        return ip + ":" + port;
+    }
+
+    /**
+     * 网关收到的 IP 包 → 按四元组写进对应的本机 MC 连接。
+     *
+     * 只处理 TCP（ip[9] == 6）。之前不看协议号，玩家的 UDP 探测包会被当成
+     * TCP 流写进 MC，直接把连接写坏。
+     */
+    private void routeGatewayPacket(byte[] ip) {
         try {
+            if (ip.length < 20 || ((ip[0] >> 4) & 0x0F) != 4) {
+                return;
+            }
+            if ((ip[9] & 0xFF) != 6) {          // 只接 TCP
+                return;
+            }
             int ihl = (ip[0] & 0x0f) * 4;
             int tot = ((ip[2] & 0xff) << 8) | (ip[3] & 0xff);
             int end = Math.min(tot, ip.length);
-            if (ihl + 20 > end) {
+            if (ihl + 20 > end) {               // TCP 头不完整
                 return;
             }
-            int flags = ip[ihl + 13] & 0xff;
-            if ((flags & 0x01) != 0) {
-                // FIN：本机 MC 那边也该结束了
-                Socket g = gameSockets.peek();
-                if (g != null) {
-                    try { g.shutdownOutput(); } catch (IOException ignored) { }
-                }
+            String srcIp = (ip[12] & 0xFF) + "." + (ip[13] & 0xFF) + "."
+                    + (ip[14] & 0xFF) + "." + (ip[15] & 0xFF);
+            int srcPort = ((ip[ihl] & 0xFF) << 8) | (ip[ihl + 1] & 0xFF);
+            int flags = ip[ihl + 13] & 0xFF;
+            GatewayConn conn = gatewayConns.get(gatewayKey(srcIp, srcPort));
+            if (conn == null) {
+                // 新连接：真实链路里它先经过 GameLauncher 的本地转发口登记，
+                // 这里只可能是还没登记完或玩家已断开 —— 丢弃，不乱写别人的流。
+                logger.debug("网关收到未登记连接的数据 {}:{}，丢弃", srcIp, srcPort);
                 return;
             }
+            boolean fin = (flags & 0x01) != 0;
+            boolean rst = (flags & 0x04) != 0;
             if (end > ihl + 20) {
-                gatewayQueue.offer(java.util.Arrays.copyOfRange(ip, ihl + 20, end));
+                conn.out.write(ip, ihl + 20, end - ihl - 20);
+                conn.out.flush();
             }
+            if (fin || rst) {
+                // 只关属于这个四元组的那条
+                gatewayConns.remove(gatewayKey(srcIp, srcPort), conn);
+                conn.close();
+            }
+        } catch (IOException e) {
+            logger.debug("网关写本机 MC 失败，关闭该连接: {}", e.getMessage());
         } catch (RuntimeException ignored) {
             // 畸形包直接丢弃
         }
     }
 
-    private void pairLoop() {
-        if (tunnel == null) {
-            return;
-        }
-        while (!closed) {
-            Socket game;
-            byte[] data;
-            try {
-                data = gatewayQueue.poll(200, TimeUnit.MILLISECONDS);
-                game = gameSockets.peek();
-                if (data == null || game == null) {
-                    continue;
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return;
-            }
-            try {
-                game.getOutputStream().write(data);
-                game.getOutputStream().flush();
-            } catch (IOException e) {
-                try { gameSockets.remove(game); } catch (RuntimeException ignored) { }
-                closeQuietly(game);
-            }
+    /** 关闭全部网关连接（会话结束时调用） */
+    private void closeAllGatewayConns() {
+        for (java.util.Iterator<java.util.Map.Entry<String, GatewayConn>> it =
+                 gatewayConns.entrySet().iterator(); it.hasNext(); ) {
+            java.util.Map.Entry<String, GatewayConn> e = it.next();
+            e.getValue().close();
+            it.remove();
         }
     }
 
@@ -485,19 +525,34 @@ public final class VpnSession implements AutoCloseable {
             if (s.startsWith("MCRELAY|")) {
                 s = s.substring("MCRELAY|".length());
             }
+            // 新版格式：端口#房间号#口令；三部分
+            // 兼容旧格式：host:port#room#code —— 新代码不会再产生，但本机旧 jar 还在跑
             String[] parts = s.split("#");
-            if (parts.length >= 2) {
-                code = parts[parts.length - 1].trim();
-            }
             String hp = parts[0].trim();
-            int colon = hp.lastIndexOf(':');
-            if (colon > 0) {
-                targetHost = hp.substring(0, colon).trim();
+            if (parts.length >= 3) {
+                // 三段：端口#房间号#口令
                 try {
-                    targetPort = Integer.parseInt(hp.substring(colon + 1).trim());
+                    int p = Integer.parseInt(hp);
+                    if (p > 0 && p <= 65535) {
+                        // 确实是「端口」，覆盖默认
+                        targetPort = p;
+                        code = parts[parts.length - 1].trim();
+                    }
                 } catch (NumberFormatException ignored) {
-                    // 保持默认
+                    // 不是数字：按旧格式「host:port」处理
+                    int colon = hp.lastIndexOf(':');
+                    if (colon > 0) {
+                        targetHost = hp.substring(0, colon).trim();
+                        try {
+                            targetPort = Integer.parseInt(hp.substring(colon + 1).trim());
+                        } catch (NumberFormatException ignored2) {
+                            // 保持默认
+                        }
+                    }
+                    code = parts[parts.length - 1].trim();
                 }
+            } else if (parts.length == 2) {
+                code = parts[parts.length - 1].trim();
             }
         }
         if (code.isEmpty()) {
@@ -715,6 +770,7 @@ public final class VpnSession implements AutoCloseable {
     @Override
     public void close() {
         closed = true;
+        closeAllGatewayConns();
         ACTIVE.compareAndSet(this, null);
         try {
             if (forwardServer != null) {

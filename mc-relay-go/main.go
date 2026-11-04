@@ -24,9 +24,8 @@ const (
 
 	// VPN 相关
 	maxVPNPeers      = 10
-	maxFrame         = 64 * 1024
+	maxFrame         = 65535 + 64   // 与客户端 MAX_FRAME 一致（IPv4 报文最大 65535 + uuid 前缀）
 	maxUUID          = 40
-	maxBuffered      = 8 * 1024 * 1024
 	joinTokenTTL     = 120 * time.Second
 	maxIPPacket      = 65535 + 64
 	vpnIdleTimeout   = 60 * time.Second

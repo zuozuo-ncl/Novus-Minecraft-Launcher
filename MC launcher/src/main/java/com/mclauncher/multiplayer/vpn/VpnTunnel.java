@@ -119,7 +119,7 @@ public final class VpnTunnel implements AutoCloseable {
             return;
         }
         // 同一 UUID 换了 IP 时先清掉旧映射
-        ipToUuid.values().removeIf(peerUuid::equals);
+        ipToUuid.values().removeIf(vip -> peerUuid.equals(vip));
         ipToUuid.put(virtualIp, peerUuid);
         knownUuids.add(peerUuid);
         logger.info("登记玩家 {} -> {}", peerUuid, virtualIp);
@@ -127,7 +127,7 @@ public final class VpnTunnel implements AutoCloseable {
 
     public void unregisterPeer(String peerUuid) {
         knownUuids.remove(peerUuid);
-        ipToUuid.values().removeIf(peerUuid::equals);
+        ipToUuid.values().removeIf(vip -> peerUuid.equals(vip));
     }
 
     /** 房主记住一个待接入玩家的口令 -> 玩家地址 */

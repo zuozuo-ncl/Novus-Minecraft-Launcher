@@ -138,8 +138,14 @@ func handleHost(c *tcpConn, br *bufio.Reader, r *room, token string) {
 	}
 
 	c.label = "房主 " + r.id
+	// 房主方向只有玩家上行帧，长时间没数据是正常的；改为不设空闲超时
+	c.disableIdle()
 	defer func() {
-		if !v.touchHost(c) { // 只有当前生效的那条断开才回收
+		// 只有当前生效的那条断开才回收房间，不调用 touchHost（关闭时无意义）
+		v.mu.Lock()
+		isCur := v.host == c && !v.host.isClosed()
+		v.mu.Unlock()
+		if !isCur {
 			return
 		}
 		logf("VPN 房间 %s 房主断开，关闭所有玩家连接", r.id)
@@ -292,15 +298,19 @@ func issueJoinToken(r *room, id int64) {
 		return
 	}
 
+	// 整个签发过程在一把锁里完成，并且只在最外层释放一次：
+	// 之前同时用了 defer Unlock 和中途手动 Unlock，正常路径会解锁两次，
+	// Go 会直接 fatal（"unlock of unlocked mutex"）把整个中继带走。
 	v.mu.Lock()
-	defer v.mu.Unlock()
+	v.pruneJoinTokens(time.Now())
 	if len(v.peers)+len(v.joinTokens) >= maxVPNPeers {
+		v.mu.Unlock()
 		sendControlJSON(r, map[string]any{"type": "vpn-token-error", "id": id, "error": "VPN 房间已满"})
 		return
 	}
-	v.pruneJoinTokens(time.Now())
 	ip := v.allocSeat()
 	if ip == "" {
+		v.mu.Unlock()
 		sendControlJSON(r, map[string]any{"type": "vpn-token-error", "id": id, "error": "没有空闲的虚拟地址"})
 		return
 	}
@@ -310,8 +320,10 @@ func issueJoinToken(r *room, id int64) {
 	uuid := "p" + randHex(8)
 	exp := time.Now().Add(joinTokenTTL)
 	v.joinCodes[code] = &codeRec{token: token, uuid: uuid, ip: ip, expiresAt: exp}
+	v.mu.Unlock()
 
 	logf("VPN 房间 %s 为玩家 #%d 分配地址 %s", r.id, id, ip)
+	// 释放 v.mu 之后再碰控制通道，避免和 room.mu 形成锁顺序反转
 	sendControlJSON(r, map[string]any{
 		"type": "vpn-token", "id": id, "token": token, "uuid": uuid, "ip": ip, "code": code,
 	})

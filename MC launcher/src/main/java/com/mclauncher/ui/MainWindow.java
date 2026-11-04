@@ -92,7 +92,17 @@ public class MainWindow {
         // 早期 min(980x640) 与默认(1024x768)太接近，几乎没有缩小余地。
         stage.setMinWidth(760);
         stage.setMinHeight(520);
-        stage.setOnCloseRequest(e -> onClose());
+        stage.setOnCloseRequest(e -> {
+            // 游戏在跑时不能直接放行关闭：确认框是异步的内嵌面板，
+            // 处理函数一返回 Stage 就关了，用户根本来不及选。
+            // 所以先吃掉这次事件，等用户在面板里做出选择再手动 stage.close()。
+            if (gameLauncher != null && gameLauncher.isRunning() && !closingConfirmed) {
+                e.consume();
+                askCloseWithGameRunning();
+                return;
+            }
+            onClose();
+        });
 
         stage.show();
 
@@ -168,7 +178,8 @@ public class MainWindow {
 
         // VPN 联机：游戏进程接到的 VPN 玩家连接交给当前 VPN 会话配对
         // 游戏进程接住 VPN 玩家后：把预读字节写回连接，再交给当前 VPN 房主会话配对
-        gameLauncher.setPlayerJoinConsumer((id, head, peerSock) -> {
+        gameLauncher.setPlayerJoinConsumer((id, head, peerSock, srcIp, srcPort) -> {
+            // peerSock 已经连到本机 MC；先把 MC 握手/login 的预读字节写回去
             try {
                 if (head != null && head.length > 0) {
                     peerSock.getOutputStream().write(head);
@@ -183,7 +194,9 @@ public class MainWindow {
                 try { peerSock.close(); } catch (java.io.IOException ignored) { }
                 return;
             }
-            host.gamePeerReady(peerSock);
+            // 按「来源虚拟 IP:源端口」登记：之后这位玩家发往 10.77.0.1 的字节
+            // 只会写进这一条连接，不会和其他玩家的流混在一起
+            host.registerGatewayConn(srcIp, srcPort, peerSock);
         });
         gameLauncher.setVpnForwardingGate(() ->
                 com.mclauncher.multiplayer.vpn.VpnSession.activeHost() != null);
@@ -560,7 +573,45 @@ public class MainWindow {
         }
     }
 
+    /** 关闭流程只跑一次（确认框回调里会再次调用 onClose） */
+    private volatile boolean closingConfirmed;
+    private boolean closeAsked;
+
+    /**
+     * 游戏运行中点击关闭：弹确认面板，用户选择后再真正关闭。
+     *
+     * 面板回调里不能直接 stage.close() 再走一遍 setOnCloseRequest —— 那时
+     * closingConfirmed 已置位，事件会被放行。这里统一收尾，避免重复执行 shutdown。
+     */
+    private void askCloseWithGameRunning() {
+        if (closeAsked) {
+            return;
+        }
+        closeAsked = true;
+        com.mclauncher.ui.component.MessageDialog.confirmOrCancel(
+                modalHost,
+                L.t("s_cf5e5123a5"),
+                L.t("s_4860bb67bd"),
+                L.t("s_a70be374e3"),
+                L.t("s_f20a6f7516"),
+                L.t("s_d19a71eebb"),
+                () -> {
+                    // 用户选择关闭：先结束游戏，再按已确认的路径关窗口
+                    gameLauncher.killProcess();
+                    onClose();          // 直接走收尾（不再经 close 事件，避免二次询问）
+                    stage.close();      // closingConfirmed 已置位，事件处理会直接放行
+                },
+                () -> {
+                    // 取消：什么都不做，窗口保持打开
+                    closeAsked = false;
+                });
+    }
+
     private void onClose() {
+        if (closingConfirmed) {
+            return;
+        }
+        closingConfirmed = true;
         logger.info("启动器关闭中...");
         // 联机隧道要在退出时主动断开，否则中转要等心跳超时（45 秒）才回收房间
         com.mclauncher.ui.page.Page mp = pages.get("multiplayer");
@@ -568,18 +619,6 @@ public class MainWindow {
             m.shutdown();
         }
         config.forceSave();
-
-        if (gameLauncher.isRunning()) {
-            com.mclauncher.ui.component.MessageDialog.confirmOrCancel(
-                    modalHost,
-                    L.t("s_cf5e5123a5"),
-                    L.t("s_4860bb67bd"),
-                    L.t("s_a70be374e3"),
-                    L.t("s_f20a6f7516"),
-                    L.t("s_d19a71eebb"),
-                    () -> gameLauncher.killProcess(),
-                    null);
-        }
 
         try {
             bootstrap.shutdown();

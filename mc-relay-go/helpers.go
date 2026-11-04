@@ -45,6 +45,9 @@ func corsOrigin(req *http.Request) string {
 	if o != "" && cfg.CORSOrigs[o] {
 		return o
 	}
+	if envStr("CORS_ALLOW_ALL", "") == "1" {
+		return "*"
+	}
 	return ""
 }
 

@@ -65,10 +65,14 @@ public class GameLauncher {
      */
     private PlayerJoinHandler playerJoinConsumer;
 
-    /** 玩家接入回调：玩家编号、已读到的原始字节、本机连接 */
+    /**
+     * 玩家接入回调：玩家编号、已读到的原始字节、本机连接、来源虚拟 IP、来源端口。
+     *
+     * 来源 IP/端口是 VPN 网关按四元组分流用的：同一个玩家的后续字节只能写回它自己的连接。
+     */
     @FunctionalInterface
     public interface PlayerJoinHandler {
-        void onPlayerJoin(int id, byte[] head, java.net.Socket sock);
+        void onPlayerJoin(int id, byte[] head, java.net.Socket sock, String srcIp, int srcPort);
     }
 
     /**
@@ -1631,17 +1635,10 @@ public class GameLauncher {
             return;
         }
         gamePort = Math.max(0, Math.min(gamePort, 65535));
-        // 已经开着 VPN 房主时，优先用 VPN 会话里「实际空出来的端口」；
-        // 否则用局域网端口（MC 自己占着时下面 bind 会失败，只记日志）
-        try {
-            com.mclauncher.multiplayer.vpn.VpnSession host =
-                    com.mclauncher.multiplayer.vpn.VpnSession.activeHost();
-            if (host != null && host.forwardGatewayPort() > 0) {
-                gamePort = host.forwardGatewayPort();
-            }
-        } catch (Throwable ignored) {
-            // 不影响正常启动
-        }
+        // 注意：这里**不能**拿 VpnSession.forwardGatewayPort() 来覆盖。
+        // 那个端口是 VpnSession 自己已经 bind 的「玩家入口」，再 bind 一次必然
+        // EADDRINUSE，结果是先开房间再启动游戏时 VPN 转发永远起不来。
+        // gamePort 始终是「玩家要连的端口」= 局域网端口 + 1。
         try {
             java.net.ServerSocket ss = new java.net.ServerSocket();
             ss.setReuseAddress(true);
@@ -1665,34 +1662,33 @@ public class GameLauncher {
                 java.net.Socket client = ss.accept();
                 client.setSoTimeout(3000);
                 client.setTcpNoDelay(true);
-                // 先读「已经到达的字节」：MC 握手 + login 可能在转发建立前就到了
-                byte[] head = readAvailable(client);
-                client.setSoTimeout(0);
                 if (vpnForwardingGate != null && !vpnForwardingGate.getAsBoolean()) {
+                    // 没开 VPN 房主就别读也别转，直接断开
                     logger.info("收到 VPN 转发但本机未开 VPN 房主，已断开");
                     client.close();
                     continue;
                 }
+                int port = client.getPort();
+                java.net.InetAddress addr = client.getInetAddress();
+                String srcIp = addr != null ? addr.getHostAddress() : "";
+                if (srcIp.startsWith("::ffff:")) {
+                    srcIp = srcIp.substring(7);
+                }
+                // 先读「已经到达的字节」：MC 握手 + login 可能在转发建立前就到了
+                byte[] head = readAvailable(client);
+                client.setSoTimeout(0);
                 if (playerJoinConsumer == null) {
                     client.close();
                     continue;
                 }
                 int id = ++vpnPeerSeq;
-                java.util.concurrent.ExecutorService pool;
-                synchronized (this) {
-                    if (vpnForwardPool == null || vpnForwardPool.isShutdown()) {
-                        vpnForwardPool = java.util.concurrent.Executors.newCachedThreadPool(r -> {
-                            Thread th = new Thread(r, "vpn-peer-" + id);
-                            th.setDaemon(true);
-                            return th;
-                        });
-                    }
-                    pool = vpnForwardPool;
-                }
                 final java.net.Socket sock = client;
                 final byte[] headCopy = head;
-                pool.submit(() -> playerJoinConsumer.onPlayerJoin(id, headCopy, sock));
-                logger.info("VPN 玩家 #{} 接入本地转发（预读 {} 字节）", id, head.length);
+                final String ipCopy = srcIp;
+                submitVpnPeer(() -> playerJoinConsumer.onPlayerJoin(id, headCopy, sock,
+                        ipCopy, port));
+                logger.info("VPN 玩家 #{} 接入本地转发（来自 {}:{}，预读 {} 字节）",
+                        id, ipCopy, port, head.length);
             } catch (java.net.SocketTimeoutException ignored) {
                 // 只是用来定期检查是否该退出
             } catch (Exception e) {
@@ -1706,6 +1702,22 @@ public class GameLauncher {
                 return;
             }
         }
+    }
+
+    /** 把玩家接入交给线程池（池在 stopVpnForwarder 时重建，避免句柄泄漏累积） */
+    private void submitVpnPeer(Runnable task) {
+        java.util.concurrent.ExecutorService pool;
+        synchronized (this) {
+            if (vpnForwardPool == null || vpnForwardPool.isShutdown()) {
+                vpnForwardPool = java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                    Thread th = new Thread(r, "vpn-peer");
+                    th.setDaemon(true);
+                    return th;
+                });
+            }
+            pool = vpnForwardPool;
+        }
+        pool.submit(task);
     }
 
     /** 读出 socket 里当前已经到达的字节（最多等约 80ms 不再有新数据） */
@@ -1741,6 +1753,16 @@ public class GameLauncher {
                 ss.close();
             } catch (IOException ignored) {
             }
+        }
+        // 每次退出游戏都要把转发线程池停掉：里面的任务持有到本机 MC 的 socket，
+        // 不关的话下次启动会继续复用旧池，句柄越积越多
+        java.util.concurrent.ExecutorService pool;
+        synchronized (this) {
+            pool = vpnForwardPool;
+            vpnForwardPool = null;
+        }
+        if (pool != null) {
+            pool.shutdownNow();
         }
     }
 

@@ -24,9 +24,10 @@ type tcpConn struct {
 	writeMu sync.Mutex
 	closed  bool
 	closeMu sync.Mutex
-	idleMu  sync.Mutex
-	idleT   *time.Timer
-	label   string
+	idleMu       sync.Mutex
+	idleT        *time.Timer
+	idleDisabled bool
+	label        string
 }
 
 func newTCPConn(c net.Conn, label string) *tcpConn {
@@ -56,10 +57,14 @@ func (c *tcpConn) closeQuietly() {
 	_ = c.Conn.Close()
 }
 
-// touch 重置空闲看门狗：超过 vpnIdleTimeout 没有任何帧就断开
+// touch 重置空闲看门狗：超过 vpnIdleTimeout 没有任何帧就断开。
+// 房主连接不用这个（见 disableIdle）：它本来就可能长时间收不到上行帧。
 func (c *tcpConn) touch() {
 	c.idleMu.Lock()
 	defer c.idleMu.Unlock()
+	if c.idleDisabled {
+		return
+	}
 	if c.idleT != nil {
 		c.idleT.Stop()
 	}
@@ -67,6 +72,21 @@ func (c *tcpConn) touch() {
 		logf("VPN 连接空闲超时，断开: %s", c.label)
 		c.closeQuietly()
 	})
+}
+
+// disableIdle 关掉空闲看门狗。
+//
+// 房主的连接只有「玩家 → 房主」一个方向有数据，所有玩家都静止（挂机、看菜单）
+// 时房主 60 秒收不到任何帧是正常现象，不能据此判定它已死 —— 那样会把整间房的人踢掉。
+// 房主是否存活交给 TCP keepalive 判定。
+func (c *tcpConn) disableIdle() {
+	c.idleMu.Lock()
+	defer c.idleMu.Unlock()
+	c.idleDisabled = true
+	if c.idleT != nil {
+		c.idleT.Stop()
+		c.idleT = nil
+	}
 }
 
 func (c *tcpConn) stopIdle() {
@@ -159,13 +179,12 @@ func relayFrames(c *tcpConn, br *bufio.Reader, onFrame func([]byte) error) {
 	}
 }
 
-// backpressure：对端不读时不要无限积压
+// writeWithBackpressure：对端不读时不要无限积压。
+//
+// 判断依据是对端还没收走的字节数（内核发送缓冲），而不是单帧长度 ——
+// 之前的检查比较的是「单帧长度」，永远不可能触发，等于没做；现在按积压判断。
 func writeWithBackpressure(c *tcpConn, payload []byte) bool {
 	if c == nil || c.isClosed() {
-		return false
-	}
-	if len(payload) > maxBuffered {
-		c.closeQuietly()
 		return false
 	}
 	if err := writeFrame(c, payload); err != nil {

@@ -345,11 +345,11 @@ public class MultiplayerPage implements Page {
                     vpn = s;
                 }
                 final String room = s.roomId();
-                final String baseInvite = buildInvite(s.address(), playerPort, room, "");
+                final String baseInvite = buildInvite(playerPort, room, "");
                 // 房主自己在 MC 里点「对局域网开放」并让客户端连进来时，
                 // 中继会分配一个新的口令，界面随之更新
                 s.setPeerListener(peer -> {
-                    currentInvite = buildInvite(s.address(), playerPort, room, peer.code);
+                    currentInvite = buildInvite(playerPort, room, peer.code);
                     refreshInvite();
                 });
                 Platform.runLater(() -> {
@@ -482,9 +482,14 @@ public class MultiplayerPage implements Page {
         return k == null ? "" : k.trim();
     }
 
-    /** 邀请串：MCRELAY|地址:端口#房间号#口令 —— 朋友整串粘贴即可 */
-    private static String buildInvite(String host, int port, String room, String code) {
-        return "MCRELAY|" + host + ":" + port + "#" + room + "#" + (code == null ? "" : code);
+    /**
+     * 邀请串：<code>MCRELAY|&lt;端口&gt;#&lt;房间号&gt;#&lt;口令&gt;</code>
+     *
+     * 朋友在 MC 里一律连 localhost:&lt;端口&gt;（玩家的启动器会把它转进 VPN），
+     * 所以这里只需要带端口，不需要房主的任何公网地址。
+     */
+    private static String buildInvite(int port, String room, String code) {
+        return "MCRELAY|" + port + "#" + (room == null ? "" : room) + "#" + (code == null ? "" : code);
     }
 
     private void refreshInvite() {
