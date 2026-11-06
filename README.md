@@ -10,12 +10,13 @@ share/
 ├── MC launcher/           启动器主体（Java 17 / JavaFX）
 ├── MC launcher-Server/    版本服务器（Node.js / Express），提供版本列表与哈希
 ├── ncl-download web/      下载站点 + 静态文件服务（Node.js / Express）
-└── mc-relay/              联机中继服务（Node.js，TCP / HTTP）
+├── mc-relay-go/              联机中继服务（Node.js，TCP / HTTP）
+└── mc-relay/              联机中继服务（Node.js，TCP / HTTP，已废弃）
 ```
 
 ## 快速开始
 - 进入https://ncl.cc.cd
-- 下载 NCL.exe 或 NCL_x86.exe。
+- 下载 NCL.zip 或 NCL_x86.zip。
 - 双击运行，等待 Java 环境自动配置完成。
 - 开始游戏。
 
@@ -158,13 +159,12 @@ node server.js          # 默认 5005
 
 ---
 
-## mc-relay —— 联机中继（虚拟局域网）
+## mc-relay-go —— 联机中继（虚拟局域网）
 
 两种实现，协议完全一致，择一部署即可（客户端不用区分）：
 
 | 目录 | 实现 | 说明 |
 |---|---|---|
-| `mc-relay/` | Node.js | 原版，保留作为参考与回退；`_backup-node-js/` 是切换前的完整快照 |
 | `mc-relay-go/` | Go | 当前部署版本：单文件二进制，服务器不需要装 Node |
 
 - **只支持虚拟局域网**：旧版「房主申请房间 → 朋友连公网端口」对 MC 联机实际不可用，已移除。
@@ -185,9 +185,6 @@ node server.js          # 默认 5005
 
 **启动器双击后界面不出现**
 引导器判定失败后会询问是否回退。先看 `%APPDATA%\NCL_Launcher\bootstrap.log` 与同目录下的 `launcher-stdout.log`。
-
-**浏览器下载 exe 时提示"不常下载的文件"**
-未签名的程序与新建域名的正常现象。可提供 SHA-256 供用户校验，或对 exe 做代码签名来消除 SmartScreen 警告。
 
 ---
 
