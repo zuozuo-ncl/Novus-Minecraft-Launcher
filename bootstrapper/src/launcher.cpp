@@ -1006,9 +1006,37 @@ StepResult Launch(const std::wstring& javawPath,
     }
 
     // 组装命令行（每个路径加引号，防止空格问题）
+    //
+    // 中继的 API 密钥：从引导器进程的环境变量 MC_RELAY_API_KEY 读取，
+    // 转成 -D 参数传给启动器。双击启动的快捷方式、其它程序拉起引导器时
+    // 都可以直接在环境里设置，不需要额外带命令行参数。
     std::wstring cmd = L"\"";
     cmd += javawPath;
-    cmd += L"\" -jar \"";
+    cmd += L"\"";
+    {
+        DWORD n = GetEnvironmentVariableW(L"MC_RELAY_API_KEY", nullptr, 0);
+        if (n > 0 && n < 4096) {
+            std::wstring key(n, L'\0');
+            DWORD got = GetEnvironmentVariableW(L"MC_RELAY_API_KEY", &key[0], n);
+            key.resize(got);
+            const wchar_t* kSpace = L" \t\r\n";
+            size_t b = key.find_first_not_of(kSpace);
+            if (b == std::wstring::npos) {
+                key.clear();
+            } else {
+                key = key.substr(b, key.find_last_not_of(kSpace) - b + 1);
+            }
+            // -D 参数在 CreateProcess 的命令行里会按空白切分，含空白就宁可不传
+            if (!key.empty() && key.find_first_of(kSpace) == std::wstring::npos
+                    && key.find(L'"') == std::wstring::npos) {
+                cmd += L" -Dmclauncher.relayApiKey=";
+                cmd += key;
+            } else if (!key.empty()) {
+                Log::Write(L"\u73af\u5883\u53d8\u91cf MC_RELAY_API_KEY \u542b\u7a7a\u767d\u6216\u5f15\u53f7\uff0c\u5df2\u5ffd\u7565");
+            }
+        }
+    }
+    cmd += L" -jar \"";
     cmd += jarPath;
     cmd += L"\"";
 

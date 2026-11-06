@@ -191,7 +191,10 @@ public final class VpnSession implements AutoCloseable {
             String[] roomToken = requestRoom(relayHost, relayPort, roomName, apiKey);
             String uuid = "h" + UUID.randomUUID().toString().replace("-", "").substring(0, 15);
 
-            t = new VpnTunnel(relayHost, relayPort, roomToken[0], roomToken[1], Role.HOST, uuid, ad);
+            // VPN 帧握手优先走中继的 HTTP 端口（中继会把 MCRELAY 首行分流给 VPN 处理），
+            // 这样经穿透映射时只需暴露一个端口；老版本中继走不通时退回「端口 + 1」
+            t = new VpnTunnel(relayHost, vpnHandshakePort(relayHost, relayPort, Role.HOST,
+                    roomToken[0], roomToken[1]), roomToken[0], roomToken[1], Role.HOST, uuid, ad);
             t.start();
 
             VpnSession s = new VpnSession(ad, t, "host", VpnNetworkConfig.HOST_IP);
@@ -570,7 +573,8 @@ public final class VpnSession implements AutoCloseable {
             VpnNetworkConfig.setAddress(adapterName, own[1]);
             VpnNetworkConfig.routeSubnetToAdapter(adapterName);
 
-            t = new VpnTunnel(relayHost, relayPort, roomId, own[0], Role.PEER, own[2], ad);
+            t = new VpnTunnel(relayHost, vpnHandshakePort(relayHost, relayPort, Role.PEER,
+                    roomId, own[0]), roomId, own[0], Role.PEER, own[2], ad);
             t.start();
 
             VpnSession s = new VpnSession(ad, t, "peer", targetHost);
@@ -718,6 +722,37 @@ public final class VpnSession implements AutoCloseable {
         try { s.close(); } catch (IOException ignored) { }
     }
 
+    /**
+     * 选出 VPN 帧握手要连的端口。
+     *
+     * 先试中继的 HTTP 端口本身：新版中继在 HTTP 端口上会把 MCRELAY 首行分流给 VPN 处理，
+     * 这样只映射一个对外端口就能联机。老版本中继只认「HTTP 端口 + 1」，
+     * 新版连不通时退回过去，以免影响自建的老部署。
+     */
+    private static int vpnHandshakePort(String host, int port, Role role, String room, String token) {
+        try (Socket probe = new Socket()) {
+            probe.connect(new InetSocketAddress(host, port), 5000);
+            probe.setTcpNoDelay(true);
+            String type = role == Role.HOST ? "vpn-host" : "vpn-join";
+            String line = "MCRELAY{\"type\":\"" + type + "\",\"room\":\"" + room
+                    + "\",\"token\":\"" + token + "\"}\n";
+            probe.getOutputStream().write(line.getBytes(StandardCharsets.UTF_8));
+            probe.getOutputStream().flush();
+            probe.setSoTimeout(3000);
+            java.io.InputStream in = probe.getInputStream();
+            int first = in.read();
+            if (first == '{') {
+                // 中继已经在处理这条 VPN 连接（不读它自己的消息，直接断开重连）
+                logger.info("中继 {}:{} 的 HTTP 端口接受 VPN 握手", host, port);
+                return port;
+            }
+        } catch (IOException e) {
+            logger.debug("检测中继 HTTP 端口的 VPN 分流失败（{}:{}）：{}", host, port, e.getMessage());
+        }
+        logger.info("中继 {}:{} 不支持在 HTTP 端口上做 VPN 握手，退回端口 {}", host, port, port + 1);
+        return port + 1;
+    }
+
     // ---------------------------------------------------------------
     private static String[] requestRoom(String host, int port, String name, String apiKey)
             throws IOException {
@@ -740,10 +775,19 @@ public final class VpnSession implements AutoCloseable {
                 o.write(b);
             }
             int code = c.getResponseCode();
-            String resp = new String((code >= 400 ? c.getErrorStream() : c.getInputStream()).readAllBytes(),
-                    StandardCharsets.UTF_8);
+            java.io.InputStream bodyStream = code >= 400 ? c.getErrorStream() : c.getInputStream();
+            String resp = bodyStream == null ? "" : new String(bodyStream.readAllBytes(), StandardCharsets.UTF_8);
             if (code != 200) {
-                throw new IOException("申请房间失败 HTTP " + code + ": " + resp);
+                // 中继没回响应体时（例如穿透层直接断开），rc 里是空串，不要抛 NPE
+                String hint = resp.isBlank() ? "（无响应内容）" : resp;
+                if (code == 401 || code == 403) {
+                    hint += " —— API_KEY 与中继不一致（用 -Dmclauncher.relayApiKey=... 指定中继的密钥）";
+                }
+                throw new IOException("申请房间失败 HTTP " + code + ": " + hint);
+            }
+            if (resp.isBlank()) {
+                throw new IOException("中继返回了空响应（HTTP 200 但没有内容），请检查中继地址 "
+                        + host + ":" + port + " 是否正确、端口是否映射到中继的 8080");
             }
             com.google.gson.JsonObject o;
             try {

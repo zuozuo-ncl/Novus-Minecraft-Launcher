@@ -36,13 +36,13 @@ func handleVPNSession(c *tcpConn, br *bufio.Reader, hs vpnHandshake) {
 	// 房间号会被拼进日志：先校验
 	if !roomIDRe.MatchString(hs.Room) {
 		logf("VPN 连接失败：房间号格式不正确")
-		c.closeQuietly()
+		c.replyAndClose("房间号格式不正确")
 		return
 	}
 	r := getRoom(hs.Room)
 	if r == nil {
 		logf("VPN 连接失败：房间不存在 %s", hs.Room)
-		c.closeQuietly()
+		c.replyAndClose("房间不存在或已关闭")
 		return
 	}
 
@@ -63,8 +63,7 @@ func handleClaim(c *tcpConn, r *room, code string) {
 	r.mu.Unlock()
 
 	if v == nil || !v.hasHost() {
-		_, _ = c.Write(append([]byte(`{"error":"房主尚未建立 VPN 通道"}`), '\n'))
-		c.closeQuietly()
+		c.replyAndClose("房主尚未建立 VPN 通道")
 		return
 	}
 
@@ -74,14 +73,12 @@ func handleClaim(c *tcpConn, r *room, code string) {
 	if !ok {
 		v.mu.Unlock()
 		logf("VPN 房间 %s 口令无效，拒绝加入", r.id)
-		_, _ = c.Write(append([]byte(`{"error":"口令无效或已过期，请让房主重新发送邀请"}`), '\n'))
-		c.closeQuietly()
+		c.replyAndClose("口令无效或已过期，请让房主重新发送邀请")
 		return
 	}
 	if len(v.peers)+len(v.joinTokens) >= maxVPNPeers {
 		v.mu.Unlock()
-		_, _ = c.Write(append([]byte(`{"error":"VPN 房间已满"}`), '\n'))
-		c.closeQuietly()
+		c.replyAndClose("VPN 房间已满")
 		return
 	}
 	delete(v.joinCodes, code) // 一票一次
@@ -92,7 +89,7 @@ func handleClaim(c *tcpConn, r *room, code string) {
 	resp := map[string]string{"token": rec.token, "uuid": rec.uuid, "ip": rec.ip}
 	b, _ := json.Marshal(resp)
 	_, _ = c.Write(append(b, '\n'))
-	c.closeQuietly()
+	c.replyAndClose("")
 }
 
 func (v *vpnRoom) hasHost() bool {
@@ -105,7 +102,7 @@ func (v *vpnRoom) hasHost() bool {
 func handleHost(c *tcpConn, br *bufio.Reader, r *room, token string) {
 	if token == "" || r.token != token {
 		logf("VPN 房主鉴权失败 %s", r.id)
-		c.closeQuietly()
+		c.replyAndClose("房主鉴权失败：房间号或 token 不正确")
 		return
 	}
 
@@ -194,7 +191,7 @@ func handleHost(c *tcpConn, br *bufio.Reader, r *room, token string) {
 // handleJoin 玩家 VPN 长连接
 func handleJoin(c *tcpConn, br *bufio.Reader, r *room, hs vpnHandshake) {
 	if hs.UUID == "" || !uuidRe.MatchString(hs.UUID) {
-		c.closeQuietly()
+		c.replyAndClose("缺少或非法的玩家 uuid")
 		return
 	}
 
@@ -203,12 +200,12 @@ func handleJoin(c *tcpConn, br *bufio.Reader, r *room, hs vpnHandshake) {
 	r.mu.Unlock()
 	if v == nil || !v.hasHost() {
 		logf("VPN 房间 %s 房主未连接，拒绝加入", r.id)
-		c.closeQuietly()
+		c.replyAndClose("房主尚未建立 VPN 通道")
 		return
 	}
 	if hs.Token == "" {
 		logf("VPN 房间 %s 玩家缺少 join token，拒绝", r.id)
-		c.closeQuietly()
+		c.replyAndClose("缺少 join token")
 		return
 	}
 
@@ -218,19 +215,19 @@ func handleJoin(c *tcpConn, br *bufio.Reader, r *room, hs vpnHandshake) {
 	if !ok || rec.uuid != hs.UUID {
 		v.mu.Unlock()
 		logf("VPN 房间 %s join token 无效，拒绝", r.id)
-		c.closeQuietly()
+		c.replyAndClose("join token 无效或已过期")
 		return
 	}
 	if len(v.peers) >= maxVPNPeers {
 		v.mu.Unlock()
 		logf("VPN 房间 %s 已满，拒绝", r.id)
-		c.closeQuietly()
+		c.replyAndClose("VPN 房间已满")
 		return
 	}
 	if _, dup := v.peers[hs.UUID]; dup {
 		v.mu.Unlock()
 		logf("VPN 房间 %s uuid 重复在线，拒绝", r.id)
-		c.closeQuietly()
+		c.replyAndClose("该玩家已在房间内")
 		return
 	}
 	delete(v.joinTokens, hs.Token)
@@ -342,7 +339,7 @@ func sendControlJSON(r *room, v any) bool {
 func attachControl(c *tcpConn, br *bufio.Reader, hs vpnHandshake) {
 	r := getRoom(hs.Room)
 	if r == nil || r.token != hs.Token {
-		c.closeQuietly()
+		c.replyAndClose("房间不存在或 token 无效")
 		return
 	}
 

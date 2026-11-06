@@ -471,12 +471,10 @@ DWORD WINAPI BootstrapThread(LPVOID /*param*/) {
                     chosenJar = jarPath;
                 }
 
-                DWORD childPid = lastChildPid;  // 继承上一轮的 PID，防止回退后找不到
-                lastChildPid = 0;
                 HANDLE childProcess = nullptr;
 
                 r = Launcher::Launch(javawPath, jarPath, paths.appData, nullptr,
-                                     &childPid, &childProcess);
+                                     &lastChildPid, &childProcess);
 
                 if (r != StepResult::Ok) {
                     g_outcome.result = r;
@@ -508,7 +506,7 @@ DWORD WINAPI BootstrapThread(LPVOID /*param*/) {
                 // 只有进程真的崩了 / 自己退了却没出界面，才需要询问用户。
                 std::wstring why;
                 Launcher::WaitResult wr = Launcher::WaitForStartupEx(
-                        paths.appData, childProcess, childPid,
+                        paths.appData, childProcess, lastChildPid,
                         STARTUP_FIRST_CHECK_MS, STARTUP_POLL_MS,
                         &g_cancelled, &why);
 
@@ -518,7 +516,7 @@ DWORD WINAPI BootstrapThread(LPVOID /*param*/) {
                     // 否则进程卡死时引导器永远不退出、也看不到任何提示
                     while (wr == Launcher::WaitResult::TimedOut) {
                         wr = Launcher::WaitForStartupEx(
-                                paths.appData, childProcess, childPid,
+                                paths.appData, childProcess, lastChildPid,
                                 STARTUP_MORE_WAIT_MS,
                                 STARTUP_POLL_MS, &g_cancelled, &why);
                     }
@@ -596,8 +594,8 @@ DWORD WINAPI BootstrapThread(LPVOID /*param*/) {
 
                 // 关闭坏版本残留的进程，避免干扰下次启动
                 // （之前我们已经关掉句柄，现在用 PID 重新打开再终止）
-                if (childPid != 0) {
-                    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, childPid);
+                if (lastChildPid != 0) {
+                    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, lastChildPid);
                     if (h) {
                         DWORD ec = 0;
                         if (GetExitCodeProcess(h, &ec) && ec == STILL_ACTIVE) {
@@ -607,7 +605,7 @@ DWORD WINAPI BootstrapThread(LPVOID /*param*/) {
                         }
                         CloseHandle(h);
                     } else {
-                        Log::WriteF(L"无法重新打开进程 PID=%lu（可能已退出）", childPid);
+                        Log::WriteF(L"无法重新打开进程 PID=%lu（可能已退出）", lastChildPid);
                     }
                 }
 
