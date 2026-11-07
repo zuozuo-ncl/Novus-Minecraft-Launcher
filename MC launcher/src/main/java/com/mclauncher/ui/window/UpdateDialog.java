@@ -19,17 +19,8 @@ import java.util.function.Consumer;
 
 /**
  * 更新提示面板（内嵌弹窗）
- *
- * 用法：
- *   - 主页启动时自动检测，有新版就弹出此面板询问
- *   - 设置页「检查更新」也复用它
- *
- * 下载的新版 jar 会放到「启动器数据目录」（%APPDATA%\NCL_Launcher），
- * **旧版本保留不删**。
- *
  * 下载完成后会询问是否**立即重启**到新版本 —— 因为当前进程没法把自己
- * 换成新 jar（见 {@link com.mclauncher.utils.RestartUtils}），
- * 不重启的话要等用户下次手动打开才会生效。
+ * 用法：
  */
 public class UpdateDialog {
 
@@ -44,9 +35,7 @@ public class UpdateDialog {
 
     /**
      * 可选的「游戏是否在运行」查询
-     *
      * 游戏在跑时不能重启：新进程起来后当前进程退出，
-     * 会把游戏进程一起带走（游戏是本进程的子进程）。
      */
     private java.util.function.BooleanSupplier gameRunningCheck;
 
@@ -68,12 +57,7 @@ public class UpdateDialog {
         this.statusConsumer = statusConsumer;
     }
 
-    /**
-     * 设置重启前的收尾动作（可选）
-     *
-     * 重启会直接结束当前进程，此回调用来把配置落盘、
-     * 避免用户刚改的设置丢掉。
-     */
+    /** 设置重启前的收尾动作（可选） */
     public UpdateDialog setBeforeRestart(Runnable r) {
         this.beforeRestart = r;
         return this;
@@ -268,13 +252,6 @@ public class UpdateDialog {
                     downloadedJar = jar;
 
                     // 登记到版本清单：新版本尚未验证可用（usable=false），
-                    // 要等它真正跑起来、界面显示成功后才由 LauncherApp 标为可用。
-                    // 这样「下载完但一启动就崩」的坏版本能被自动回退掉。
-                    // installVersion 已经用 recordDownloaded 登记好（usable=false，
-                    // 并把本版本哈希放进 pendingTrusted）；这里只需 save() 落盘，
-                    // 它会把清单、selected.json、trusted-hashes.json 一并写出
-                    // installVersion 已把「清单 + 信任表」写进 manifest 实例；
-                    // save() 才会真正落盘（并把 pendingTrusted 刷进 trusted-hashes.json）
                     try {
                         manifest.save();
                     } catch (Exception e2) {
@@ -321,14 +298,7 @@ public class UpdateDialog {
 
     /**
      * 点击「立即重启」
-     *
-     * 流程：
-     *   1. 定位新 jar（优先用刚下载的那个；拿不到就从数据目录挑最新的）
-     *   2. 拉起新进程
-     *   3. 成功 -> 收尾后退出当前进程；失败 -> 就地提示，**不退出**
-     *
      * 第 3 步的失败分支很关键：如果新进程起不来又退了当前进程，
-     * 用户手上就什么都没有了。宁可让他手动重启。
      */
     private void onRestartClicked() {
         // 游戏在跑时不能直接退出 —— 会把游戏进程一起带走

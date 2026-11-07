@@ -9,13 +9,7 @@ import java.util.Map;
 
 /**
  * 版本信息数据模型
- * 对应 Minecraft 版本的 JSON 结构
- *
- * 设计说明：
- * arguments 字段在真实版本 JSON 里是对象（{"game":[...], "jvm":[...]}），
  * 而且更关键的是 —— 下载和启动流程其实只需要「原样保留」它，
- * 不需要解析成强类型。因此这里直接保存为 JsonObject，
- * 避免 Gson 因结构变化而抛 JsonSyntaxException。
  */
 public class VersionInfo {
 
@@ -175,11 +169,7 @@ public class VersionInfo {
 
         /**
          * 获取库文件的 Maven 路径
-         *
-         * 优先使用 downloads.artifact.path（官方 JSON 里就是这个），
          * 否则根据 Maven 坐标 name 推导。
-         *
-         * 路径来自远程 JSON，视为不可信：非法路径返回 null，调用方必须跳过。
          */
         public String getMavenPath() {
             String path = null;
@@ -193,12 +183,7 @@ public class VersionInfo {
             return safeRelativePath(path);
         }
 
-        /**
-         * 校验并返回安全的相对路径（拒绝绝对路径、反斜杠、":" 盘符与 ".." 段）。
-         *
-         * 版本 JSON 来自远程服务，artifact.path / name 被直接拼到本地
-         * libraries/ 或 versions/ 目录下；不校验就存在目录穿越风险。
-         */
+        /** 校验并返回安全的相对路径（拒绝绝对路径、反斜杠、":" 盘符与 ".." 段）。 */
         public static String safeRelativePath(String path) {
             if (path == null || path.isBlank()) {
                 return null;

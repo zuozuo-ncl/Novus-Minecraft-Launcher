@@ -60,10 +60,12 @@ func sniffAndDispatchWithLine(c *tcpConn, p *peekResult, isVPNSide bool) {
 			return
 		}
 		attachControl(c, p.rest, hs)
-	case "vpn-host", "vpn-join", "vpn-claim":
-		// HTTP 端口与 VPN 帧端口都接受这两类握手：经内网穿透部署时只需要
-		// 对外暴露一个端口（客户端会优先连 HTTP 端口）。attachControl 已经
-		// 按「HTTP 端口 -> VPN 端口」的顺序拒绝hello，这里不再区分来源。
+	case "vpn-host", "vpn-join", "vpn-claim", "vpn-probe":
+		// HTTP 端口与 VPN 帧端口都接受这几类握手：经内网穿透部署时只需要
+		// 对外暴露一个端口（客户端会优先连 HTTP 端口）。vpn-probe 只回一行
+		// pong 即关（见 handleVPNSession），不会接管任何连接。
+		// 以前这条注释写的是 attachControl 按端口顺序拒绝 hello —— 实际并不存在
+		// 这样的逻辑，hello 在 isVPNSide 时直接断开，见上面的 case "hello"。
 		handleVPNSession(c, p.rest, hs)
 	default:
 		c.closeQuietly()

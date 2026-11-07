@@ -17,14 +17,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.concurrent.*;
 
-/**
- * 微软 OAuth 2.0 登录
- * 使用设备代码流（Device Code Flow）
- *
- * 参考文档:
- * - https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code
- * - https://wiki.vg/Microsoft_Authentication_Scheme
- */
+/** 微软 OAuth 2.0 登录 */
 public class MicrosoftAuth {
 
     private static final Logger logger = LoggerFactory.getLogger(MicrosoftAuth.class);
@@ -93,13 +86,7 @@ public class MicrosoftAuth {
         return deviceCode;
     }
 
-    /**
-     * 步骤 2：轮询等待用户完成授权
-     *
-     * @param deviceCode 设备代码响应
-     * @param callback   状态回调（用于 UI 显示）
-     * @return 微软 Token 响应
-     */
+    /** 步骤 2：轮询等待用户完成授权 */
     public MicrosoftTokenResponse pollForToken(DeviceCodeResponse deviceCode, StatusCallback callback)
             throws IOException, InterruptedException {
 
@@ -169,8 +156,6 @@ public class MicrosoftAuth {
 
     /**
      * 从 HTTP 错误消息中取出 OAuth 错误码。
-     *
-     * 消息形如 {@code 表单提交失败: 400 - <url> - {"error":"authorization_pending",...}}。
      * 优先解析末尾的 JSON 的 error 字段；不是合法 JSON 时再退回关键字匹配。
      */
     static String extractOAuthError(String message) {

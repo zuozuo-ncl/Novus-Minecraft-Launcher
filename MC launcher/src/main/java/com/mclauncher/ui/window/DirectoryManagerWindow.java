@@ -24,20 +24,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
-/**
- * 目录管理窗口
- *
- * 功能：
- * - 列出所有已添加的游戏根目录
- * - 添加新目录（DirectoryChooser）/ 删除 / 重命名
- * - 单选设置「当前激活目录」
- * - 展示每个目录对应的 .mc_launcher 数据文件夹状态与占用
- *
- * 概念说明（避免混淆）：
- * 用户选的是「根目录」（如 D:\Minecraft），
- * 游戏数据实际落在「根目录/.mc_launcher」（隐藏文件夹）里。
- * 界面会同时展示这两层，让用户清楚知道文件去哪了。
- */
+/** 目录管理窗口 */
 public class DirectoryManagerWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(DirectoryManagerWindow.class);
@@ -257,12 +244,7 @@ public class DirectoryManagerWindow {
         return row;
     }
 
-    /**
-     * 更新「游戏文件位置」状态行
-     *
-     * 展示的是游戏文件实际存在的目录（即用户选的根目录本身），
-     * 以及启动器辅助数据文件夹（.mc_launcher）的状态。
-     */
+    /** 更新「游戏文件位置」状态行 */
     private void updateStorageLabel(Label label, GameDirectory d) {
         Path root = d.getRootPath();
 
@@ -353,13 +335,7 @@ public class DirectoryManagerWindow {
         refreshList();
     }
 
-    /**
-     * 准备该目录的启动器辅助数据文件夹
-     *
-     * 只创建 .mc_launcher（隐藏）用于放缓存与日志。
-     * 游戏自己的子目录（versions/libraries/assets/mods/saves）
-     * 会在实际下载或启动时按需创建在**根目录**下。
-     */
+    /** 准备该目录的启动器辅助数据文件夹 */
     private void prepareStorage(GameDirectory d) throws Exception {
         Path meta = d.getLauncherDataPath();
 

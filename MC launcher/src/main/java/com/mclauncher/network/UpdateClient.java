@@ -16,19 +16,7 @@ import java.nio.file.Paths;
 
 /**
  * 版本更新客户端
- *
- * 对接服务端的版本管理接口：
- *   POST /api/check-update   { "currentVersion": "1.0.2" }
- *     -> { "updateAvailable": true, "latestVersion": "1.1.0", "allVersions": [...] }
- *     -> { "updateAvailable": false, "latestVersion": null, "currentVersion": "1.0.2" }
- *
- *   GET  /api/versions       -> { "latest": "1.1.0", "versions": [...] }
- *
- * jar 下载地址：
- *   https://3984235.xyz/mc-launcher-<版本>.jar
- *
  * 注意：下载下来的新版本会放到「启动器数据目录」，与旧版本共存，
- * 由 C++ 引导器在启动时挑选最新版本运行 —— 这样用户可以随时回滚。
  */
 public class UpdateClient {
 
@@ -36,21 +24,16 @@ public class UpdateClient {
 
     /**
      * 版本管理服务地址列表（按优先级排列）
-     *
-     * 第一个是主力，后续是备用。任一地址请求失败会自动尝试下一个，
-     * 全部失败才向上抛异常。
-     *
      * 为什么要多个：主接口曾多次因中转服务不稳定而连不上，
-     * 导致「检查更新」和「首次下载」失败。多一个备用地址能显著提高可用性。
      */
     private static final String[] API_BASES = {
             "https://version-interface.us.ci",                    // 主力
             // 备用地址必须也是 HTTPS：明文 HTTP 后备会让中间人直接决定
             // 「下载哪个版本、期望是什么哈希」（哈希又只认 HTTPS 来源），
             // 等同把更新通道的信任根交给了网络路径上的任何人。
-            // 旧的 http://frp.xueyuanpang.dpdns.org:37666 已删除；
-            // 需要新的备用时请部署 HTTPS（反代/证书）后加在这里。
-            "https://frp.xueyuanpang.dpdns.org",                  // 备用（HTTPS）
+            // 备用走 frp 隧道：隧道出口是 HTTPS（TLS 在隧道边缘终结，
+            // 映射到本服务的 5003 端口），因此同样满足「必须 HTTPS」的要求。
+            "https://api.rxfmprc89.nyat.app:57294",               // 备用（HTTPS，frp 隧道）
     };
 
     /** 当前实际生效的地址（首次成功后记住，避免每次都从头试） */
@@ -59,12 +42,7 @@ public class UpdateClient {
     /** 最近一次 checkUpdate 的完整结果（含版本列表与哈希），供事务写清单/信任表用 */
     private volatile UpdateInfo lastUpdate;
 
-    /**
-     * jar 下载地址前缀
-     *
-     * 用 COS 绑定的自有域名，而不是默认的 *.myqcloud.com
-     * （默认域名在部分网络下被限速，且有被回收的风险）。
-     */
+    /** jar 下载地址前缀 */
     private static final String JAR_PREFIX = "https://3984235.xyz/";
 
     private final HttpClientUtils http;
@@ -105,12 +83,7 @@ public class UpdateClient {
 
     // ==================== 接口 ====================
 
-    /**
-     * 检查更新
-     *
-     * @param currentVersion 当前启动器版本号（如 "1.0.2"）
-     * @return 更新信息；网络或解析失败时抛 IOException
-     */
+    /** 检查更新 */
     public UpdateInfo checkUpdate(String currentVersion) throws IOException {
         JsonObject body = new JsonObject();
         body.addProperty("currentVersion", currentVersion);
@@ -299,11 +272,7 @@ public class UpdateClient {
 
     /**
      * 没有随接口下发的哈希时，去文件服务器取同目录的 .sha256。
-     *
      * 注意这是「弱兜底」：文件和哈希同域，只能防止下载过程损坏/被临时替换，
-     * 真正的信任根仍然是引导器内置表 / 本机信任表。
-     *
-     * @return 64 位十六进制哈希；取不到返回 null
      */
     public String fetchOfficialSha256(String version) {
         if (version == null || !version.matches("[0-9.\\-]+")) {
@@ -322,32 +291,13 @@ public class UpdateClient {
         return null;
     }
 
-    /**
-     * 下载指定版本的 jar 到数据目录（保留旧版本，不删除）
-     *
-     * @param appDataDir 启动器数据目录
-     * @param version    版本号
-     * @param listener   进度回调（可为 null）
-     * @return 下载后的文件路径
-     */
+    /** 下载指定版本的 jar 到数据目录（保留旧版本，不删除） */
     public Path downloadJar(Path appDataDir, String version, Downloader.DownloadListener listener)
             throws IOException {
         return downloadJar(appDataDir, version, null, listener);
     }
 
-    /**
-     * 安装新版本（事务式）
-     *
-     * 顺序：① 下载并校验 → ② 把清单、信任表两处登记合并成一次写入
-     * （VersionManifest.save 里会一并写 selected.json / trusted-hashes.json）。
-     *
-     * 中途断电的最坏结果只是「新版本还没登记」，旧版本仍然可用；
-     * 不会出现「清单指向新版本、信任表却没写」导致引导器拒绝启动的僵局 ——
-     * 没登记的版本会被引导器视为「无锚点」放行一次，Java 起来后自己补登。
-     *
-     * @param expectSha256 服务器公布的哈希（来自 HTTPS 接口），可为 null
-     * @param trustedExtra 额外需要登记的 版本->哈希（本次更新涉及的版本）
-     */
+    /** 安装新版本（事务式） */
     public Path installVersion(Path appDataDir, String version, String expectSha256,
                                com.mclauncher.update.VersionManifest manifest,
                                java.util.Map<String, String> trustedExtra,
@@ -375,13 +325,7 @@ public class UpdateClient {
         return jar;
     }
 
-    /**
-     * 下载指定版本的 jar，可选地校验 SHA-256
-     *
-     * @param expectedSha256 服务器给出的官方哈希（来自 HTTPS 接口），可为 null。
-     *                       null 时不校验 —— 由调用方决定是否放行（引导器侧有信任锚）。
-     * @throws IOException 下载失败或哈希不符（文件已被删除）
-     */
+    /** 下载指定版本的 jar，可选地校验 SHA-256 */
     public Path downloadJar(Path appDataDir, String version, String expectedSha256,
                             Downloader.DownloadListener listener)
             throws IOException {

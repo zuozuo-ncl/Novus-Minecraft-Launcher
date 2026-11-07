@@ -14,16 +14,7 @@ import java.util.regex.Pattern;
 
 /**
  * 用 netsh / route 给 Wintun 网卡配 IP 与路由。
- *
  * <h3>为什么必须配路由</h3>
- * Wintun 只负责「把 IP 包交给你」。如果没有一条指向这块网卡的路由，
- * Windows 根本不会把发往虚拟 IP 的包交给它 —— 实测：即使网卡上有
- * 10.77.x.1/24，ping 同网段的另一端也不会产生任何 IPv4 包，网卡上
- * 只有 IPv6 组播噪声（Windows 不会为「同网段但 ARP 不可达」的目标走网卡）。
- *
- * 所以对虚拟网段加一条路由，出口指向虚拟网卡本身；网段内的地址就都会经过我们。
- *
- * <p>需要管理员权限。
  */
 public final class VpnNetworkConfig {
 
@@ -68,12 +59,7 @@ public final class VpnNetworkConfig {
     // ---------------------------------------------------------------
     //  路由
     // ---------------------------------------------------------------
-    /**
-     * 让整个虚拟网段走指定网卡。
-     *
-     * 用接口索引 + 网关 0.0.0.0（on-link）：这是 Windows 上把流量导向
-     * 指定网卡最可靠的方式；用「网关 = 本机地址」会报「错误的接口索引」。
-     */
+    /** 让整个虚拟网段走指定网卡。 */
     public static void routeSubnetToAdapter(String adapterName) throws IOException {
         int idx = interfaceIndex(adapterName);
         if (idx <= 0) {

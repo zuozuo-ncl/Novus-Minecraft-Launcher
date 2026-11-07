@@ -52,12 +52,7 @@ public class LauncherApp extends Application {
         }
     }
 
-    /**
-     * 展示回退提示
-     *
-     * 用内嵌弹窗而非系统对话框，与启动器整体风格一致。
-     * 延迟一拍调用：主窗口刚 show 出来，立即叠弹窗可能被抢焦点。
-     */
+    /** 展示回退提示 */
     private void showRollbackNotice(String text) {
         javafx.application.Platform.runLater(() -> {
             try {
@@ -119,13 +114,7 @@ public class LauncherApp extends Application {
         checkPreviousAttempt();
     }
 
-    /**
-     * 检查上次启动是否异常中断，必要时回退并提示
-     *
-     * 判定逻辑见 {@link VersionManifest#hasUnfinishedAttempt()}：
-     * 上次启动时写了「正在试用」标记，但界面没能显示出来（没走到
-     * markGood），所以标记还留着 —— 说明那个版本有问题。
-     */
+    /** 检查上次启动是否异常中断，必要时回退并提示 */
     private void checkPreviousAttempt() {
         try {
             VersionManifest m = VersionManifest.load();

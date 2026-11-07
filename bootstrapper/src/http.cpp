@@ -1,15 +1,5 @@
 // ============================================================================
-//  http.cpp —— 基于 WinHTTP 的下载实现
-//
-//  为什么用 WinHTTP 而不是 WinINet：
-//    - WinHTTP 不依赖浏览器的代理/缓存设置，行为更可预期
-//    - 原生支持 https，无需额外库
-//
-//  关键点：
-//    - 分块写入磁盘（64KB 一块），大文件不会撑爆内存
-//    - 支持进度回调
-//    - 支持取消
-// ============================================================================
+// 为什么用 WinHTTP 而不是 WinINet：
 #include "common.h"
 
 #include <winhttp.h>
@@ -27,20 +17,7 @@ constexpr DWORD kSendTimeoutMs    = 30000;
 constexpr DWORD kRecvTimeoutMs    = 60000;
 
 // ---------------------------------------------------------------------------
-//  请求拦截钩子（仅诊断，**只在定义了 MCLAUNCHER_DEBUG_MOCK 的调试构建里存在**）
-//
-//  历史问题：这个钩子在正式版里也会生效，任何本机进程只要写一个用户级
-//  环境变量 MCLAUNCHER_HTTP_MOCK=...，就能把 JRE / jar / .sha256 的下载
-//  全部改写到攻击者主机，而 JRE 包解压后会被直接执行 —— 等于一条静默的
-//  RCE 入口。诊断钩子只能存在于调试构建：
-//
-//      cmake -B build -DMCLAUNCHER_DEBUG_MOCK=ON
-//
-//  用法与 Charles/Fiddler 的 Map Local 类似：
-//    MCLAUNCHER_HTTP_MOCK = <前缀>=<目标前缀>[;<前缀>=<目标前缀>...]
-//  例：把 CDN 上的 jar 请求改写到 COS 源站，判断问题是否出在 CDN：
-//    set MCLAUNCHER_HTTP_MOCK=https://3984235.xyz/=https://xxx.cos.ap-guangzhou.myqcloud.com/
-// ---------------------------------------------------------------------------
+// 历史问题：这个钩子在正式版里也会生效，任何本机进程只要写一个用户级
 std::wstring ApplyMockRedirect(const std::wstring& url) {
 #if !defined(MCLAUNCHER_DEBUG_MOCK)
     (void)url;
@@ -352,13 +329,6 @@ StepResult SendAndReceive(const std::wstring& url,
 } // namespace
 
 // ============================================================================
-//  Http 实现
-// ============================================================================
-// ---------------------------------------------------------------------------
-// 构造进度显示的文本
-//
-//  形如：mc-launcher-1.0.1.jar    12.3 / 45.2 MB   2.4 MB/s   剩余 14 秒
-// ---------------------------------------------------------------------------
 std::wstring BuildProgressText(const std::wstring& name,
                                uint64_t done, uint64_t total, double bps) {
     auto human = [](uint64_t bytes) -> std::wstring {
@@ -410,11 +380,6 @@ std::wstring BuildProgressText(const std::wstring& name,
 
 namespace Http {
 
-// ---------------------------------------------------------------------------
-//  最近一次网络失败的详情
-//
-//  故意不做同步：它只用于出错后拼提示文案，最坏情况是读到另一路请求的
-//  描述，不影响任何正确性判断，加锁反而是负担。
 // ---------------------------------------------------------------------------
 static std::wstring g_lastNetworkDetail;
 
@@ -756,14 +721,7 @@ StepResult DownloadFile(const std::wstring& url,
     }
 
     // ---- 内容校验 ----
-    //
-    // 有些镜像在文件不存在时会返回 **HTTP 200 + 一个 HTML 错误页**，
-    // 而不是 404。如果只看状态码，就会把 HTML 当成 JRE 压缩包下载下来，
-    // 后续解压时报出令人困惑的错误。
-    //
     // 这里检查文件头：ZIP 文件必须以 'P','K' 开头（PKZIP 签名）。
-    // 如果目标本身不是 ZIP（例如下载 jar 时），这个检查也成立 ——
-    // 因为 jar 同样是 ZIP 格式。
     {
         HANDLE hCheck = CreateFileW(partPath.c_str(), GENERIC_READ,
                                     FILE_SHARE_READ, nullptr, OPEN_EXISTING,

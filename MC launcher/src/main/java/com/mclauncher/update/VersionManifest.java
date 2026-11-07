@@ -19,38 +19,7 @@ import java.util.List;
 
 /**
  * 版本清单（%APPDATA%\NCL_Launcher\versions.json）
- *
- * 记录数据目录里所有**已下载的 jar 版本**及其可用性，用于「新版出问题就回退」。
- *
- * 文件长这样：
- * <pre>
- * {
- *   "current": "1.0.2",                 // 当前选定的版本（引导器据此启动）
- *   "lastGood": "1.0.0",                // 最近一次确认可用的版本
- *   "pendingSince": 1792837710062,      // 正在试用 current 的起始时刻（毫秒），0 表示无试用中
- *   "versions": [
- *     { "version": "1.0.2", "file": "mc-launcher-1.0.2.jar",
- *       "usable": true, "failures": 0, "lastGoodAt": 1792837710062 },
- *     { "version": "1.0.0", "file": "mc-launcher-1.0.0.jar",
- *       "usable": true, "failures": 0, "lastGoodAt": 1792837000000 }
- *   ]
- * }
- * </pre>
- *
- * 三个字段的配合方式（自愈回退的核心）：
- *
- *   1. 启动时调用 {@link #beginAttempt(String)}：
- *      把 pendingSince 置为当前时刻，表示「正在试用这个版本」。
- *   2. 界面成功显示后调用 {@link #markGood()}：
- *      清掉 pendingSince，把该版本标为 usable，并更新 lastGood。
- *   3. 下次启动时若发现 pendingSince 不为 0（说明上次没走到第 2 步就挂了），
- *      说明那个版本有问题 -> {@link #rollback()} 挑下面一个可用版本。
- *
- * 这样「点开就崩」「界面起不来」都能自动回退，而正常的启动-关闭不会误判，
  * 因为第 2 步在窗口显示时就已经执行了。
- *
- * 写盘要点：先写临时文件再原子替换。清单损坏会导致无法判断该启动哪个版本，
- * 直接写目标文件的话，中途断电就会留下半个 JSON。
  */
 public class VersionManifest {
 
@@ -59,15 +28,7 @@ public class VersionManifest {
     /** 清单文件名（与 jar 同目录） */
     public static final String FILE_NAME = "versions.json";
 
-    /**
-     * 启动成功标记文件名
-     *
-     * Java 启动器在**主窗口显示成功后**写这个文件，内容是本次启动的进程号。
-     * C++ 引导器启动 jar 后读它，用来判断「jar 是不是真的正常起来了」——
-     * 只看进程存活是不够的，一个白屏卡死的进程也算"活着"。
-     *
-     * 内容格式（一行文本）：<pid>
-     */
+    /** 启动成功标记文件名 */
     public static final String STARTUP_OK_NAME = "startup.ok";
 
     private static final Gson GSON = new GsonBuilder()
@@ -115,10 +76,7 @@ public class VersionManifest {
 
     /**
      * 清单所在目录：与 jar 同一个地方
-     *
-     * 这里刻意**不**复用 ConfigManager —— 那份配置在游戏目录的 .mc_launcher 下，
      * 而版本清单必须跟着 jar 走（jar 在 %APPDATA%\NCL_Launcher），
-     * 两者是不同的概念，不能混在一起。
      */
     public static Path manifestDir() {
         String appData = System.getenv("APPDATA");
@@ -178,24 +136,13 @@ public class VersionManifest {
     /** 暂存本次需要同步登记到信任表的 版本->哈希（save 时一并写入） */
     private transient java.util.Map<String, String> pendingTrusted = new java.util.LinkedHashMap<>();
 
-    /**
-     * 记录「刚下载的版本」（事务写的入口）
-     *
-     * 清单本身的改动和信任表 / selected.json 的改动会在下一次 {@link #save()}
-     * 里分别原子写入：两份文件只能做到「各自完整」，做不到跨文件原子；
-     * 但任何中间状态都不会让引导器拒绝启动（未登记的版本按「无锚点」放行）。
-     */
+    /** 记录「刚下载的版本」（事务写的入口） */
     public synchronized void recordDownloaded(String version, String fileName,
                                               java.util.Map<String, String> trustedHashes) {
         recordDownloaded(version, fileName, trustedHashes, null);
     }
 
-    /**
-     * 记录刚下载的版本，并可指定「current」（待验证的新版本不覆盖当前版本）。
-     *
-     * UpdateDialog 以前自己 load 一份实例再 save，pendingTrusted 永远为空，
-     * 导致下载的新版本从不写入信任表。统一走这里。
-     */
+    /** 记录刚下载的版本，并可指定「current」（待验证的新版本不覆盖当前版本）。 */
     public synchronized void recordDownloaded(String version, String fileName,
                                               java.util.Map<String, String> trustedHashes,
                                               String keepCurrent) {
@@ -317,12 +264,7 @@ public class VersionManifest {
 
     // ---------- 状态机 ----------
 
-    /**
-     * 开始试用某个版本（启动时调用）
-     *
-     * 若该版本已在试用中则不重置计时 —— 避免「用户重启了几次」
-     * 被误当成「每次都是新试用」而永远找不到失败。
-     */
+    /** 开始试用某个版本（启动时调用） */
     public synchronized void beginAttempt(String version) {
         Entry e = findOrCreate(version, "mc-launcher-" + version + ".jar");
 
@@ -337,13 +279,7 @@ public class VersionManifest {
         save();
     }
 
-    /**
-     * 标记当前版本可用（界面成功显示后调用）
-     *
-     * 清掉试用标记，更新 usable / lastGood。
-     *
-     * @return 是否发生了变化（true 表示值得写盘）
-     */
+    /** 标记当前版本可用（界面成功显示后调用） */
     public synchronized boolean markGood() {
         if (current == null) {
             return false;
@@ -380,24 +316,12 @@ public class VersionManifest {
         return changed;
     }
 
-    /**
-     * 上次启动是否「没走完就挂了」
-     *
-     * 判定依据：pendingSince 不为 0。markGood() 成功后会把它清零，
-     * 所以残留非零值就意味着上次卡在试用阶段。
-     */
+    /** 上次启动是否「没走完就挂了」 */
     public boolean hasUnfinishedAttempt() {
         return pendingSince != 0;
     }
 
-    /**
-     * 回退：把出问题的当前版本标记为不可用，挑下一个可用版本
-     *
-     * 选择规则：在**已标记 usable** 的版本里取版本号最高的那个；
-     * 若当前版本正好是最高的，则取次高的（即真正往后退一格）。
-     *
-     * @return 回退到的新版本号；没有可回退的版本时返回 null
-     */
+    /** 回退：把出问题的当前版本标记为不可用，挑下一个可用版本 */
     public synchronized String rollback() {
         String failed = current;
 
@@ -412,19 +336,7 @@ public class VersionManifest {
         pendingSince = 0;
 
         // 挑选回退目标，分两轮：
-        //
-        //   第一轮：找**比失败版本低**的可用版本 —— 这是常规回退路径，
-        //          符合「从高到低退」的直觉。
-        //   第二轮：若没有更低的，退而接受**任意**已知可用的版本
-        //          （除了刚失败的这个）。
-        //
         // 为什么需要第二轮：失败的版本不一定是最高版本。比如用户手动
-        // 拷进了 9.9.8 并让它变成 current，而清单里只有 9.9.9 验证过可用，
-        // 此时 9.9.8 崩了却"没有更低的可用版本" —— 若不接受更高的候选，
-        // 就会误判成「无可回退」，让用户卡在坏版本上。
-        //
-        // 接受更高的候选不会造成死循环：那个版本被标记过 usable，
-        // 是实际跑起来过的；而失败的这一个是新的、没验证过的。
         List<Entry> candidates = usableDesc();
 
         String target = null;
@@ -534,14 +446,7 @@ public class VersionManifest {
 
     // ---------- 启动成功标记 ----------
 
-    /**
-     * 写「启动成功」标记（在主窗口显示成功后调用）
-     *
-     * 内容是当前进程号，供引导器核对「这个标记是不是本次启动写的」。
-     * 不带 PID 的话，指向上一次启动的陈旧标记会让引导器误判成功。
-     *
-     * 失败不抛出：标记写不了只影响引导器的等待判断，不影响启动器本身。
-     */
+    /** 写「启动成功」标记（在主窗口显示成功后调用） */
     public static void writeStartupOk() {
         Path p = manifestDir().resolve(STARTUP_OK_NAME);
         try {
@@ -554,12 +459,7 @@ public class VersionManifest {
         }
     }
 
-    /**
-     * 清除启动成功标记
-     *
-     * 退出时调用。不删也能工作（引导器会核对 PID），
-     * 但清掉能避免旧标记干扰下一次的判断。
-     */
+    /** 清除启动成功标记 */
     public static void clearStartupOk() {
         try {
             Files.deleteIfExists(manifestDir().resolve(STARTUP_OK_NAME));

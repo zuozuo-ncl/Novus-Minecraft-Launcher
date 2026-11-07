@@ -66,12 +66,7 @@ public class GameDownloader {
         this.callback = callback;
     }
 
-    /**
-     * 下载游戏版本
-     *
-     * @param versionId 版本 ID
-     * @return 是否成功
-     */
+    /** 下载游戏版本 */
     public boolean downloadVersion(String versionId) {
         cancelled = false;
         downloadFailed = false;
@@ -218,6 +213,14 @@ public class GameDownloader {
                 });
 
         if (!result.isSuccess()) {
+            // 删掉失败留下的残缺文件：否则写完后开始、中途失败的 .jar 会被
+            // 下一次「文件已存在且非空 → 跳过下载」当成完整文件，游戏启动时
+            // 才会报出莫名其妙的 ClassFormatError。
+            try {
+                Files.deleteIfExists(jarPath);
+            } catch (IOException ignored) {
+                // 删不掉也不影响本次报错
+            }
             throw new IOException("客户端 JAR 下载失败: " + result.getErrorMessage());
         }
 
@@ -255,13 +258,8 @@ public class GameDownloader {
         logger.info("需要下载 {} 个库文件", applicableLibraries.size());
 
         // 并发下载库文件。
-        //
         // 线程池可以开得比较大，因为真正限制并发的是 DownloadThrottle：
-        // - 它按 host 独立限流（每站初始 4，上限 16）
-        // - 全局总上限 64
-        // 文件会被轮询分配到 5 个高校镜像站，因此总并发能叠加到几十，
-        // 而每个站实际承受的并发仍在其安全范围内。
-        ExecutorService executor = Executors.newFixedThreadPool(32);
+        ExecutorService executor = ioPool();
         List<Future<Boolean>> futures = new ArrayList<>();
 
         for (VersionInfo.Library library : applicableLibraries) {
@@ -287,8 +285,6 @@ public class GameDownloader {
             }
         }
 
-        executor.shutdown();
-
         logger.info("库文件下载完成: {}/{}", completedFiles.get(), totalFiles.get());
 
         // 库文件 / natives 缺失时游戏必然启动失败（UnsatisfiedLinkError），
@@ -296,16 +292,7 @@ public class GameDownloader {
         downloadFailed = failedFiles.get() > 0 || libraryFailed > 0;
     }
 
-    /**
-     * 下载 natives JAR（downloads.classifiers 里的独立文件）。
-     *
-     * 旧版（≈1.13 以前，LWJGL 2）的 natives 不在主 JAR 里，而是
-     * downloads.classifiers["natives-windows"]（以及 -64）。以前只下载主 JAR，
-     * extractNatives 找不到文件就静默跳过，启动后 lwjgl.dll 缺失直接崩溃。
-     *
-     * 新格式（LWJGL 3.3+）没有 classifier 依赖，对应的库名本身就以
-     * :natives-xxx 结尾，会作为普通库被 downloadLibrary 下载，这里不处理。
-     */
+    /** 下载 natives JAR（downloads.classifiers 里的独立文件）。 */
     private void downloadNativeLibraries(VersionInfo info) {
         if (info.getLibraries() == null) {
             return;
@@ -416,12 +403,7 @@ public class GameDownloader {
         }
     }
 
-    /**
-     * 按当前平台与架构选择 natives classifier。
-     *
-     * 老版本 JSON 写的是 "natives-windows"，64 位与 32 位各一个 classifier
-     * （natives-windows-64 / natives-windows-32）；优先取与架构匹配的那个。
-     */
+    /** 按当前平台与架构选择 natives classifier。 */
     private String pickNativeClassifier(VersionInfo.Library library) {
         String base = library.getNatives().get(getCurrentOsName());
         if (base == null || base.isBlank()) {
@@ -507,14 +489,7 @@ public class GameDownloader {
             reportDetail(displayName, 0, remaining);
 
             // ===== 确定下载地址 =====
-            //
-            // 优先级：
-            // 1. 高校镜像池（实测 3-8 MB/s，无连接数限流）
-            // 2. BMCLAPI 官方节点 / 官方源（兜底）
-            //
             // 注意：镜像池的路径是「根路径 + Maven 坐标」（无 /maven/ 前缀），
-            // 与 BMCLAPI 官方节点的结构不同。镜像站不支持 fabric-meta 等
-            // API，但库文件和 assets 都支持。
             Downloader.DownloadResult result = null;
             MirrorPool mirrorPool = MirrorPool.getInstance();
 
@@ -882,12 +857,8 @@ public class GameDownloader {
         }
 
         // 并发下载资源文件。
-        //
-        // 资源文件有几千个，是总耗时的大头。这里开到 48 个线程，
-        // 实际并发由 DownloadThrottle 控制：
-        // 全局封顶 64、每站封顶 16，文件轮询分发到 5 个镜像站，
         // 因此每个站承受的并发约 10-13，仍在其安全范围内。
-        ExecutorService executor = Executors.newFixedThreadPool(48);
+        ExecutorService executor = ioPool();
         List<Future<Boolean>> futures = new ArrayList<>();
 
         AtomicInteger assetCompleted = new AtomicInteger(0);
@@ -996,7 +967,7 @@ public class GameDownloader {
             }
         }
 
-        executor.shutdown();
+        
 
         if (assetFailed.get() > 0) {
             // 资源缺失会导致游戏在加载界面崩溃或贴图缺失，必须上报
@@ -1039,6 +1010,14 @@ public class GameDownloader {
      * 关闭下载器
      */
     public void shutdown() {
+        java.util.concurrent.ExecutorService pool;
+        synchronized (this) {
+            pool = ioPool;
+            ioPool = null;
+        }
+        if (pool != null) {
+            pool.shutdownNow();
+        }
         downloader.shutdown();
     }
 
@@ -1049,14 +1028,22 @@ public class GameDownloader {
         void onProgress(int current, int total, String message);
         void onError(String error);
 
-        /**
-         * 详细进度（用于 UI 展示当前文件 / 速度 / 剩余数量）
-         *
-         * @param currentFile 当前正在下载的文件名（可为 null）
-         * @param speed       速度（字节/秒），0 表示未知
-         * @param remaining   剩余待下载文件数，-1 表示未知
-         */
+        /** 详细进度（用于 UI 展示当前文件 / 速度 / 剩余数量） */
         default void onDetail(String currentFile, long speed, int remaining) {}
+    }
+
+    /** 并发下载用的线程池。 */
+    private java.util.concurrent.ExecutorService ioPool;
+
+    private synchronized java.util.concurrent.ExecutorService ioPool() {
+        if (ioPool == null || ioPool.isShutdown()) {
+            ioPool = Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "gamedl-io");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        return ioPool;
     }
 
     /**

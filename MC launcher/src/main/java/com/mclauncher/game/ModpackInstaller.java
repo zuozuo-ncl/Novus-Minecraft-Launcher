@@ -32,34 +32,7 @@ import java.util.zip.ZipFile;
 
 /**
  * 整合包一键安装
- *
- * 支持的格式：
- * <ul>
- *   <li><b>.mrpack</b>（Modrinth 格式）—— 完整支持</li>
- *   <li><b>.zip</b>（CurseForge / 手动整理的客户端包）—— 尽力支持</li>
- * </ul>
- *
- * <h3>.mrpack 是什么</h3>
- * 它其实就是一个 zip，里面有：
- * <pre>
- *   modrinth.index.json    —— 依赖清单（游戏版本、加载器、要下载的文件）
- *   overrides/             —— 要原样复制进游戏目录的文件
- *   client-overrides/      —— 只在客户端安装的文件
- * </pre>
- * index 里列出的每个文件都带下载地址和 SHA-1/SHA-512。
- *
- * <h3>安装流程</h3>
- * <ol>
- *   <li>解析 index，确定游戏版本与加载器（Fabric / Forge / Quilt / NeoForge）</li>
- *   <li>下载原版游戏</li>
- *   <li>安装加载器（Quilt / NeoForge 暂不支持自动安装 —— 见 {@link #installLoader}）</li>
- *   <li>并发下载 index 里的所有文件到指定位置</li>
- *   <li>解开 overrides / client-overrides</li>
- * </ol>
- *
  * <h3>安全约定（重要）</h3>
- * index 里的 path 是**包作者提供的、不可信的数据**（尤其对于从网上下载的 .zip 包）。
- * 一律经过 {@link #safeResolve} 校验，杜绝 {@code ../../} 之类的路径穿越。
  */
 public class ModpackInstaller {
 
@@ -145,13 +118,7 @@ public class ModpackInstaller {
 
     // ==================== 入口 ====================
 
-    /**
-     * 安装整合包
-     *
-     * @param packFile  下载好的 .mrpack / .zip
-     * @param targetDir 安装目录（新建的独立游戏目录）
-     * @param progress  进度回调（可为 null）
-     */
+    /** 安装整合包 */
     public Result install(Path packFile, Path targetDir, Progress progress) {
         cancelled = false;
         Progress p = progress != null ? progress : NOOP;
@@ -352,14 +319,7 @@ public class ModpackInstaller {
         return r;
     }
 
-    /**
-     * 安装加载器
-     *
-     * 目前只支持 Fabric 和 Forge（复用现有 {@link ModLoaderInstaller}）。
-     * Quilt / NeoForge 没有现成的安装器，返回 null 由上层提示用户。
-     *
-     * @return 安装后的版本 ID；失败或不支持时返回 null
-     */
+    /** 安装加载器 */
     private String installLoader(Path targetDir, String gameVersion, String loader,
                                  String loaderVersion, Progress p) {
         ModLoaderInstaller installer = new ModLoaderInstaller(apiClient, targetDir);
@@ -602,18 +562,7 @@ public class ModpackInstaller {
 
     // ==================== 普通 zip ====================
 
-    /**
-     * 普通整合包 zip（CurseForge 客户端包 / 手动整理的包）
-     *
-     * 这类包没有统一清单，只能尽力而为：
-     * <ul>
-     *   <li>mods/ 里的 jar 原样解开</li>
-     *   <li>config/、resourcepacks/、shaderpacks/ 等原样解开</li>
-     *   <li>manifest.json（CurseForge 格式）存在时读出游戏版本与加载器</li>
-     * </ul>
-     * 原版与原加载器**不会**自动下载 —— 包内通常不含 assets，
-     * 且 CurseForge 的文件不允许第三方重新分发。安装后提示用户去「下载」页补齐。
-     */
+    /** 普通整合包 zip（CurseForge 客户端包 / 手动整理的包） */
     private Result installPlainZip(Path zipFile, Path targetDir, Progress p) {
         int count = 0;
         String gameVersion = null;
@@ -717,9 +666,6 @@ public class ModpackInstaller {
 
     /**
      * 把包内相对路径解析到目标目录下，拒绝逃逸出目标目录的路径
-     *
-     * from 网上下载的整合包里 path 完全由作者决定，是**不可信输入**：
-     * 一个 {@code ../../AppData/Roaming/Microsoft/Windows/Start Menu/...} 就能
      * 往启动项里写文件。必须逐段校验。
      */
     static Path safeResolve(Path base, String relative) throws IOException {
@@ -742,13 +688,7 @@ public class ModpackInstaller {
         return guardSymlink(baseNorm, resolved);
     }
 
-    /**
-     * 逐级检查目标路径上已存在的父目录：是被替换目标目录之外的
-     * 符号链接 / 目录联接（junction）就拒绝。
-     *
-     * safeResolve 只做词法校验：如果游戏目录里早就有一个指向 C:\Windows 的
-     * junction（用户误操作或之前被利用过），词法上完全合法的条目也会写到外面去。
-     */
+    /** 逐级检查目标路径上已存在的父目录：是被替换目标目录之外的 */
     private static Path guardSymlink(Path baseNorm, Path resolved) throws IOException {
         Path abs = resolved.toAbsolutePath().normalize();
         Path cur = baseNorm;

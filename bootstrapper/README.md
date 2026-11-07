@@ -107,14 +107,14 @@ Adoptium 的 API（`api.adoptium.net`）本身可访问，但它返回的下载�
 
 ### 版本选择逻辑
 
-引导器扫描 `%APPDATA%\MC_Launcher\` 下的 `mc-launcher-<版本>.jar`，
+引导器扫描 `%APPDATA%\NCL_Launcher\` 下的 `mc-launcher-<版本>.jar`，
 按**语义化版本**比较（`1.2.0 > 1.1.10`，不是字符串排序），选最新的启动。
 旧版本文件**不删除**，便于回滚。
 
 ## 数据目录
 
 ```
-%APPDATA%\MC_Launcher\
+%APPDATA%\NCL_Launcher\
 ├── bootstrap.log          引导器日志（UTF-8，出错时看这里）
 ├── launcher-stdout.log    启动器的控制台输出
 ├── java/                  自动下载的 JRE

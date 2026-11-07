@@ -10,12 +10,7 @@ import java.lang.reflect.Type;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * BMCLAPI 客户端
- * 提供对 BMCLAPI 接口的访问
- *
- * BMCLAPI 文档: https://bmclapidoc.bangbang93.com/
- */
+/** BMCLAPI 客户端 */
 public class BMCLApiClient {
 
     private static final Logger logger = LoggerFactory.getLogger(BMCLApiClient.class);
@@ -90,11 +85,7 @@ public class BMCLApiClient {
 
     /**
      * 获取资源文件下载 URL
-     *
-     * 两个源的路径结构：
-     * - BMCLAPI ：/assets/<hash前两位>/<hash>
-     *   （注意不是 /mc/assets，那个路径会 404）
-     * - 官方源  ：resources.download.minecraft.net/<hash前两位>/<hash>
+     * （注意不是 /mc/assets，那个路径会 404）
      */
     public String getAssetDownloadUrl(String hash, String size) {
         String prefix = hash.substring(0, 2);
@@ -106,12 +97,7 @@ public class BMCLApiClient {
 
     /**
      * 获取库文件下载 URL
-     *
      * 注意两个源的结构不同：
-     * - BMCLAPI ：/maven/{path}          （镜像了 libraries.minecraft.net）
-     * - 官方源  ：libraries.minecraft.net/{path}
-     *
-     * 若官方模式下误用 /maven/ 前缀会得到 404。
      */
     public String getLibraryDownloadUrl(String path) {
         if (useBMCL) {
@@ -157,14 +143,7 @@ public class BMCLApiClient {
         return httpClient.get(url);
     }
 
-    /**
-     * 获取 Forge 版本列表
-     *
-     * 重要：Forge / OptiFine 的「版本列表」API **只有 BMCLAPI 提供**，
-     * Mojang 官方源没有（https://launchermeta.mojang.com/forge/... 会 404）。
-     * 因此这里固定使用 BMCLAPI，与用户选择的「下载源」无关 ——
-     * 下载源只影响游戏文件从哪拉，不影响元数据查询。
-     */
+    /** 获取 Forge 版本列表 */
     public List<String> getForgeVersions(String gameVersion) throws IOException {
         String url = BMCL_BASE_URL + "/forge/minecraft/" + gameVersion;
         logger.info("获取 Forge 版本列表: {}", url);
@@ -186,18 +165,7 @@ public class BMCLApiClient {
         }
     }
 
-    /**
-     * 获取 OptiFine 版本列表
-     *
-     * 接口返回的是**对象数组**，每项形如：
-     *   { "mcversion": "1.20.1", "type": "HD_U", "patch": "I5",
-     *     "filename": "OptiFine_1.20.1_HD_U_I5.jar", "forge": "Forge 47.0.35" }
-     *
-     * 用于展示与下载的版本标识是 type + "_" + patch，例如 "HD_U_I5"。
-     * （原实现把它当成字符串数组解析，所以永远得到空列表。）
-     *
-     * 同 Forge：该 API 只有 BMCLAPI 提供，固定走 BMCLAPI。
-     */
+    /** 获取 OptiFine 版本列表 */
     public List<String> getOptifineVersions(String gameVersion) throws IOException {
         String url = BMCL_BASE_URL + "/optifine/" + gameVersion;
         logger.info("获取 OptiFine 版本列表: {}", url);
@@ -229,11 +197,6 @@ public class BMCLApiClient {
 
     /**
      * 将官方 URL 转换为 BMCLAPI 镜像 URL
-     *
-     * 重要：BMCLAPI 镜像的是「保持原始路径」的资源服务器，
-     * 例如 https://piston-data.mojang.com/v1/objects/<sha1>/client.jar
-     *   -> https://bmclapi2.bangbang93.com/v1/objects/<sha1>/client.jar
-     *
      * 因此这里只替换域名，绝不能改动路径，否则会得到 404。
      */
     public String convertToMirror(String officialUrl) {
@@ -286,15 +249,7 @@ public class BMCLApiClient {
         return useBMCL ? BMCL_BASE_URL : OFFICIAL_MANIFEST_URL;
     }
 
-    /**
-     * 获取 Fabric Meta 服务的基础 URL
-     *
-     * 说明：Fabric 的元数据 API 在官方站（meta.fabricmc.net）和 BMCLAPI 镜像
-     * （/fabric-meta）都可用。这里统一返回 BMCLAPI 镜像，
-     * 原因是：
-     * 1. 国内访问 fabricmc.net 可能很慢或超时
-     * 2. 让「加载器元数据」与用户选择的下载源解耦，行为更可预期
-     */
+    /** 获取 Fabric Meta 服务的基础 URL */
     public String getFabricMetaBase() {
         return BMCL_BASE_URL + "/fabric-meta";
     }

@@ -1,14 +1,4 @@
 // ============================================================================
-//  ui.cpp —— 原生进度窗口与消息框
-//
-//  设计要点：
-//    - 下载在工作线程执行，UI 在主线程跑消息循环 —— 绝不卡死窗口
-//    - 工作线程通过 PostMessage 投递进度到窗口线程更新控件
-//    - 窗口带「取消」按钮，点击后置位取消标志，工作线程感知后中止
-//
-//  全部使用宽字符 API（CreateWindowExW / MessageBoxW / SetWindowTextW），
-//  中文提示与中文路径都不会乱码。
-// ============================================================================
 #include "common.h"
 
 #include <commctrl.h>
@@ -118,11 +108,6 @@ LRESULT CALLBACK ProgressWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
                 EnableWindow(g_state.cancelBtn, FALSE);
 
                 // 关键：通知主线程把全局取消标志置位。
-                //
-                // 工作线程检查的是 main.cpp 里的 g_cancelled，而按钮只能
-                // 改到本模块的 g_state.cancelled —— 两者早期互不相通，
-                // 导致「点取消没反应」。这里通过消息把请求转给主线程，
-                // 由主线程统一置位。
                 if (g_state.hwnd) {
                     PostMessageW(g_state.hwnd, WM_APP_CANCEL, 0, 0);
                 }
@@ -253,14 +238,7 @@ void InitCommonControls() {
 }
 
 // ---------------------------------------------------------------------------
-// 创建进度窗口（居中显示）
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// 显示进度窗口
-//
-//   **必须在创建窗口的线程（主线程）上调用**。
-//   工作线程需要展示时用 PostMessage(WM_APP_SHOW) 请求。
-// ---------------------------------------------------------------------------
+// **必须在创建窗口的线程（主线程）上调用**。
 void ShowProgressWindow(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd)) {
         return;
@@ -285,13 +263,6 @@ HWND CreateProgressWindow(const std::wstring& title) {
     int y = (screenH - h) / 2;
 
     // 注意：这里**不带 WS_VISIBLE**，窗口创建后是隐藏的。
-    //
-    // 原因（重要）：本函数会被工作线程调用，而 Win32 要求窗口消息只能由
-    // 创建窗口的线程处理。之前工作线程创建并直接 WS_VISIBLE 显示窗口，
-    // 主线程跑消息循环 —— 消息被派发到错误的线程，界面直接卡死。
-    //
-    // 现在改为：窗口在**主线程**提前创建（见 main.cpp），
-    // 工作线程需要展示时发 WM_APP_SHOW 消息，由主线程执行 ShowWindow。
     HWND hwnd = CreateWindowExW(
             WS_EX_APPWINDOW | WS_EX_TOPMOST,
             L"MCLauncherProgressWnd",
@@ -332,19 +303,7 @@ void UpdateProgress(HWND hwnd, const std::wstring& stage,
     }
 
     // ---- 节流 ----
-    //
-    // 下载 45MB 的 jar 会产生约 720 次回调（每 64KB 一次）。
-    // 早期版本每次都 PostMessage，UI 线程被消息淹没，窗口明显卡顿。
-    //
-    // 现在只在下列情况才真正投递：
-    //   - 百分比发生变化（整数位）
-    //   - 距离上次投递超过 200ms（保证长时间停在某个百分比时界面仍在刷新）
-    //
     // **关键**：这里只能使用「无状态的原子量」，不能缓存 std::wstring。
-    // UpdateProgress 会被多个线程调用（下载线程、Java 下载线程、
-    // 主线程的「正在取消」提示）。早先版本用局部 static std::wstring
-    // 缓存上一次的文本，多线程并发读写会让 wstring 内部指针错乱，
-    // 表现为界面直接卡死。原子整数没有这个问题。
     static std::atomic<int>  lastPercent{-2};
     static std::atomic<DWORD> lastTick{0};
 

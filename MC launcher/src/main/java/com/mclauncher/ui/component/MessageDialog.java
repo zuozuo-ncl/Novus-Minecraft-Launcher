@@ -16,37 +16,8 @@ import java.util.function.Consumer;
 
 /**
  * 内嵌式消息对话框
- *
- * 用来替代 JavaFX 原生的 {@code Alert} / {@code TextInputDialog}。
- *
  * 为什么要自己写：
- * - 原生 Alert 是**独立 Stage**，有自己的 DialogPane 和自己的 Scene，
- *   不继承主窗口样式表，主题切换时要单独处理，还经常跟主窗口主题对不上
- * - 原生 Alert 的按钮是系统风格的「确定/取消」，与本启动器的按钮样式不一致
- * - 用户期望所有弹窗都长成「目录管理」那种内嵌卡片样式
- *
- * 本类基于 {@link ModalHost}，因此：
- * - 内嵌在主窗口里，跟随主窗口移动
- * - 自动继承当前主题
- * - 样式与外层弹窗完全一致
- *
  * 用法（确认框，带回调）：
- * <pre>
- *   MessageDialog.confirm(modalHost, "确认删除", "删除「xxx」？", "此操作不可恢复！",
- *                         () -&gt; doDelete());
- * </pre>
- * 用法（仅提示，一个「知道了」按钮）：
- * <pre>
- *   MessageDialog.info(modalHost, "提示", "设置已保存。");
- * </pre>
- * 用法（输入框）：
- * <pre>
- *   MessageDialog.prompt(modalHost, "重命名目录", "为这个目录设置一个便于识别的名称",
- *                        "名称", 默认值, name -&gt; rename(name));
- * </pre>
- *
- * 注意：回调在**弹窗关闭之后**执行，此时遮罩已经移除，
- * 回调里可以安全地再弹新窗、或直接移除自身节点。
  */
 public final class MessageDialog {
 
@@ -55,12 +26,7 @@ public final class MessageDialog {
 
     /**
      * 尺寸策略
-     *
-     * 消息框（提示/错误/确认）不用固定宽度 —— 让卡片按文字自适应，
      * 一句话的提示就只占一小块，不要顶着一个 620 宽的大白框。
-     * 只给一个上限，避免长错误信息把窗口撑爆。
-     *
-     * 输入框（prompt）需要固定宽度，否则单行输入框会缩成一条。
      */
     private static final double MESSAGE_MAX_WIDTH = 460;
     private static final double PROMPT_WIDTH = 420;
@@ -121,12 +87,7 @@ public final class MessageDialog {
         confirm(host, title, header, message, null, L.t("s_f526c89937"), onConfirm);
     }
 
-    /**
-     * 确认框（自定义副标题说明与确认按钮文字）
-     *
-     * @param detail    次要说明，可为 null
-     * @param okText    确认按钮文字，如「删除」「卸载」
-     */
+    /** 确认框（自定义副标题说明与确认按钮文字） */
     public static void confirm(ModalHost host, String title, String header, String message,
                                String detail, String okText, Runnable onConfirm) {
         if (host == null) {
@@ -149,8 +110,6 @@ public final class MessageDialog {
 
     /**
      * 确认框，带「已确认」回调与「取消」回调
-     *
-     * 适合「点确定做 A，点取消做 B」的场景（例如关闭启动器时取消 = 不关闭）。
      * 注意：按 ESC / 点遮罩 / 点标题栏 ✕ 都算「取消」，会走 onCancel。
      */
     public static void confirmOrCancel(ModalHost host, String title, String header,
@@ -190,12 +149,7 @@ public final class MessageDialog {
 
     // ==================== 输入 ====================
 
-    /**
-     * 输入框（替代 TextInputDialog）
-     *
-     * @param defaultValue 初始值，可为 null
-     * @param onOk         确定后执行，参数是用户输入的文本（已 trim，非空）
-     */
+    /** 输入框（替代 TextInputDialog） */
     public static void prompt(ModalHost host, String title, String header, String fieldLabel,
                               String defaultValue, Consumer<String> onOk) {
         if (host == null) {
@@ -276,16 +230,7 @@ public final class MessageDialog {
 
     // ==================== 带链接的提示 ====================
 
-    /**
-     * 带「可点击链接」的提示框
-     *
-     * 用于引导用户去外部网站（如 Java 官网）自行下载。
-     * 链接在弹窗内以超链接形式呈现，点击直接打开系统浏览器 ——
-     * 比让用户手抄一长串 URL 现实得多。
-     *
-     * @param linkText 链接的显示文字（如「打开 Java 官网」）
-     * @param linkUrl  实际打开的地址
-     */
+    /** 带「可点击链接」的提示框 */
     public static void infoWithLink(ModalHost host, String title, String message,
                                     String linkText, String linkUrl) {
         if (host == null) {
@@ -335,12 +280,7 @@ public final class MessageDialog {
         host.show(title, content, onClosed);
     }
 
-    /**
-     * 构建弹窗主体：标题 + 正文（+ 可选的次要说明）
-     *
-     * 左侧加一条语义色条，让「错误 / 警告 / 询问」一眼能区分，
-     * 弥补内嵌弹窗没有系统图标的问题。
-     */
+    /** 构建弹窗主体：标题 + 正文（+ 可选的次要说明） */
     private static VBox buildBody(String message, String detail, Kind kind, String header) {
         VBox body = new VBox(8);
         body.setPadding(new Insets(16, 18, 14, 18));

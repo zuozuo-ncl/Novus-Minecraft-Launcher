@@ -20,23 +20,7 @@ import javafx.scene.image.WritableImage;
 
 /**
  * 皮肤获取
- *
- * 支持三类来源：
- *
- * <table>
- *   <tr><th>账号类型</th><th>默认顺序</th></tr>
- *   <tr><td>微软正版</td><td>Mojang 会话服务器 → 按用户名查 LittleSkin / Blessing Skin</td></tr>
- *   <tr><td>离线</td><td>按用户名查 LittleSkin → Blessing Skin（Crafatar 兜底）</td></tr>
- * </table>
- *
- * 账号上可以单独指定皮肤站（{@link Account#getSkinSite()}）：指定后就**只**用该站，
- * 支持 LittleSkin、Blessing Skin 以及任何按标准路径部署的 Yggdrasil 兼容站
- * （见 {@link SkinSites#guessApiRoot}）。
- *
  * <h3>关于 LittleSkin 的域名坑</h3>
- * 实测（2026-10-27）发现 LittleSkin 返回的纹理 URL 域名是
- * {@code litleskin.cn}（**少一个 t**），该域名不存在。
- * 正确域名是 {@code littleskin.cn}，这里做了自动纠正。
  */
 public class SkinFetcher {
 
@@ -81,13 +65,7 @@ public class SkinFetcher {
     private static final java.util.Map<String, String> MODEL_CACHE = new java.util.HashMap<>();
     private static final java.util.Map<String, Image> CACHE = new java.util.HashMap<>();
 
-    /**
-     * 「查过了，确实没有皮肤」的缓存：key -> 失效时间（毫秒）
-     *
-     * 不存在皮肤时整条链路可能要 3~5 秒（各站点的超时/422）。
-     * 同一个账号反复刷新头像时不该每次都等 —— 记住失败结果，
-     * 5 分钟后再试一次（玩家可能刚在皮肤站上传了新皮肤）。
-     */
+    /** 「查过了，确实没有皮肤」的缓存：key -> 失效时间（毫秒） */
     private static final java.util.Map<String, Long> MISS_CACHE = new java.util.HashMap<>();
     private static final long MISS_TTL_MS = 5 * 60 * 1000L;
 
@@ -96,17 +74,7 @@ public class SkinFetcher {
 
     /**
      * 预热：在后台线程里做一次真实请求
-     *
-     * 实测（2026-10-27）进程内**第一条 HTTPS 请求**要 ~1.5s，
-     * 拆解后是：
-     *   - 首次调用 {@code SSLSocketFactory.getDefault()} 加载 JSSE 安全提供者 ~1.1s
-     *   - TLS 握手 ~0.9s（之后会缓存会话/信任根，降到 50ms）
-     *   - 之后同一进程内的请求只要 15~90ms
-     *
-     * 这是 JVM 一次性初始化开销，跟 HTTP/1.1 还是 HTTP/2 无关。
-     * 启动器一启动就在后台跑一次，等玩家切到账号页时已经预热完毕。
-     *
-     * 失败不抛异常 —— 预热失败只是退化为冷启动。
+     * - 首次调用 {@code SSLSocketFactory.getDefault()} 加载 JSSE 安全提供者 ~1.1s
      */
     public static void warmUpAsync() {
         Thread t = new Thread(() -> {
@@ -131,11 +99,7 @@ public class SkinFetcher {
 
     /**
      * 获取账号的皮肤原图（64x64 PNG）
-     *
      * 网络请求，**不要**在 FX 线程调用。
-     *
-     * @param account 账号
-     * @return 皮肤图；取不到返回 null
      */
     public Image fetchSkin(Account account) {
         if (account == null) {
@@ -277,17 +241,7 @@ public class SkinFetcher {
         }
     }
 
-    /**
-     * 把皮肤图裁成「头部」并放大 —— 用于侧边栏显示的小头像
-     *
-     * Minecraft 皮肤布局（64x64）：
-     *   头部正面在 (8,8) 大小 8x8
-     *   帽子/外层在 (40,8) 大小 8x8（可选）
-     *
-     * @param skin  完整皮肤图
-     * @param size  输出尺寸
-     * @param overlay 是否叠加外层（头发、帽子等）
-     */
+    /** 把皮肤图裁成「头部」并放大 —— 用于侧边栏显示的小头像 */
     public static Image headAvatar(Image skin, int size, boolean overlay) {
         if (skin == null) {
             return null;
@@ -352,12 +306,7 @@ public class SkinFetcher {
         return null;
     }
 
-    /**
-     * 尝试一个皮肤站
-     *
-     * 优先按 Yggdrasil 规范查；站点内没有皮肤时，只有**已知站点**才值得
-     * 去 Crafatar 兜底（Crafatar 对无效名字要 1~2.6 秒才返回 422，白等太亏）。
-     */
+    /** 尝试一个皮肤站 */
     private Image tryAllSources(String apiRoot, String idOrName) {
         Account a = currentAccount.get();
         boolean forceLookup = a != null && a.getType() == Account.Type.OFFLINE;
@@ -376,22 +325,12 @@ public class SkinFetcher {
         return null;
     }
 
-    /**
-     * 用来查皮肤站的标识
-     *
-     * 离线账号的 UUID 是**本地按名字哈希出来的**（离线登录规范如此），
-     * 皮肤站里根本没有这个 UUID —— 即使它长得像正经 UUID 也只能用名字查。
-     */
+    /** 用来查皮肤站的标识 */
     private String lookupKey(Account a) {
         return a.getType() == Account.Type.OFFLINE ? a.getUsername() : a.getUuid();
     }
 
-    /**
-     * 用户名 → 皮肤站 UUID
-     *
-     * 传入的已经是 32 位十六进制 UUID 时直接返回。
-     * 查不到返回 null。
-     */
+    /** 用户名 → 皮肤站 UUID */
     private String resolveUuid(String apiRoot, String idOrName, boolean forceLookup) {
         if (!forceLookup && idOrName.replace("-", "").matches("[0-9a-fA-F]{32}")) {
             return idOrName;
@@ -410,25 +349,13 @@ public class SkinFetcher {
         }
     }
 
-    /**
-     * 通过 Yggdrasil 协议取皮肤（LittleSkin / Blessing Skin 通用）
-     *
-     * 流程：
-     *   1. 用户名 → UUID（若传入的已经是 UUID 就跳过）
-     *   2. UUID → profile，其中 properties 里有 base64 编码的 textures
-     *   3. 解码 textures，拿 SKIN.url，下载
-     */
+    /** 通过 Yggdrasil 协议取皮肤（LittleSkin / Blessing Skin 通用） */
     private Image fetchFromYggdrasil(String apiRoot, String idOrName) {
         String uuid = resolveUuid(apiRoot, idOrName, false);
         return uuid == null ? null : fetchProfileSkin(apiRoot, uuid);
     }
 
-    /**
-     * UUID → profile → textures → 下载皮肤原图
-     *
-     * profile 的 properties 里有 base64 编码的 textures，
-     * 解出 SKIN.url 后下载。
-     */
+    /** UUID → profile → textures → 下载皮肤原图 */
     private Image fetchProfileSkin(String apiRoot, String uuid) {
         try {
             String body = get(apiRoot + "/sessionserver/session/minecraft/profile/" + uuid);
@@ -486,12 +413,7 @@ public class SkinFetcher {
         return null;
     }
 
-    /**
-     * 修正已知的错误域名
-     *
-     * LittleSkin 返回的纹理 URL 里域名是 litleskin.cn（少个 t），
-     * 那个域名根本不存在。这里替换回正确域名。
-     */
+    /** 修正已知的错误域名 */
     private String fixDomain(String url, String apiRoot) {
         SkinSites.Site site = SkinSites.forApiRoot(apiRoot);
         String[][] fixes = site != null && site.domainFixes != null
@@ -508,9 +430,7 @@ public class SkinFetcher {
 
     /**
      * Crafatar：直接按 uuid/name 取渲染好的头像
-     *
      * 不用它的皮肤原图（/skins/），因为要自己裁；
-     * 这里只作为「有没有皮肤」的兜底探测。
      */
     /** Crafatar 专用客户端：短超时，它只是兜底 */
     private static final OkHttpClient CRAFATAR_HTTP = HTTP.newBuilder()

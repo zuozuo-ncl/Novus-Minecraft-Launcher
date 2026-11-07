@@ -20,13 +20,7 @@ public class ZipUtils {
     private static final Logger logger = LoggerFactory.getLogger(ZipUtils.class);
     private static final int BUFFER_SIZE = 8192;
 
-    /**
-     * 解压 ZIP 文件到目标目录
-     *
-     * @param zipFile   ZIP 文件路径
-     * @param destDir   目标目录
-     * @param overwrite 是否覆盖已存在的文件
-     */
+    /** 解压 ZIP 文件到目标目录 */
     public static void unzip(Path zipFile, Path destDir, boolean overwrite) throws IOException {
         if (!Files.exists(zipFile)) {
             throw new FileNotFoundException("ZIP 文件不存在: " + zipFile);
@@ -116,13 +110,7 @@ public class ZipUtils {
         unzip(zipFile, destDir, true);
     }
 
-    /**
-     * 解压 ZIP 文件的某个条目
-     *
-     * @param zipFile      ZIP 文件路径
-     * @param entryName    要解压的条目名称
-     * @param destDir      目标目录
-     */
+    /** 解压 ZIP 文件的某个条目 */
     public static void unzipEntry(Path zipFile, String entryName, Path destDir) throws IOException {
         try (ZipInputStream zis = new ZipInputStream(
                 Files.newInputStream(zipFile), StandardCharsets.UTF_8)) {
@@ -147,12 +135,7 @@ public class ZipUtils {
         }
     }
 
-    /**
-     * 打包目录为 ZIP 文件
-     *
-     * @param sourceDir 源目录
-     * @param destZip   目标 ZIP 文件
-     */
+    /** 打包目录为 ZIP 文件 */
     public static void zipDirectory(Path sourceDir, Path destZip) throws IOException {
         if (!Files.isDirectory(sourceDir)) {
             throw new IllegalArgumentException("源路径必须是目录: " + sourceDir);

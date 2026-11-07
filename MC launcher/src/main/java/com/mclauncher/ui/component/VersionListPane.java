@@ -18,18 +18,7 @@ import java.util.function.Consumer;
 
 /**
  * 版本列表（带搜索与类型过滤）
- *
- * 解决的问题：原实现把全部 900+ 个版本塞进一个 ComboBox，
- * 正式版、快照、远古版本混在一起，极难找到目标版本。
- *
- * 现在提供：
  * - 关键词搜索（匹配版本号）
- * - 按类型过滤的复选框：正式版 / 快照 / 远古版本
- * - 默认只勾选「正式版」
- * - 列表展示，选中后回调节点
- *
- * 设计说明：用 ListView 替代 ComboBox —— 900 个条目的下拉框
- * 体验很差，而列表可以滚动、可以显示更多信息。
  */
 public class VersionListPane {
 
@@ -283,9 +272,7 @@ public class VersionListPane {
 
     /**
      * 应用「搜索关键词 + 类型勾选」过滤
-     *
      * 规则：先在勾选的分类里筛，再按关键词匹配版本号。
-     * 若用户一个分类都没勾，则等价于不限类型。
      */
     private void applyFilter() {
         String keyword = searchField.getText() == null

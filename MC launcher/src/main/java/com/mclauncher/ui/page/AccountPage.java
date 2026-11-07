@@ -139,8 +139,6 @@ public class AccountPage implements Page {
 
     /**
      * 创建标签页（列表 / 离线 / 微软 / 皮肤）。
-     *
-     * 每次都新建：皮肤页的控件是懒创建的，重建后 currentSkinView 等字段
      * 必须指向当前真正显示的那一份，否则会去更新已被替换掉的节点。
      */
     private TabPane createTabs() {
@@ -334,18 +332,8 @@ public class AccountPage implements Page {
 
     // ---------- 当前账号卡 ----------
 
-    /**
-     * 当前账号卡：大号皮肤预览 + 名字
-     *
-     * 预览显示的是皮肤原图的放大版（含外层/帽子），
-     * 点击「更换头像」会清缓存重新拉取 —— 玩家刚在皮肤站换了皮肤时用得上。
-     */
-    /**
-     * 当前账号卡（顶部）：头像 + 名字 + 刷新皮肤
-     *
-     * 皮肤相关设置（来源、上传、全身预览）已移到「皮肤设置」标签页，
-     * 这里只留一眼能看到的身份信息，避免把下面的标签页挤出可视区。
-     */
+    /** 当前账号卡：大号皮肤预览 + 名字 */
+    /** 当前账号卡（顶部）：头像 + 名字 + 刷新皮肤 */
     private Region buildCurrentAccountCard() {
         currentAvatar = SkinAvatar.square(56);
         currentNameLabel = new Label(L.t("s_e8041a8c93"));
@@ -578,10 +566,7 @@ public class AccountPage implements Page {
 
     /**
      * 显示全身像
-     *
-     * 皮肤图是人物的展开图（头/身体/手臂/腿分开摊着），
      * 直接放大整张图玩家看到的是一堆碎片 —— 必须拼成正面站立的形象。
-     * 拼接逻辑见 {@link com.mclauncher.ui.component.SkinRenderer}。
      */
     private void showSkinPreview(Image skin, Account account) {
         if (skin == null || skin.getPixelReader() == null || currentSkinView == null) {
@@ -613,15 +598,7 @@ public class AccountPage implements Page {
 
 // ---------- 皮肤来源选项 ----------
 
-    /**
-     * 皮肤来源下拉框的一个选项
-     *
-     * value 是存到账号上的 skinSite 值：
-     *   null       -> <自动>
-     *   default:xx -> 内置基础皮肤
-     *   mojang     -> Mojang 官方
-     *   其它 URL   -> 皮肤站的 API 根
-     */
+    /** 皮肤来源下拉框的一个选项 */
     static final class SkinOption {
         final String value;
         final String label;

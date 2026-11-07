@@ -108,9 +108,7 @@ public class LauncherSettingsPage implements Page {
 
     /**
      * 语言切换后重建整个设置页
-     *
      * JavaFX 的控件不会因为文案变化自己刷新，必须重新构建。
-     * 这里把根节点换掉，并通知主窗口重建侧边栏等常驻界面。
      */
     private void rebuildAfterLanguageChange() {
         if (root == null) {
@@ -192,12 +190,7 @@ public class LauncherSettingsPage implements Page {
 
     // ---------- 版本更新 ----------
 
-    /**
-     * 手动检查更新
-     *
-     * 在后台线程请求接口，避免阻塞界面；
-     * 有新版则弹出更新面板（与主页自动检测共用同一套 UI）。
-     */
+    /** 手动检查更新 */
     private void onCheckUpdate() {
         if (updateCheckButton == null) {
             return;
@@ -263,12 +256,7 @@ public class LauncherSettingsPage implements Page {
 
     // ---------- 外观 ----------
 
-    /**
-     * 外观设置：明/暗主题切换
-     *
-     * 切换即时生效（不需重启）—— 直接替换主场景的 stylesheet。
-     * 内嵌弹窗是主场景内的节点，因此也自动跟随主题。
-     */
+    /** 外观设置：明/暗主题切换 */
     private VBox buildAppearanceTab() {
         VBox box = new VBox(14);
         box.setPadding(new Insets(16));
@@ -448,12 +436,7 @@ public class LauncherSettingsPage implements Page {
         logger.info("主题已切换为: {}", theme);
     }
 
-    /**
-     * 调大 ScrollPane 的滚轮滚动幅度
-     *
-     * JavaFX 默认的滚动增量偏小，滚一格几乎看不出移动。
-     * 这里拦截 SCROLL 事件，按比例手动调整 vvalue。
-     */
+    /** 调大 ScrollPane 的滚轮滚动幅度 */
     private void installScrollTuning(ScrollPane scroll) {
         scroll.addEventFilter(javafx.scene.input.ScrollEvent.SCROLL, e -> {
             if (e.getDeltaY() == 0) {
@@ -627,6 +610,19 @@ public class LauncherSettingsPage implements Page {
 
         box.getChildren().addAll(verLabel, verHint, updateRow);
 
+        // ---------- 意见反馈 ----------
+        box.getChildren().addAll(new Separator(), sectionLabel(L.t("feedback.section")));
+
+        Label fbHint = new Label(L.t("feedback.section_hint"));
+        fbHint.getStyleClass().add("text-muted");
+        fbHint.setWrapText(true);
+
+        Button feedbackBtn = new Button(L.t("feedback.open"));
+        feedbackBtn.getStyleClass().add("button");
+        feedbackBtn.setOnAction(e -> openFeedbackDialog());
+
+        box.getChildren().addAll(fbHint, feedbackBtn);
+
         ScrollPane scroll = new ScrollPane(box);
         scroll.setPannable(true);
         installScrollTuning(scroll);
@@ -636,6 +632,15 @@ public class LauncherSettingsPage implements Page {
         VBox wrapper = new VBox(scroll);
         VBox.setVgrow(scroll, Priority.ALWAYS);
         return wrapper;
+    }
+
+    /** 打开意见反馈弹窗 */
+    private void openFeedbackDialog() {
+        if (modalHost == null) {
+            logger.warn("弹窗宿主未注入，无法打开意见反馈");
+            return;
+        }
+        new com.mclauncher.ui.window.FeedbackDialog(modalHost).show();
     }
 
     // ---------- Java ----------
@@ -684,14 +689,6 @@ public class LauncherSettingsPage implements Page {
         box.getChildren().add(sectionLabel(L.t("s_b6ee98a995")));
 
         // ---- 版本选择 ----
-        //
-        // Minecraft 各代需要的 Java 版本不同：
-        //   1.12 及以下 -> Java 8
-        //   1.16.5     -> Java 8（也可用 11/16）
-        //   1.17~1.20.4 -> Java 17
-        //   1.20.5+    -> Java 21
-        // 之前只能下「配置里那一个版本」，换成别的游戏版本就得手改配置，
-        // 这里直接让用户选。
         HBox verRow = new HBox(10);
         verRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -846,8 +843,19 @@ public class LauncherSettingsPage implements Page {
             ProcessBuilder pb = new ProcessBuilder(path, "-version");
             pb.redirectErrorStream(true);
             Process p = pb.start();
-            p.waitFor();
-            return p.exitValue() == 0;
+            // 必须有超时：损坏/被盲注的 java.exe 可能永不退出，
+            // 在 FX 线程上无超时 waitFor 会直接把整个界面卡死
+            boolean ok = false;
+            try {
+                ok = p.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)
+                        && p.exitValue() == 0;
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            if (!ok) {
+                p.destroyForcibly();
+            }
+            return ok;
         } catch (Exception e) {
             return false;
         }
@@ -1065,15 +1073,7 @@ public class LauncherSettingsPage implements Page {
         com.mclauncher.ui.component.MessageDialog.info(modalHost, L.t("s_ab3656a956"), msg);
     }
 
-    /**
-     * 内嵌式进度面板（用于 Java 下载）
-     *
-     * 原来是独立 Stage，改成挂在 ModalHost 上，与其它弹窗统一样式，
-     * 也自动跟随主窗口与主题。
-     *
-     * 下载中不允许关闭（closable=false），只能等它跑完自动收起；
-     * 若下载失败，会在面板上显示错误并给出「关闭」按钮。
-     */
+    /** 内嵌式进度面板（用于 Java 下载） */
     private static class ProgressPanel {
         private final com.mclauncher.ui.component.ModalHost host;
         private final int javaVersion;

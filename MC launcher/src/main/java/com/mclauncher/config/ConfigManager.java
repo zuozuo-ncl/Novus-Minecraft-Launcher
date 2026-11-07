@@ -30,14 +30,7 @@ public class ConfigManager {
 
     /**
      * 启动器配置文件的绝对路径
-     *
      * 重要：这里必须解析成**绝对路径**，且锚定在「启动器程序所在目录」，
-     * 而不是依赖进程的当前工作目录（CWD）。
-     *
-     * 原因是此前用相对路径 `Paths.get(".mc_launcher", "config.json")` 时，
-     * 只要用户以不同的工作目录启动启动器（快捷方式的「起始位置」不同、
-     * 从别的目录执行 jar 等），读写的就是**不同的 config.json**，
-     * 表现为「重启后目录列表等设置全部消失」。
      */
     private static final Path CONFIG_PATH = resolveConfigPath();
 
@@ -55,14 +48,7 @@ public class ConfigManager {
         return CONFIG_PATH.getParent();
     }
 
-    /**
-     * 解析配置文件的绝对路径
-     *
-     * 定位逻辑：
-     * 1. 优先用 JAR/class 文件所在目录（启动器安装位置，最稳定）
-     * 2. 开发环境（从 target/classes 运行）时退回项目根目录
-     * 3. 都拿不到时退回 user.home，保证一定有可写位置
-     */
+    /** 解析配置文件的绝对路径 */
     private static Path resolveConfigPath() {
         Path base = launcherHome();
         return base.resolve(CONFIG_DIR).resolve(CONFIG_FILE);
@@ -228,8 +214,6 @@ public class ConfigManager {
 
     /**
      * 为缺失的键补上默认值（不覆盖已有值）
-     *
-     * 这样新增配置项时，旧配置文件也能平滑升级，
      * 而不会因为缺少某个键而出现 NPE。
      */
     private void backfillMissingDefaults() {
@@ -246,12 +230,7 @@ public class ConfigManager {
         }
 
         // ---- 平滑迁移：缩小默认窗口尺寸 ----
-        //
-        // 早期默认 1024x768，对笔记本（1366x768）来说太大了。
-        // 缩小到 860x600 后大部分屏幕都能完整显示。
-        //
         // 注意：只迁移「从未被用户主动改过的旧默认值」。
-        // 如果用户已经手动改过尺寸，尊重他的选择。
         migrateItem("windowWidth",  1024.0, 860);
         migrateItem("windowWidth",  1024,    860);
         migrateItem("windowHeight", 768.0,   600);
@@ -280,9 +259,7 @@ public class ConfigManager {
 
     /**
      * 备份损坏的配置文件（解析失败时调用）
-     *
      * @return true 表示已成功备份（原文件已移走，可以安全写默认值）；
-     *         false 表示备份失败（此时**不应**覆盖原文件）
      */
     private boolean backupBrokenConfig() {
         try {
@@ -311,14 +288,7 @@ public class ConfigManager {
     /**
      * 初始化默认配置
      */
-    /**
-     * 清掉历史遗留的 launcherVersion 配置项
-     *
-     * 早期版本把启动器版本号写进了 config.json。升级后旧值会一直留着，
-     * 导致程序自称旧版本、更新检测反复提示同一个"新版本"。
-     * 版本号现在从 Manifest / 资源文件读取，配置里这一项是多余的，
-     * 加载时顺手删除（下次保存配置时就不再写回磁盘）。
-     */
+    /** 清掉历史遗留的 launcherVersion 配置项 */
     private void removeStaleVersionKey() {
         if (config.remove("launcherVersion") != null) {
             logger.info("已清除配置中过时的 launcherVersion（版本号改由构建产物提供）");
@@ -336,11 +306,6 @@ public class ConfigManager {
         config.put("sourceType", "official");  // official 或 bmcl
         config.put("gameVersion", "");
         // 注意：这里**不再**写入 launcherVersion。
-        // 版本号是构建产物的属性（见 getLauncherVersion()），
-        // 存进配置文件会让升级后的程序一直自称旧版本。
-        // 旧版本留下的这个键会在加载时被清掉，见 removeStaleVersionKey()。
-        // 窗口默认尺寸：860x600。
-        // 早期是 1024x768，在 1366x768 的笔记本上几乎占满整屏。
         config.put("windowWidth", 860);
         config.put("windowHeight", 600);
         config.put("lastAccountId", "");
@@ -472,14 +437,7 @@ public class ConfigManager {
 
     /**
      * 获取「游戏数据目录」—— 所有游戏相关文件的落地位置
-     *
-     * 语义：**直接返回用户选定的根目录**（如 D:\Minecraft）。
-     * 版本 / 库 / 资源 / 模组 / 存档都直接放在该目录下，
-     * 这是 PCL、HMCL 等主流启动器的通行做法，
-     * 也能与用户已下载的整合包、手动安装的 .minecraft 兼容。
-     *
      * 注意：启动器自身的配置另存于「启动器程序目录/.mc_launcher」，
-     * 与游戏数据分开放置，互不影响。
      */
     public Path getGameDir() {
         GameDirectory active = getActiveDirectory();
@@ -816,12 +774,7 @@ public class ConfigManager {
         setString("javaVersion", version);
     }
 
-    /**
-     * VPN 联机：本机 MC 局域网的端口（玩家在 MC 里「对局域网开放」时客户端看到的端口）
-     *
-     * VPN 转发监听在 本机回环的该端口上；VPN 玩家连 10.77.0.1:<端口+1>，
-     * 房主端再把收到的连接转到这里。默认 25565。
-     */
+    /** VPN 联机：本机 MC 局域网的端口（玩家在 MC 里「对局域网开放」时客户端看到的端口） */
     public int getVpnLocalMcPort() {
         int p = getInt("vpnLocalMcPort", 25565);
         return (p > 0 && p < 65535) ? p : 25565;
@@ -870,29 +823,13 @@ public class ConfigManager {
 
     /**
      * 启动器版本号
-     *
-     * 优先从 JAR 的 Manifest 读取（Maven 打包时由 pom 的 <version> 写入），
-     * 读不到再退回资源文件，最后才用硬编码兜底。
-     *
      * 为什么**不读配置文件**：
-     * 版本号是构建产物的属性，不是用户设置。早先把它存进 config.json 后
-     * 出过问题 —— 升级到新版本时，旧配置里仍留着上一次的版本号，
-     * 于是程序自称旧版本，更新检测便不断提示"发现新版本"，
-     * 而用户跑的恰恰已经是最新的。
-     *
-     * setLauncherVersion() 保留只是为了不破坏既有调用方，
-     * 写入的值不会再影响本方法。
      */
     public String getLauncherVersion() {
         return staticLauncherVersion();
     }
 
-    /**
-     * 静态版本查询
-     *
-     * 不依赖 ConfigManager 实例 —— 启动极早期（还没加载配置）或
-     * 只想知道「我在跑哪个版本」的场合用它，避免触发整个配置加载流程。
-     */
+    /** 静态版本查询 */
     public static String staticLauncherVersion() {
         // 1) Manifest（Maven Jar Plugin 默认写入 Implementation-Version）
         String fromManifest = readVersionFromManifest();

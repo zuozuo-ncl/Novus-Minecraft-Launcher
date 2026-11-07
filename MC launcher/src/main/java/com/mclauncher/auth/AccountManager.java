@@ -24,14 +24,7 @@ public class AccountManager {
 
     /**
      * 账号文件路径
-     *
      * 必须与 config.json 放在同一位置（启动器程序目录下的 .mc_launcher），
-     * 且是**绝对路径**。
-     *
-     * 历史问题：这里曾是相对路径 ".mc_launcher/accounts.json"，
-     * 依赖进程工作目录。用户以不同的「起始位置」启动时，
-     * 读到的就是另一个文件 —— 表现为「重启后账号消失」，
-     * 而且会把账号文件散落到随机目录（比如某个游戏目录）里。
      */
     private static final Path ACCOUNTS_PATH =
             ConfigManager.getConfigDir().resolve("accounts.json");
@@ -39,14 +32,7 @@ public class AccountManager {
     private final Map<String, Account> accounts;
     private final Gson gson;
     private volatile String currentAccountId;
-    /**
-     * 账号文件的读写锁。
-     *
-     * 以前 save() 完全不加锁：登录线程（后台）与切换账号（FX 线程）同时写时，
-     * 两边各自快照 → 后写的覆盖先写的（新账号丢失）；而 writeAtomic 用固定
-     * 的 ".tmp" 文件名，两个线程同时写同一个 tmp 会把内容写成交错的非法 JSON，
-     * 下次启动 load() 解析失败 → 所有账号都消失。
-     */
+    /** 账号文件的读写锁。 */
     private final Object writeLock = new Object();
     /** 每个账号一把刷新锁：防止并发刷新把轮换后的 refresh_token 写乱 */
     private final ConcurrentHashMap<String, Object> refreshLocks = new ConcurrentHashMap<>();
@@ -116,13 +102,7 @@ public class AccountManager {
         }
     }
 
-    /**
-     * 确保账号的 Minecraft 令牌可用；过期时用 refresh_token 自动刷新。
-     *
-     * 以前完全没有刷新逻辑：登录 24 小时后账号就永久失效，只能删掉重登。
-     *
-     * @return 可直接用于启动的账号（可能已刷新并落盘）；无法恢复时返回原账号
-     */
+    /** 确保账号的 Minecraft 令牌可用；过期时用 refresh_token 自动刷新。 */
     public Account ensureFresh(Account account) {
         if (account == null || account.getType() != Account.Type.MICROSOFT
                 || !account.isTokenExpired()) {
@@ -162,12 +142,7 @@ public class AccountManager {
         logger.info("添加账号: {}", account.getUsername());
     }
 
-    /**
-     * 尽量限制账号文件权限（仅当前用户可读写）。
-     *
-     * 文件里是 refresh_token，等同于账号密码。Windows 上用 ACL 收紧，
-     * 其他平台改成 600；做不到时只记日志，不影响启动。
-     */
+    /** 尽量限制账号文件权限（仅当前用户可读写）。 */
     private static void restrictPermissions(Path path) {
         try {
             if (System.getProperty("os.name", "").toLowerCase().contains("win")) {

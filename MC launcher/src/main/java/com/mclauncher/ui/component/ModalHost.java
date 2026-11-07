@@ -18,18 +18,7 @@ import java.util.Deque;
 
 /**
  * 内嵌式弹窗宿主
- *
- * 与「独立 Stage 弹窗」的区别（本项目的既定交互约定）：
- * - 弹窗是主窗口 Scene 内的一个节点，**天然跟随主窗口移动**，不会脱出
- * - 半透明遮罩覆盖主内容区，点击遮罩或按 ESC 关闭
- * - 带淡入 + 轻微缩放动画，观感更连贯
- *
  * 用法：
- *   ModalHost host = ...;                       // MainWindow 持有
- *   host.show("标题", contentRegion, onClose);  // 弹出一个面板
- *   host.close();                               // 关闭最上层
- *
- * 支持多层叠加（后弹出的压在前面之上），关闭时逐层弹出。
  */
 public class ModalHost {
 
@@ -51,11 +40,6 @@ public class ModalHost {
 
         // 点击遮罩空白处 = 关闭（点击面板内部不关闭）
         // 只有「可关闭」的弹窗才响应，否则下载进度这类面板会被误关
-        //
-        // 判定说明：命中 root（遮罩本身）或命中面板外层的 wrapper
-        // （即 card 之外的 padding 区域）都算点在空白处。
-        // 只判断 root 会漏掉 wrapper 的 padding —— 那块区域视觉上
-        // 也是遮罩，点它却没反应会让人以为界面卡死。
         root.setOnMouseClicked(e -> {
             Object target = e.getTarget();
             Panel top = stack.peek();
@@ -96,13 +80,7 @@ public class ModalHost {
         return !stack.isEmpty();
     }
 
-    /**
-     * 把遮罩重新提到内容层之上
-     *
-     * MainWindow 每次切换页面都会 setAll 页面内容，新加入的节点默认排在
-     * sibling 列表末尾 —— 也就是压在遮罩之上。若不在切页后调用本方法，
-     * 弹窗就会被页面盖住，用户以为界面卡死了。
-     */
+    /** 把遮罩重新提到内容层之上 */
     public void bringToFront() {
         if (root.getParent() instanceof Pane parent) {
             root.toFront();
@@ -113,10 +91,6 @@ public class ModalHost {
 
     /**
      * 动态切换最上层弹窗的「可否关闭」
-     *
-     * 场景：下载进度面板初始不可关闭（防止中途误关），
-     * 下载失败后需要放开，让用户能关掉。
-     *
      * 只能放开、不能收紧 —— 已经画出来的 ✕ 按钮不会因此消失。
      */
     public void setClosable(boolean closable) {
@@ -127,23 +101,12 @@ public class ModalHost {
         top.closable = closable;
     }
 
-    /**
-     * 弹出一个面板
-     *
-     * @param title   面板标题（显示在标题栏）
-     * @param content 面板内容
-     * @param onClose 关闭回调（可为 null）
-     */
+    /** 弹出一个面板 */
     public void show(String title, Region content, Runnable onClose) {
         show(title, content, onClose, true);
     }
 
-    /**
-     * 弹出一个面板
-     *
-     * @param closable 是否显示关闭按钮 / 允许点遮罩关闭
-     *                 （下载进度这类面板可传 false，只允许通过自身按钮收起）
-     */
+    /** 弹出一个面板 */
     public void show(String title, Region content, Runnable onClose, boolean closable) {
         if (content == null) {
             logger.warn("弹窗内容为空，已忽略: {}", title);
@@ -188,9 +151,7 @@ public class ModalHost {
      */
     /**
      * 关闭最上层弹窗（必须在 JavaFX 线程调用）
-     *
      * 后台线程误调时改投 runLater：弹窗栈与场景图的修改必须和点击事件串行，
-     * 以前后台线程直接改在这里是没有任何保护的。
      */
     public void close() {
         if (!javafx.application.Platform.isFxApplicationThread()) {
@@ -224,15 +185,7 @@ public class ModalHost {
         logger.debug("弹窗关闭，剩余层数 {}", stack.size());
     }
 
-    /**
-     * 关闭指定层的弹窗（按引用移除，不只关栈顶）。
-     *
-     * 场景：下载进度面板入栈后，用户可能又打开了「取消确认」之类的子弹窗；
-     * 这时要收起进度面板，无参 close() 只能关掉最上层，进度面板会留在栈里，
-     * 叠加 closable=false 就变成一个关不掉的遮罩。
-     *
-     * @return 是否真的移除了该层
-     */
+    /** 关闭指定层的弹窗（按引用移除，不只关栈顶）。 */
     public boolean closePanel(javafx.scene.layout.Region content) {
         if (content == null || stack.isEmpty()) {
             return false;
@@ -363,11 +316,6 @@ public class ModalHost {
             content.getStyleClass().add("modal-content");
             VBox.setVgrow(content, Priority.ALWAYS);
             // 内容可压缩：VBox 分配高度时先满足标题栏等不可压缩子节点的 min，
-            // 内容区若带着大 min（StackPane/ScrollPane 会传递），窗口一矮就被压成 0，
-            // 底部的按钮随之被挤出可视区。
-            //
-            // 但只对**自带滚动区**的内容放开：没有滚动区的面板（简单的文字提示、
-            // 进度面板）一旦被压缩，超出部分会被直接裁掉，用户反而看不到内容。
             content.setMinHeight(0);
             if (!hasScrollable(content)) {
                 content.setMinHeight(javafx.scene.layout.Region.USE_PREF_SIZE);
@@ -380,16 +328,6 @@ public class ModalHost {
 
             // 限制尺寸：留出边距，避免铺满整屏；并且不超过当前窗口 ——
             // 否则固定 900x680 的卡片在 1000x600 的窗口里会把底部按钮挤出可视区。
-            //
-            // 注意这里只设 max，不设 min —— 卡片宽度由**内容自己**决定：
-            // 目录管理这类内容自带 prefSize，会撑到 720；
-            // 一句话的提示框则收缩到文字宽度，不会顶着一个大白框。
-            // 之前这里固定了 minWidth 420 / minHeight 240，
-            // 导致所有小提示框都被强行撑大。
-            //
-            // 必须用 bind 而不是 set：窗口可以让用户改小，set 只在打开那一刻有效。
-            // 绑定之后**不能**再对这两个属性赋值（A bound value cannot be set），
-            // 所以原来的 setMaxWidth(900) 已经合并进下面的 bindings。
             javafx.scene.Scene scene = root.getScene();
             //
             // 只设 max 不够：中间行被强制按 PREF 高度居中后，卡片会缩成
@@ -417,22 +355,7 @@ public class ModalHost {
             }
 
             // 外层：居中 + 内边距
-            //
             // 尺寸要点（下方注释附实测数据）：卡片必须**同时**按内容
-            // 收缩宽度和高度，但单个布局容器做不到两件事：
-            //   - StackPane 子节点无 maxHeight 时被拉满高度；
-            //     即使设了 maxHeight=USE_PREF_SIZE，宽度又会撞 maxWidth 上限
-            //   - HBox 的两个 spacer 能管好宽度，但垂直方向**必定**拉满
-            //     （HBox 没有关闭垂直 fill 的 API）
-            //
-            // 因此用两层：HBox 负责水平居中，外层 StackPane 负责垂直居中，
-            // 并把中间行的高度锁成 USE_PREF_SIZE 免遭拉伸。
-            //
-            // 实测（1000x700 窗口，短提示文案）：
-            //   StackPane 裸用            -> 900 x 636   （宽高都被拉满）
-            //   StackPane + maxH=PREF     -> 900 x  96   （高度对了，宽度撞上限）
-            //   HBox 裸用                 -> 304 x 636   （宽度对了，高度被拉满）
-            //   HBox + StackPane 组合      -> 304 x  96   ✓
             Region leftSpacer = new Region();
             Region rightSpacer = new Region();
             HBox.setHgrow(leftSpacer, Priority.ALWAYS);
@@ -450,11 +373,7 @@ public class ModalHost {
             wrapper.setMaxWidth(Double.MAX_VALUE);
             wrapper.setMaxHeight(Double.MAX_VALUE);
             // 注意：不能让 wrapper 的 min 变成 0 —— 弹窗靠「wrapper 的 min 撑开
-            // 遮罩」来分配高度（StackPane 的 fillHeight 分配公式依赖 min 之和），
-            // min=0 会让弹窗被压成标题栏那么高。wrapper 的 min 只受卡片 maxHeight 约束。
             // 注意：这里**不能**设 pickOnBounds(false)，
-            // 否则遮罩层收不到点击，"点空白处关闭"就会失效。
-            // 关闭判断靠 root 的点击处理器：命中 root 或 shell 都算点空白。
 
             this.shell = wrapper;
             node = wrapper;

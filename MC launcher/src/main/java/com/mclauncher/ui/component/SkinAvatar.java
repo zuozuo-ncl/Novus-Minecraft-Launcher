@@ -11,19 +11,7 @@ import javafx.scene.shape.Rectangle;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-/**
- * 带皮肤图标的头像组件
- *
- * 与 {@link AvatarView} 的区别：
- * <ul>
- *   <li>先显示用户名首字母占位（立刻可见，不闪空白）</li>
- *   <li>后台线程去皮肤站取皮肤，取到后换成真实头像</li>
- *   <li>取不到就保持首字母占位 —— 绝不显示一个坏图</li>
- * </ul>
- *
- * <b>线程约定</b>：{@link #bind(Account)} 可以从任意线程调用，
- * 内部会把结果切回 FX 线程。
- */
+/** 带皮肤图标的头像组件 */
 public final class SkinAvatar {
 
     private static final Logger logger = LoggerFactory.getLogger(SkinAvatar.class);

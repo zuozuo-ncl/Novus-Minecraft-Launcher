@@ -19,43 +19,48 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * 一键开房间 / 加入房间（VPN 模式）
- *
- * <h3>房主</h3>
- * <ol>
- *   <li>申请房间 → 建 VPN 长连接（vpn-host）→ 开控制通道（hello）</li>
- *   <li>本机 MC 的局域网端口为 P。房主自己的 MC 客户端连进来时，
- *       启动器为这位玩家申请 join token + 虚拟 IP，把邀请码发给房主界面。</li>
- *   <li>朋友经 VPN 连 10.77.0.N:P+1 → 包到房主 → 房主转发器配对并交付给 MC。</li>
- * </ol>
- *
- * <h3>玩家</h3>
- * <ol>
- *   <li>粘贴邀请 → 用口令向中继换取 token/uuid/IP</li>
- *   <li>配虚拟网卡 10.77.0.N → 建 VPN 长连接（vpn-join + token）</li>
- *   <li>在 127.0.0.1:P+1 监听：本机 MC 每条连接经 VPN 转到房主</li>
- * </ol>
- *
- * <p>虚拟地址与 uuid 都由<b>服务器</b>分配，客户端不再自报、不再固定 seat。
- */
+/** 一键开房间 / 加入房间（VPN 模式） */
 public final class VpnSession implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(VpnSession.class);
 
     public static final int FORWARD_OFFSET = 1;
 
+    /**
+     * 玩家侧「本地转发监听口」相对游戏端口的偏移。
+     * 监听口把连接接住再经 VPN 出站。监听口不能等于 P —— 否则 accept 之后
+     */
+    public static final int PEER_PORT_OFFSET = 10000;
+
     private final WintunAdapter adapter;
-    private final VpnTunnel tunnel;
+    /** 当前隧道。房主侧断线后会被替换成新建的隧道，所以不能是 final */
+    private volatile VpnTunnel tunnel;
     private final String role;
     private final String address;
     private volatile boolean closed;
 
     /** 房主：控制通道线程 */
     private Thread controlThread;
+    /** 房主：控制通道心跳线程 */
+    private Thread controlHeartbeat;
+    /** 房主：中继地址（重连时用） */
+    private volatile String relayHost;
+    private volatile int relayPort;
+    /** 房主：房间号与 token（重连时用；房间被回收后需要重新建房） */
+    private volatile String roomId;
+    private volatile String roomToken;
+    private volatile String hostUuid;
+    /** 房主：watchdog 正在重连中，避免多个线程同时重建 */
+    private final java.util.concurrent.atomic.AtomicBoolean reconnecting =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    /** 房主：连续重连失败次数（超过上限就放弃，交给用户手动重开） */
+    private final java.util.concurrent.atomic.AtomicInteger reconnectFailures =
+            new java.util.concurrent.atomic.AtomicInteger();
     /** 房主：控制通道出站请求的响应队列 */
     private final LinkedBlockingQueue<String[]> controlOutbox = new LinkedBlockingQueue<>();
     private volatile OutputStream controlOut;
+    /** 当前控制通道的 socket（用于判断某个读循环是不是「过期的旧线程」） */
+    private volatile Socket controlSocket;
 
     /** 房主：玩家要连的端口 = 局域网端口 + 1（本机 MC 自己占用局域网端口） */
     private volatile int gameForwardPort;
@@ -64,17 +69,7 @@ public final class VpnSession implements AutoCloseable {
     private ExecutorService forwardPool;
     private final AtomicInteger forwardSeq = new AtomicInteger();
 
-    /**
-     * 房主侧网关：玩家经 VPN 发往本机 MC 的 TCP 连接。
-     *
-     * 以前是「一个全局 pending 队列 + 一个全局 socket 队列」，按到达顺序配对，
-     * 结果多位玩家同时在线时 A 的数据会被写进 B 的 MC 连接。现在严格按四元组寻址：
-     *
-     *   key = 源虚拟IP:源端口  （玩家 MC 发起连接时的本地端口）
-     *
-     * 同一个玩家的新连接到来时才建立一条到 127.0.0.1:mcPort 的新连接并登记 key；
-     * 之后的字节只写回它自己那条。FIN 只结束属于自己的那条。
-     */
+    /** 房主侧网关：玩家经 VPN 发往本机 MC 的 TCP 连接。 */
     private static final class GatewayConn {
         final String srcIp;
         final int srcPort;
@@ -133,12 +128,7 @@ public final class VpnSession implements AutoCloseable {
         return (s != null && "host".equals(s.role)) ? s : null;
     }
 
-    /**
-     * 房主：游戏进程的本地转发口。
-     *
-     * 优先返回执行了 bind 的实际端口（局域网端口被占用时，启动器改绑系统分配端口，
-     * 真正的端口在这里暴露出来，由 GameLauncher 使用）。
-     */
+    /** 房主：游戏进程的本地转发口。 */
     public int forwardGatewayPort() {
         ServerSocket ss = forwardServer;
         if (ss != null && ss.isBound()) {
@@ -193,8 +183,8 @@ public final class VpnSession implements AutoCloseable {
 
             // VPN 帧握手优先走中继的 HTTP 端口（中继会把 MCRELAY 首行分流给 VPN 处理），
             // 这样经穿透映射时只需暴露一个端口；老版本中继走不通时退回「端口 + 1」
-            t = new VpnTunnel(relayHost, vpnHandshakePort(relayHost, relayPort, Role.HOST,
-                    roomToken[0], roomToken[1]), roomToken[0], roomToken[1], Role.HOST, uuid, ad);
+            t = new VpnTunnel(relayHost, vpnHandshakePort(relayHost, relayPort), roomToken[0],
+                    roomToken[1], Role.HOST, uuid, ad);
             t.start();
 
             VpnSession s = new VpnSession(ad, t, "host", VpnNetworkConfig.HOST_IP);
@@ -220,6 +210,11 @@ public final class VpnSession implements AutoCloseable {
                                String apiKey, int localMcPort) {
         this.gameForwardPort = playerPort(localMcPort);
         this.localMcPort = localMcPort;
+        this.relayHost = relayHost;
+        this.relayPort = relayPort;
+        this.roomId = roomId;
+        this.roomToken = roomToken;
+        this.hostUuid = tunnel.uuidValue();
 
         // 1) 本地玩家入口
         try {
@@ -246,8 +241,51 @@ public final class VpnSession implements AutoCloseable {
         controlThread.setDaemon(true);
         controlThread.start();
 
+        // 房主控制通道的心跳：中继每 5 秒期望一个新行，错过 3 次就回收房间。
+        // 以前这里没有心跳 —— 房主不签发邀请、也没有玩家进出时，控制通道
+        // 会因中继的读超时而断开，随后房间被回收；而房主界面上仍然显示
+        // 「房间已开启」，邀请也一直能复制，但另一端永远找不到这个房间。
+        startControlHeartbeat();
+
         // 2.5) 隧道把「发往 10.77.0.1」的包交给网关（按四元组写进对应玩家的本机 MC 连接）
         tunnel.setGatewaySink(this::routeGatewayPacket);
+        // 隧道被中继断开时自动重建（见 reconnectHost）
+        // 隧道被中继断开时自动重建（见 reconnectHost）。
+        // 必须捕获「当时的那个隧道」而不是在回调里读字段：否则重连替换 tunnel 后，
+        // 旧隧道延迟触发的回调会读到新隧道，恒等成立，引发额外的重建。
+        final VpnTunnel initial = tunnel;
+        initial.setOnLost(() -> onTunnelLost(initial));
+    }
+
+    /** 控制通道心跳：每 4 秒一个 ping，中继 3 次未收到就回收房间 */
+    private void startControlHeartbeat() {
+        controlHeartbeat = new Thread(() -> {
+            while (!closed) {
+                try {
+                    Thread.sleep(4000);
+                } catch (InterruptedException e) {
+                    return;
+                }
+                if (closed) {
+                    return;
+                }
+                java.io.OutputStream o = controlOut;
+                if (o == null) {
+                    continue;   // 控制通道还没建立（或刚断开），下一轮再试
+                }
+                try {
+                    synchronized (this) {
+                        o.write("{\"type\":\"ping\"}\n".getBytes(StandardCharsets.UTF_8));
+                        o.flush();
+                    }
+                } catch (IOException e) {
+                    logger.debug("控制通道心跳发送失败: {}", e.getMessage());
+                    controlOut = null;
+                }
+            }
+        }, "vpn-host-heartbeat");
+        controlHeartbeat.setDaemon(true);
+        controlHeartbeat.start();
     }
 
     private void acceptEntrants() {
@@ -266,15 +304,14 @@ public final class VpnSession implements AutoCloseable {
 
     /**
      * 房主自己的 MC 客户端连进局域网端口。
-     *
      * 真实生成的邀请码只在这里产生。**不要**拿这条连接去连别人：
-     * 它是要加入某个已有房间的房主 MC 客户端，服务它的是该房间的 peer 列表。
      */
     private void onEntrant(Socket local) {
         try {
             VpnTunnel.Peer peer = requestNewPeer();
             if (peer == null) {
                 local.close();
+                logger.warn("申请邀请失败：控制通道不可用（房间可能正在重建）");
                 return;
             }
             if (inviter != null) {
@@ -292,6 +329,12 @@ public final class VpnSession implements AutoCloseable {
 
     public interface PeerListener {
         void accept(VpnTunnel.Peer peer);
+
+        /**
+         * 房间已失效（控制通道重建失败，或连续失败次数用完）。
+         * 默认空实现：老调用方不需要关心。
+         */
+        default void onRoomLost(String reason) {}
     }
 
     private volatile PeerListener inviter;
@@ -307,16 +350,26 @@ public final class VpnSession implements AutoCloseable {
     /** 房主：向中继要一枚 join token；返回 null 表示失败 */
     private VpnTunnel.Peer requestJoinToken() throws IOException, InterruptedException {
         for (int attempt = 0; attempt < 3 && !closed; attempt++) {
-            OutputStream o = controlOut;
-            if (o == null) {
+            int id = forwardSeq.incrementAndGet();
+            boolean sent = false;
+            synchronized (this) {
+                // 锁内重新读取：控制通道重连期间 controlOut 会被替换，
+                // 用锁外读到的旧流写会抛 Broken pipe
+                OutputStream o = controlOut;
+                if (o != null) {
+                    try {
+                        o.write(("{\"type\":\"vpn-token\",\"id\":" + id + "}\n")
+                                .getBytes(StandardCharsets.UTF_8));
+                        o.flush();
+                        sent = true;
+                    } catch (IOException e) {
+                        logger.warn("发送邀请请求失败: {}", e.getMessage());
+                    }
+                }
+            }
+            if (!sent) {
                 Thread.sleep(200);
                 continue;
-            }
-            int id = forwardSeq.incrementAndGet();
-            synchronized (this) {
-                o.write(("{\"type\":\"vpn-token\",\"id\":" + id + "}\n")
-                        .getBytes(StandardCharsets.UTF_8));
-                o.flush();
             }
             String key = "req:" + id;
             long deadline = System.currentTimeMillis() + 8000;
@@ -350,21 +403,22 @@ public final class VpnSession implements AutoCloseable {
         }
     }
 
-    /** 房主控制通道：hello → 收发信令 */
+    /** 房主控制通道：hello → 收发信令。 */
     private void runHostControl(String relayHost, int relayPort, String roomId, String token) {
-        Socket c = null;
-        try {
-            c = new Socket();
-            c.connect(new InetSocketAddress(relayHost, relayPort), 15000);
-            c.setTcpNoDelay(true);
-            OutputStream o = c.getOutputStream();
-            o.write(("MCRELAY{\"type\":\"hello\",\"room\":\"" + roomId
-                    + "\",\"token\":\"" + token + "\"}\n").getBytes(StandardCharsets.UTF_8));
-            o.flush();
-            controlOut = o;
+        if (!openControl(roomId, token)) {
+            if (!closed) {
+                onControlLost("控制通道建立失败");
+            }
+        }
+    }
 
-            BufferedReader r = new BufferedReader(new InputStreamReader(
-                    c.getInputStream(), StandardCharsets.UTF_8));
+    /**
+     * 控制通道读循环（初次连接与重连共用）。
+     *
+     * 调用前 openControl 已经读过第一行 hello-ok；这里只处理之后的消息。
+     */
+    private void controlLoop(BufferedReader r, Socket c) {
+        try {
             String line;
             while (!closed && (line = r.readLine()) != null) {
                 if (line.isBlank()) {
@@ -399,23 +453,192 @@ public final class VpnSession implements AutoCloseable {
                 logger.warn("VPN 控制通道断开: {}", e.getMessage());
             }
         } finally {
-            controlOut = null;
             if (c != null) {
                 try { c.close(); } catch (IOException ignored) { }
+            }
+            // 只有「仍然是当前通道」的读循环退出才意味着房间失联。
+            // 重连时 openControl 会替换 controlSocket 并起新线程；旧线程此时
+            // 可能还在收尾，不能让它把刚建好的新通道当成「又断了」。
+            synchronized (this) {
+                if (controlSocket != c) {
+                    return;
+                }
+                controlSocket = null;
+                controlOut = null;
+            }
+            // 控制通道没了，中继会在 15 秒内回收房间 —— 主动重连，
+            // 而不是让界面继续显示一个已经不存在的房间
+            if (!closed) {
+                onControlLost("控制通道断开");
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------
+    //  断线重建（房主）
+    // ---------------------------------------------------------------
+
+    /** 控制通道断开 */
+    private void onControlLost(String reason) {
+        reconnectHost(reason);
+    }
+
+    /** 隧道断开（由 VpnTunnel.setOnLost 回调）。 */
+    private void onTunnelLost(VpnTunnel source) {
+        if (source != tunnel) {
+            logger.debug("忽略旧隧道的断开回调");
+            return;
+        }
+        reconnectHost("VPN 隧道断开");
+    }
+
+    /** 房主：控制通道或隧道断开后重建。 */
+    private void reconnectHost(String reason) {
+        if (closed || !reconnecting.compareAndSet(false, true)) {
+            return;
+        }
+        logger.info("VPN 房间失联（{}），开始重建…", reason);
+        Thread t = new Thread(() -> {
+            try {
+                long delay = 1000;
+                while (!closed) {
+                    if (reconnectFailures.get() >= 5) {
+                        logger.warn("VPN 房间重建连续失败 {} 次，停止重试（{}）",
+                                reconnectFailures.get(), reason);
+                        notifyRoomLost("房间重建失败，请重新开房");
+                        return;
+                    }
+                    try {
+                        Thread.sleep(delay);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    if (closed) {
+                        return;
+                    }
+                    if (tryReconnectOnce()) {
+                        reconnectFailures.set(0);
+                        logger.info("VPN 房间 {} 已恢复", roomId);
+                        return;
+                    }
+                    reconnectFailures.incrementAndGet();
+                    delay = Math.min(delay * 2, 8000);
+                }
+            } finally {
+                reconnecting.set(false);
+            }
+        }, "vpn-host-reconnect");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** 尝试重建一次：先沿用原房间，失败再重新建房。成功返回 true */
+    private boolean tryReconnectOnce() {
+        if (openControl(roomId, roomToken)) {
+            VpnTunnel cur = tunnel;
+            if (cur != null && cur.isRunning()) {
+                return true;
+            }
+            return reopenTunnel();
+        }
+
+        // 房间已不存在：重新建房
+        try {
+            String[] rt = requestRoom(relayHost, relayPort, "我的联机房间", null);
+            roomId = rt[0];
+            roomToken = rt[1];
+            logger.info("原房间已失效，已重新建房：{}", roomId);
+            return openControl(roomId, roomToken) && reopenTunnel();
+        } catch (IOException e) {
+            logger.warn("重新建房失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    /** 建立（或重建）控制通道；成功返回 true。 */
+    private boolean openControl(String rid, String token) {
+        Socket c = null;
+        try {
+            c = new Socket();
+            c.connect(new InetSocketAddress(relayHost, relayPort), 8000);
+            c.setTcpNoDelay(true);
+            OutputStream o = c.getOutputStream();
+            // 房间号与 token 都是服务器生成的十六进制串，不含需要转义的字符
+            o.write(("MCRELAY{\"type\":\"hello\",\"room\":\"" + rid
+                    + "\",\"token\":\"" + token + "\"}\n").getBytes(StandardCharsets.UTF_8));
+            o.flush();
+            c.setSoTimeout(5000);
+            BufferedReader r = new BufferedReader(new InputStreamReader(
+                    c.getInputStream(), StandardCharsets.UTF_8));
+            String first = r.readLine();
+            if (first == null || !first.contains("hello-ok")) {
+                // 中继用一行 {"error":"房间不存在或已关闭"} 说明原因后关闭
+                logger.warn("VPN 房间 {} 握手被拒: {}", rid, first);
+                closeQuietly(c);
+                return false;
+            }
+            c.setSoTimeout(0);
+
+            synchronized (this) {
+                Socket old = controlSocket;
+                controlSocket = c;
+                controlOut = o;
+                if (old != null) {
+                    try { old.close(); } catch (IOException ignored) { }
+                }
+            }
+            controlOutbox.clear();
+
+            Socket finalC = c;
+            controlThread = new Thread(() -> controlLoop(r, finalC), "vpn-host-control");
+            controlThread.setDaemon(true);
+            controlThread.start();
+            startControlHeartbeat();
+            return true;
+        } catch (IOException e) {
+            logger.warn("控制通道重建失败（房间 {}）: {}", rid, e.getMessage());
+            closeQuietly(c);
+            return false;
+        }
+    }
+
+    /** 重建隧道（沿用当前房间号与 token） */
+    private boolean reopenTunnel() {
+        try {
+            int port = vpnHandshakePort(relayHost, relayPort);
+            VpnTunnel nt = new VpnTunnel(relayHost, port, roomId, roomToken,
+                    Role.HOST, hostUuid, adapter);
+            nt.setGatewaySink(this::routeGatewayPacket);
+            final VpnTunnel created = nt;
+            nt.setOnLost(() -> onTunnelLost(created));
+            nt.start();
+            VpnTunnel prev = tunnel;
+            tunnel = nt;
+            if (prev != null && prev != nt) {
+                try { prev.close(); } catch (Exception ignored) { }
+            }
+            logger.info("VPN 隧道已重连（房间 {}）", roomId);
+            return true;
+        } catch (IOException e) {
+            logger.warn("VPN 隧道重连失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private void notifyRoomLost(String reason) {
+        PeerListener l = inviter;
+        if (l != null) {
+            try {
+                l.onRoomLost(reason);
+            } catch (RuntimeException e) {
+                logger.debug("房间失效回调异常: {}", e.getMessage());
             }
         }
     }
 
     /**
      * 房主：游戏进程转发器接住一个来自 VPN 的 TCP 连接。
-     *
      * 调用方（GameLauncher）已经把本机 MC 写回来的字节回放给玩家，
-     * 并把这条连到本机 MC 的 socket 交过来。这里按「来源虚拟 IP + 源端口」
-     * 登记，之后该玩家发往 10.77.0.1 的字节只写进这一条。
-     *
-     * @param srcIp   玩家虚拟 IP（10.77.0.N）
-     * @param srcPort 玩家 MC 发起连接时使用的本地端口
-     * @param sock    已连到本机 MC 的 socket
      */
     public void registerGatewayConn(String srcIp, int srcPort, Socket sock) {
         if (!"host".equals(role) || sock == null || srcIp == null) {
@@ -445,12 +668,7 @@ public final class VpnSession implements AutoCloseable {
         return ip + ":" + port;
     }
 
-    /**
-     * 网关收到的 IP 包 → 按四元组写进对应的本机 MC 连接。
-     *
-     * 只处理 TCP（ip[9] == 6）。之前不看协议号，玩家的 UDP 探测包会被当成
-     * TCP 流写进 MC，直接把连接写坏。
-     */
+    /** 网关收到的 IP 包 → 按四元组写进对应的本机 MC 连接。 */
     private void routeGatewayPacket(byte[] ip) {
         try {
             if (ip.length < 20 || ((ip[0] >> 4) & 0x0F) != 4) {
@@ -513,6 +731,18 @@ public final class VpnSession implements AutoCloseable {
         return join(relayHost, relayPort, roomId, invite, "", gameMcPort, WintunAdapter.ADAPTER_NAME);
     }
 
+    /**
+     * 玩家：本地转发要在本机另绑的端口。
+     * 转发监听必须换一个端口，否则会和「出站目标」撞在一起。
+     */
+    public static int peerLocalPort(int gameMcPort) {
+        int p = Math.max(1, Math.min(65534, gameMcPort)) + PEER_PORT_OFFSET;
+        if (p > 65535) {
+            p = PEER_PORT_OFFSET;
+        }
+        return p;
+    }
+
     public static VpnSession join(String relayHost, int relayPort, String roomId,
                                   String invite, String apiKey, int gameMcPort,
                                   String adapterName) throws IOException {
@@ -573,8 +803,8 @@ public final class VpnSession implements AutoCloseable {
             VpnNetworkConfig.setAddress(adapterName, own[1]);
             VpnNetworkConfig.routeSubnetToAdapter(adapterName);
 
-            t = new VpnTunnel(relayHost, vpnHandshakePort(relayHost, relayPort, Role.PEER,
-                    roomId, own[0]), roomId, own[0], Role.PEER, own[2], ad);
+            t = new VpnTunnel(relayHost, vpnHandshakePort(relayHost, relayPort), roomId,
+                    own[0], Role.PEER, own[2], ad);
             t.start();
 
             VpnSession s = new VpnSession(ad, t, "peer", targetHost);
@@ -598,22 +828,30 @@ public final class VpnSession implements AutoCloseable {
     }
 
     private void startPeerForwarding(String targetHost, int targetPort) {
+        int listenPort = peerLocalPort(targetPort);
         try {
             peerServer = new ServerSocket();
             peerServer.setReuseAddress(true);
+            // 只监听回环：外部扫描不到
             peerServer.bind(new InetSocketAddress(
-                    java.net.InetAddress.getByName("127.0.0.1"), targetPort), 50);
+                    java.net.InetAddress.getByName("127.0.0.1"), listenPort), 50);
             Thread acc = new Thread(() -> {
                 while (!closed) {
+                    java.net.Socket local = null;
+                    java.net.Socket out = null;
                     try {
-                        Socket local = peerServer.accept();
+                        local = peerServer.accept();
                         local.setTcpNoDelay(true);
-                        Socket out = new Socket();
+                        // 出站目标是房主的虚拟地址 + 游戏端口（= 玩家在 MC 里要填的端口），
+                        // 不是本机监听口 —— 以前两者是同一个数，accept 之后又连回自己。
+                        out = new java.net.Socket();
                         out.connect(new InetSocketAddress(targetHost, targetPort), 5000);
                         out.setTcpNoDelay(true);
                         newPumpThreads(local, out);
                     } catch (IOException e) {
-                        if (closed) {
+                        closeQuietly(local);
+                        closeQuietly(out);
+                        if (closed || peerServer.isClosed()) {
                             return;
                         }
                         logger.debug("玩家本地转发 accept 失败: {}", e.getMessage());
@@ -622,7 +860,8 @@ public final class VpnSession implements AutoCloseable {
             }, "vpn-peer-accept");
             acc.setDaemon(true);
             acc.start();
-            logger.info("玩家已在 127.0.0.1:{} 监听，MC 里填 localhost:{}", targetPort, targetPort);
+            logger.info("玩家已在 127.0.0.1:{} 监听，MC 里填 localhost:{}（经 VPN 连房主 {}:{}）",
+                    listenPort, listenPort, targetHost, targetPort);
         } catch (IOException e) {
             logger.warn("玩家本地端口转发启动失败（可改为在 MC 里直接填 {}:{}）: {}",
                     targetHost, targetPort, e.getMessage());
@@ -722,27 +961,23 @@ public final class VpnSession implements AutoCloseable {
         try { s.close(); } catch (IOException ignored) { }
     }
 
-    /**
-     * 选出 VPN 帧握手要连的端口。
-     *
-     * 先试中继的 HTTP 端口本身：新版中继在 HTTP 端口上会把 MCRELAY 首行分流给 VPN 处理，
-     * 这样只映射一个对外端口就能联机。老版本中继只认「HTTP 端口 + 1」，
-     * 新版连不通时退回过去，以免影响自建的老部署。
-     */
-    private static int vpnHandshakePort(String host, int port, Role role, String room, String token) {
+    /** 选出 VPN 帧握手要连的端口。 */
+    private static int vpnHandshakePort(String host, int port) {
         try (Socket probe = new Socket()) {
             probe.connect(new InetSocketAddress(host, port), 5000);
             probe.setTcpNoDelay(true);
-            String type = role == Role.HOST ? "vpn-host" : "vpn-join";
-            String line = "MCRELAY{\"type\":\"" + type + "\",\"room\":\"" + room
-                    + "\",\"token\":\"" + token + "\"}\n";
+            // 必须用无副作用的探测类型。以前这里直接发 vpn-host / vpn-join：
+            // 中继会真的接管那条连接 —— 房主侧会把真正的 VPN 主机顶掉
+            // （旧连接的 defer 随后把房间回收），玩家侧会消费掉 join token
+            // 导致真正握手「token 无效」。探测完还立即断开，等于每次开房都
+            // 在中继上制造一次断开事件。
+            String line = "MCRELAY{\"type\":\"" + VpnTunnel.PROBE_TYPE + "\"}\n";
             probe.getOutputStream().write(line.getBytes(StandardCharsets.UTF_8));
             probe.getOutputStream().flush();
             probe.setSoTimeout(3000);
             java.io.InputStream in = probe.getInputStream();
             int first = in.read();
             if (first == '{') {
-                // 中继已经在处理这条 VPN 连接（不读它自己的消息，直接断开重连）
                 logger.info("中继 {}:{} 的 HTTP 端口接受 VPN 握手", host, port);
                 return port;
             }
@@ -833,6 +1068,17 @@ public final class VpnSession implements AutoCloseable {
         }
         if (controlThread != null) {
             controlThread.interrupt();
+        }
+        if (controlHeartbeat != null) {
+            controlHeartbeat.interrupt();
+        }
+        // 重连线程在 sleep 中检查 closed；interrupt 让它在退避期间也能立刻退出
+        synchronized (this) {
+            if (controlSocket != null) {
+                try { controlSocket.close(); } catch (IOException ignored) { }
+                controlSocket = null;
+            }
+            controlOut = null;
         }
         try {
             if (tunnel != null) {

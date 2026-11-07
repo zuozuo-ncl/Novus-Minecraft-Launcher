@@ -33,21 +33,24 @@ public class GameLauncher {
     private com.mclauncher.ui.component.ModalHost modalHost;
     /**
      * 简体中文的语言代码
-     *
      * 必须用**小写** zh_cn —— 这是 Minecraft 的资源文件命名
-     * （assets 里是 minecraft/lang/zh_cn.json），游戏按此 key 查找语言。
-     * 写成 zh_CN 会查不到文件而回退英文，这是之前「启动游戏是英文」的原因。
      */
     private static final String LANG_ZH_CN = "zh_cn";
 
     /**
+     * 官方启动器实际使用的翻译键。本地化资源早就改叫 zh_cn.json 了，
+     * 但 options.txt 里长期写的是老的 zh_CN —— 游戏对语言代码大小写不敏感，
+     * 这里照官方习惯写，兼容更老的版本。
+     */
+    private static final String LANG_ZH_CN_OFFICIAL = "zh_CN";
+
+    /** 启动器替新玩家选好中文后写在 options.txt 里的标记（文件末尾的注释行）。 */
+    private static final String LANG_MARKER = "nclLang";
+    private static final String LANG_MARKER_VERSION = "2";
+
+    /**
      * 当前游戏目录。
-     *
      * 不能像早先那样在构造时固定成 config.getGameDir()：那时启动器刚起来，
-     * 用户还没在「目录管理」里选目录，拿到的是默认的数据目录下 minecraft 子目录。
-     * 之后用户添加/切换目录，启动游戏仍然去旧路径找版本 JSON，
-     * 表现为「版本 JSON 不存在 …\NCL_Launcher\minecraft\versions…」。
-     * 现在每次启动游戏都按当前配置重新解析。
      */
     private volatile Path gameDir;
     private final Path launcherDir;
@@ -58,10 +61,7 @@ public class GameLauncher {
 
     /**
      * MC 本地服务器「有玩家连上来」的通知（VPN 联机用）
-     *
-     * 参数：(玩家编号, 该连接在完成本地服务器握手前就已经收到的原始字节)。
      * VPN 转发必须先写回这些字节（MC 握手 + login start 可能早于转发建立），
-     * 否则 MC 客户端会一直卡在「正在登录」。
      */
     private PlayerJoinHandler playerJoinConsumer;
 
@@ -77,9 +77,7 @@ public class GameLauncher {
 
     /**
      * 是否允许把本机 MC 局域网的连接交给 VPN 转发。
-     *
      * 只在本机确实开了 VPN 房主时返回 true —— 否则任何人扫一下这台机器
-     * 的 MC 端口都能进来；也避免在没开 VPN 时浪费一个转发线程。
      */
     private BooleanSupplier vpnForwardingGate;
 
@@ -125,14 +123,7 @@ public class GameLauncher {
         this.vpnForwardingGate = gate;
     }
 
-    /**
-     * 启动游戏
-     *
-     * @param versionId 版本 ID
-     * @param account   账号
-     * @param javaPath  Java 路径（null 表示自动检测）
-     * @return 是否启动成功
-     */
+    /** 启动游戏 */
     public boolean launch(String versionId, Account account, String javaPath) {
         return launch(versionId, account, javaPath, null);
     }
@@ -185,10 +176,9 @@ public class GameLauncher {
             // 3. 构建启动命令
             List<String> command = buildCommand(javaExe, versionJson, account, versionId);
 
-            // 3.5 确保游戏语言为简体中文
-            //     --lang 只在首次生成 options.txt 时生效；
-            //     已有 options.txt 的情况下必须直接改文件，否则仍是英文。
-            ensureChineseLanguage();
+            // 3.5 新玩家首次进某个版本时，把语言设成简体中文
+            //     已由游戏写出的设置不动，尊重玩家在游戏里的选择
+            ensureChineseLanguage(versionId);
 
             // 4. 打印完整命令（调试用）
             log(L.t("s_d36f6195ea") + String.join(" ", maskSensitive(command)));
@@ -243,13 +233,7 @@ public class GameLauncher {
         return 17; // 默认 Java 17
     }
 
-    /**
-     * 确定 Java 路径（含版本检查与自动下载）
-     *
-     * @param configuredPath    手动指定的路径
-     * @param requiredVersion   版本要求的最低 Java 主版本号
-     * @return Java 可执行文件路径，找不到返回 null
-     */
+    /** 确定 Java 路径（含版本检查与自动下载） */
     private String resolveJavaPath(String configuredPath, int requiredVersion) {
         // 1. 如果配置了路径，优先使用
         if (configuredPath != null && !configuredPath.isEmpty()) {
@@ -273,14 +257,7 @@ public class GameLauncher {
         }
 
         // 3. 自动检测可用的 Java —— **必须包含启动器自己下载的 JRE**
-        //
         // 关键：这里用 JavaRuntimeManager.detectInstalledJava() 而不是静态的
-        // JavaDetector.detectJavaVersions()。后者只扫 JAVA_HOME / 当前 JVM /
-        // 系统常见路径，**不扫 <launcherDir>/java**，而自动下载的 JRE 恰好装在
-        // 那里。早期用静态方法导致：第一次下载 JRE 成功 → 第二次启动又找不到
-        // → 每次启动都重新下载 40MB。没装 Java 的玩家会反复被要求下载。
-        //
-        // detectInstalledJava() 内部 = 系统检测 + 启动器 java 目录检测。
         try {
             JavaRuntimeManager mgr = new JavaRuntimeManager(launcherDir);
             try {
@@ -324,9 +301,22 @@ public class GameLauncher {
                                     log(status);
                                 }
 
+                                private long lastLog = 0;
+
                                 @Override
                                 public void onProgress(double percent, long downloaded, long total) {
-                                    // 可选：更新进度 UI
+                                    // 之前这里是空实现：自动下载 JRE 属于启动线程上的
+                                    // 同步阻塞调用（几十 MB），界面上却全程没有反馈，
+                                    // 看起来像「卡在正在准备」。至少每秒把进度写进日志。
+                                    long now = System.currentTimeMillis();
+                                    if (now - lastLog < 1000 && percent < 100) {
+                                        return;
+                                    }
+                                    lastLog = now;
+                                    log(String.format("%s %.1f%%  %s / %s",
+                                            L.t("s_806027bfdd"), percent,
+                                            com.mclauncher.utils.FileUtils.formatFileSizeShort(downloaded),
+                                            com.mclauncher.utils.FileUtils.formatFileSizeShort(total)));
                                 }
                             });
                 } finally {
@@ -367,10 +357,7 @@ public class GameLauncher {
 
     /**
      * 弹窗下载 Java 并返回路径
-     *
      * 本方法运行在启动线程（HomePage 的 CompletableFuture）上，可以安全阻塞；
-     * 弹窗和进度条切到 JavaFX 线程显示，下载本身在后台线程执行，
-     * 用户点「取消」则放弃下载返回 null。
      */
     private String promptDownloadJava(int requiredVersion) {
         if (modalHost == null) {
@@ -422,9 +409,7 @@ public class GameLauncher {
 
     /**
      * 带进度条的 Java 下载
-     *
      * 必须在 JavaFX 线程上调用（confirmOrCancel 的回调即 FX 线程）：
-     * 先弹出不可关闭的进度面板，再把真正的下载放到后台线程。
      */
     private void downloadJavaWithProgress(int requiredVersion,
                                           java.util.concurrent.atomic.AtomicReference<Path> resultRef,
@@ -525,14 +510,7 @@ public class GameLauncher {
 
     // ==================== 启动后窗口检测 ====================
 
-    /**
-     * 启动后检测游戏窗口是否出现
-     *
-     * 等待一段时间后检查游戏进程是否创建了主窗口：
-     * - 检测到窗口 → 记录日志，正常结束（不打扰玩家）
-     * - 进程中途退出 → 交给已有的退出监听处理
-     * - 超时仍未检测到 → 弹窗询问玩家（已正常打开 / 出了问题 / 再等等）
-     */
+    /** 启动后检测游戏窗口是否出现 */
     private void startLaunchVerification(Process process) {
         if (modalHost == null) {
             return;
@@ -685,15 +663,7 @@ public class GameLauncher {
 
     /**
      * 从候选列表里挑最合适的 Java
-     *
-     * 选择规则（按优先级）：
-     *   1. 必须满足主版本要求
-     *   2. **优先 64 位** —— 32 位 JVM 堆上限约 1.5G，
-     *      用户分配 4G 内存时会直接 OOM 起不来，这类失败很难排查
-     *   3. 同为 64 位时取版本号最高的（兼容性更好）
-     *
-     * 早期直接用 findJavaByVersion 取「第一个满足的」，既不区分架构、
-     * 顺序也取决于扫描顺序，混装 32/64 位 Java 的机器上会随机失败。
+     * 1. 必须满足主版本要求
      */
     private JavaDetector.JavaInfo pickBestJava(
             List<JavaDetector.JavaInfo> list, int requiredVersion) {
@@ -934,14 +904,10 @@ public class GameLauncher {
         List<String> gameArgs = buildGameArguments(versionJson, account, versionId, variables);
 
         // 统一追加界面语言：如果不指定，游戏会跟随系统区域，
-        // 在某些系统上会显示英文。这里固定为简体中文。
-        //
         // 注意语言代码必须**小写** zh_cn。
-        // 游戏是按这个 key 去 assets 里找语言文件的，实际文件是
-        // minecraft/lang/zh_cn.json；写成 zh_CN 会找不到并回退到英文。
         if (!containsArg(gameArgs, "--lang")) {
             gameArgs.add("--lang");
-            gameArgs.add(LANG_ZH_CN);
+            gameArgs.add(LANG_ZH_CN_OFFICIAL);
         }
 
         command.addAll(gameArgs);
@@ -963,17 +929,9 @@ public class GameLauncher {
 
     /**
      * 构建版本自定义的 JVM 参数
-     *
-     * 原版 Minecraft 的 JVM 参数通常为空，但 Forge / Fabric 等模组加载器
      * 会在这里定义 module-path、--add-opens、-DignoreList 等关键参数，
-     * 缺少这些参数会导致模组加载器无法启动。
      */
-    /**
-     * 把字符串里未解析的 ${xxx} 占位符替换为兜底值
-     *
-     * 模组加载器有时会引入启动器不知道的变量（如 Fabric 的 ${natives_directory}）。
-     * 留着会让 JVM 收到字面量，导致运行时找不到路径。
-     */
+    /** 把字符串里未解析的 ${xxx} 占位符替换为兜底值 */
     private String replaceUnresolvedPlaceholders(String input, String fallback) {
         if (input == null || !input.contains("${")) {
             return input;
@@ -1025,19 +983,7 @@ public class GameLauncher {
         processArguments(jvmEl.getAsJsonArray(), variables, raw);
 
         // 过滤掉启动器自己管理的参数，避免重复或冲突：
-        // - classpath 相关：由启动器统一构建
-        // - 内存参数：由设置界面控制
-        // - 编码 / natives：启动器已自行处理
         // 逐项过滤，注意「带值的选项」必须**连同它的值一起跳过**。
-        //
-        // 之前的 bug：只跳过了 "-cp" 本身，它后面的那一长串 classpath
-        // 被当成普通参数保留下来，于是命令行里出现两个 classpath 相邻：
-        //     ... -cp <启动器classpath> <Fabric的classpath> 主类 ...
-        // JVM 就把那串 classpath 当成了主类名，报
-        //     「找不到或无法加载主类 E:\...sm-9.10.1.jar;...」
-        //
-        // 需要「跳过值」的选项：-cp / -classpath / -p / --module-path
-        //                      --add-opens / --add-exports / --add-reads
         java.util.Set<String> optionsWithValue = java.util.Set.of(
                 "-cp", "-classpath", "-p", "--module-path",
                 "--add-opens", "--add-exports", "--add-reads",
@@ -1177,8 +1123,10 @@ public class GameLauncher {
         // 默认拒绝；依次应用规则，最后一条匹配的规则决定结果
         boolean allowed = false;
         String currentOs = getCurrentOsName();
-        String osArch = System.getProperty("os.arch", "").toLowerCase(java.util.Locale.ROOT);
-        boolean is64 = osArch.contains("64") || osArch.equals("aarch64");
+        String curArch = getCurrentArch();
+        boolean is64 = !"x86".equals(curArch);
+        boolean isArm = "arm64".equals(curArch);
+        boolean isX86 = "x86_64".equals(curArch) || "x86".equals(curArch);
 
         for (JsonElement ruleElement : rules) {
             if (!ruleElement.isJsonObject()) {
@@ -1195,10 +1143,15 @@ public class GameLauncher {
                 // os.arch：官方是 x86 / arm64；早期启动器会忽略它，arm64 机器上会拉错库
                 if (matches && os.has("arch")) {
                     String want = os.get("arch").getAsString().toLowerCase(java.util.Locale.ROOT);
+                    // 必须区分 ARM64 与 x86_64：以前用 osArch.contains("64") 判断，
+                    // ARM64 机器上 is64 为真，于是写 os.arch=x86_64 的库（如 LWJGL
+                    // 的 natives-windows 64 位版）也会被当成可用 —— 库能下载，
+                    // 但运行时加载会失败。
                     boolean ok;
                     switch (want) {
                         case "x86", "i386", "i686", "32", "x32" -> ok = !is64;
-                        case "x86_64", "amd64", "x64", "arm64", "aarch64", "64" -> ok = is64;
+                        case "x86_64", "amd64", "x64", "64" -> ok = isX86 && is64;
+                        case "arm64", "aarch64" -> ok = isArm;
                         default -> ok = true;
                     }
                     if (!ok) {
@@ -1381,9 +1334,21 @@ public class GameLauncher {
                 }
 
                 if (matches && os.has("arch")) {
-                    String arch = os.get("arch").getAsString();
-                    // Minecraft 使用 x86 表示 32 位，这里简化处理
-                    if (arch.equals("x86") && currentArch.equals("x86_64")) {
+                    String want = os.get("arch").getAsString().toLowerCase(java.util.Locale.ROOT);
+                    // 和 isLibraryAllowed 保持同一套判定：x86 只表示 32 位，
+                    // arm64 / x86_64 各自只在本机确实是那个架构时匹配。
+                    // 以前这里只拦了「x86 规则 + x86_64 机器」，ARM64 机器
+                    // 同时匹配 x86 与 x86_64 两种规则，参数会串。
+                    boolean ok;
+                    switch (want) {
+                        case "x86", "i386", "i686", "32", "x32" ->
+                                ok = "x86".equals(currentArch);
+                        case "x86_64", "amd64", "x64", "64" ->
+                                ok = "x86_64".equals(currentArch);
+                        case "arm64", "aarch64" -> ok = "arm64".equals(currentArch);
+                        default -> ok = true;
+                    }
+                    if (!ok) {
                         matches = false;
                     }
                 }
@@ -1559,86 +1524,101 @@ public class GameLauncher {
         return name;
     }
 
-    /**
-     * 确保游戏界面语言为简体中文
-     *
-     * 为什么要单独处理 options.txt：
-     * 启动参数里的 --lang 只在游戏**首次生成** options.txt 时被写入，
-     * 之后游戏只读 options.txt。因此如果用户已经玩过（已有 options.txt），
-     * 单靠 --lang 不会改变语言，必须直接修改该文件。
-     *
-     * 语言代码必须小写 zh_cn：游戏保存 options.txt 时会把它转成小写，
-     * 而资源文件名也是小写的 zh_cn.json。曾经写成 zh_CN，
-     * 既导致游戏找不到语言文件（显示英文），又造成每次启动都反复改写文件。
-     *
-     * 行为：
-     * - options.txt 不存在 -> 什么都不做（--lang 参数会在首次启动时生效）
-     * - 已存在且 lang 不是 zh_cn -> 改成 zh_cn，其余内容原样保留
-     */
-    private void ensureChineseLanguage() {
-        Path optionsFile = gameDir.resolve("options.txt");
-        if (!Files.exists(optionsFile)) {
-            return;     // 首次启动由 --lang 负责
-        }
-
+    /** 给新玩家把游戏语言设成简体中文。 */
+    private void ensureChineseLanguage(String versionId) {
+        Path versionOptions = gameDir.resolve("versions").resolve(versionId).resolve("options.txt");
         try {
-            List<String> lines = Files.readAllLines(optionsFile, StandardCharsets.UTF_8);
-            boolean found = false;
-            boolean changed = false;
+            ensureOptionsHasChinese(gameDir.resolve("options.txt"), false);
 
-            for (int i = 0; i < lines.size(); i++) {
-                String line = lines.get(i);
-                if (line.startsWith("lang:")) {
-                    found = true;
-                    // 忽略大小写比较：游戏保存时会写成小写 zh_cn，
-                    // 不做忽略大小写的话每次启动都会判定为「需要改」，
-                    // 于是反复写盘、且写出的值游戏并不认。
-                    String want = "lang:" + LANG_ZH_CN;
-                    if (!want.equalsIgnoreCase(line.trim())) {
-                        lines.set(i, want);
-                        changed = true;
-                    }
-                    break;
-                }
+            // 版本目录：只在完全没有设置文件时补一份，避免和游戏自动迁移的
+            // options.txt 冲突；版本目录不存在就不创建（不是这次启动的目标）
+            if (Files.isDirectory(gameDir.resolve("versions").resolve(versionId))
+                    && !Files.exists(versionOptions)) {
+                ensureOptionsHasChinese(versionOptions, true);
             }
-
-            if (!found) {
-                lines.add("lang:" + LANG_ZH_CN);
-                changed = true;
-            }
-
-            if (changed) {
-                Files.write(optionsFile, lines, StandardCharsets.UTF_8);
-                logger.info("已将游戏语言设置为简体中文");
-            }
-
+            logger.debug("游戏语言检查完成（版本 {}）", versionId);
         } catch (Exception e) {
             // 语言设置失败不应阻止游戏启动
             logger.warn("设置游戏语言失败（不影响启动）: {}", e.getMessage());
         }
     }
 
+    /**
+     * 让指定的 options.txt 里带简体中文设置。
+     *
+     * @param onlyWhenMissing true 时文件已存在就直接返回（版本目录用）
+     */
+    private void ensureOptionsHasChinese(Path optionsFile, boolean onlyWhenMissing) throws IOException {
+        if (Files.exists(optionsFile)) {
+            if (onlyWhenMissing) {
+                return;
+            }
+            String current = readOptionsText(optionsFile);
+            if (!isLauncherMarkedOptions(current) || hasLangLine(current)) {
+                // 游戏自己写的：保留玩家选择的语言；启动器写的且已有 lang：已生效
+                return;
+            }
+        }
+        List<String> lines = new ArrayList<>();
+        lines.add("lang:" + LANG_ZH_CN_OFFICIAL);
+        lines.add("#" + LANG_MARKER + "=" + LANG_MARKER_VERSION);
+        Files.write(optionsFile, lines, StandardCharsets.UTF_8);
+        logger.info("已设置游戏语言为简体中文：{}", optionsFile);
+    }
+
+    /** 读取 options.txt 文本；gzip 压缩过的先解压（1.21.5+） */
+    private static String readOptionsText(Path file) throws IOException {
+        byte[] raw = Files.readAllBytes(file);
+        if (raw.length >= 2 && (raw[0] & 0xff) == 0x1f && (raw[1] & 0xff) == 0x8b) {
+            try (java.util.zip.GZIPInputStream in = new java.util.zip.GZIPInputStream(
+                    new java.io.ByteArrayInputStream(raw))) {
+                return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+        }
+        return new String(raw, StandardCharsets.UTF_8);
+    }
+
+    private static boolean isLauncherMarkedOptions(String text) {
+        for (String line : text.split("\\r?\\n")) {
+            if (line.trim().startsWith("#" + LANG_MARKER + "=")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean hasLangLine(String text) {
+        for (String line : text.split("\\r?\\n")) {
+            if (line.startsWith("lang:")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // ==================== VPN 转发 ====================
 
-    /**
-     * 启动 VPN 转发监听。
-     *
-     * MC 的「对局域网开放」会让客户端自动连回本机 gamePort（Java 里报给客户端的
-     * 就是那个端口）。VPN 玩家（10.77.0.x）经由中转发来的 IPv4 包让我们替他们
-     * 连 127.0.0.1:gamePort。但本机 MC 已经占住 gamePort，所以这里换个端口监听，
-     * 再把连接转发给 MC，并通过回调把「玩家编号 + 已收到的原始字节」交给 VPN 层。
-     *
-     * 端口占用/被防火墙拦截都不应影响正常启动游戏 —— 失败只记日志。
-     */
+    /** 启动 VPN 转发监听。 */
     private void startVpnForwarder(int gamePort) {
         if (vpnForwarder != null) {
             return;
         }
         gamePort = Math.max(0, Math.min(gamePort, 65535));
-        // 注意：这里**不能**拿 VpnSession.forwardGatewayPort() 来覆盖。
-        // 那个端口是 VpnSession 自己已经 bind 的「玩家入口」，再 bind 一次必然
-        // EADDRINUSE，结果是先开房间再启动游戏时 VPN 转发永远起不来。
-        // gamePort 始终是「玩家要连的端口」= 局域网端口 + 1。
+
+        // 若本机正开着 VPN 房间，且配置里的端口已经不是 MC 正在用的那个，
+        if (com.mclauncher.multiplayer.vpn.VpnSession.activeHost() != null
+                && !com.mclauncher.multiplayer.LocalPortScanner.isTcpOpen(gamePort)) {
+            int detected = com.mclauncher.multiplayer.LocalPortScanner.detectOpenToLanPort(
+                    gameDirsForDetection(), null);
+            if (detected > 0 && detected != gamePort) {
+                logger.info("VPN 转发端口跟随 MC 当前的局域网端口: {} -> {}", gamePort, detected);
+                gamePort = detected;
+            }
+        }
+
+        // 转发口 = 玩家入口端口 = 局域网端口 + 1。不能直接用
+        // VpnSession.forwardGatewayPort()：那个端口是 VpnSession 自己已经 bind 的
+        // 房主本地玩家入口，再 bind 一次必然 EADDRINUSE。
         try {
             java.net.ServerSocket ss = new java.net.ServerSocket();
             ss.setReuseAddress(true);
@@ -1654,6 +1634,30 @@ public class GameLauncher {
         } catch (Exception e) {
             logger.info("VPN 本地转发未启动（不影响游戏本体）: {}", e.getMessage());
         }
+    }
+
+    /** 端口推断用的游戏目录列表（当前目录优先，再补上其它已配置目录） */
+    private List<Path> gameDirsForDetection() {
+        List<Path> dirs = new ArrayList<>();
+        try {
+            if (gameDir != null) {
+                dirs.add(gameDir);
+            }
+            if (config.getGameDirectories() != null) {
+                for (com.mclauncher.config.GameDirectory gd : config.getGameDirectories()) {
+                    try {
+                        Path p = gd.getRootPath();
+                        if (p != null && !dirs.contains(p)) {
+                            dirs.add(p);
+                        }
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+            // 配置异常时只用手头能拿到的目录
+        }
+        return dirs;
     }
 
     private void acceptVpnPeers(java.net.ServerSocket ss) {
@@ -1754,25 +1758,27 @@ public class GameLauncher {
             } catch (IOException ignored) {
             }
         }
-        // 每次退出游戏都要把转发线程池停掉：里面的任务持有到本机 MC 的 socket，
-        // 不关的话下次启动会继续复用旧池，句柄越积越多
         java.util.concurrent.ExecutorService pool;
         synchronized (this) {
             pool = vpnForwardPool;
             vpnForwardPool = null;
         }
         if (pool != null) {
+            // 线程池里的任务持有到本机 MC 的 socket，shutdownNow 会打断读写
             pool.shutdownNow();
+            try {
+                if (!pool.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                    logger.debug("VPN 转发线程池未在 3 秒内关闭");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
     /**
      * 启动进程
-     *
      * 关键点：
-     * 1. 使用 ProcessBuilder 的 List 构造器，避免路径空格问题
-     * 2. 设置工作目录为游戏目录
-     * 3. 重定向输出到日志回调
      */
     private boolean startProcess(List<String> command) throws IOException {
         // 使用 List 形式的命令，避免路径空格问题
@@ -1795,12 +1801,14 @@ public class GameLauncher {
         logger.info("启动游戏进程...");
         log("正在启动游戏进程...");
 
+        // 先启动进程，再开 VPN 转发：转发函数要探测 MC 当前监听的端口
+        gameProcess = pb.start();
+
         // VPN 联机：让虚拟局域网的玩家能连进本机 MC 服务器
         // （转发口 = 局域网端口 + 1，见 VpnSession.FORWARD_OFFSET）
-        startVpnForwarder(config.getVpnForwardPort());
-
-        // 启动进程
-        gameProcess = pb.start();
+        // 必须在 pb.start() 之后：它要探测 MC 当前监听的局域网端口，
+        // 游戏刚启动时端口还没绑上。
+        startVpnAfterGame();
 
         // 读取输出
         final Process process = gameProcess;
@@ -1844,6 +1852,44 @@ public class GameLauncher {
         startLaunchVerification(process);
 
         return true;
+    }
+
+    /**
+     * 游戏进程启动后，等 MC 的局域网端口出现再开 VPN 本地转发。
+     * （或默认 25565），而且游戏启动瞬间端口也还没绑上 —— 必须等游戏真正
+     */
+    private void startVpnAfterGame() {
+        if (com.mclauncher.multiplayer.vpn.VpnSession.activeHost() == null) {
+            // 没开房：照常在启动时开转发（即使没人会连，开销也只是一个监听线程）
+            startVpnForwarder(config.getVpnForwardPort());
+            return;
+        }
+        Thread t = new Thread(() -> {
+            int port = 0;
+            long deadline = System.currentTimeMillis() + 60_000;
+            while (System.currentTimeMillis() < deadline && isRunning()) {
+                port = com.mclauncher.multiplayer.LocalPortScanner.detectOpenToLanPort(
+                        gameDirsForDetection(), null);
+                if (port > 0 && com.mclauncher.multiplayer.LocalPortScanner.isTcpOpen(port)) {
+                    break;
+                }
+                port = 0;
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+            if (port > 0) {
+                logger.info("检测到 MC 局域网端口 {}，开启 VPN 本地转发", port);
+                startVpnForwarder(port);
+            } else {
+                logger.info("未检测到 MC 局域网端口，VPN 本地转发暂不开启（可重新对局域网开放后重启游戏）");
+            }
+        }, "vpn-port-wait");
+        t.setDaemon(true);
+        t.start();
     }
 
     /**

@@ -4,33 +4,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Objects;
 
-/**
- * 游戏目录条目
- *
- * 代表一个用户添加的「Minecraft 游戏目录」。
- *
- * ===== 路径语义（重要）=====
- *
- * 用户选 D:\Minecraft 后：
- *
- *   D:\Minecraft\                  ← getRootPath()，游戏文件的落地位置
- *     ├── versions\                ← 游戏版本（原版 + Forge/Fabric）
- *     ├── libraries\               ← 依赖库
- *     ├── assets\                  ← 资源文件
- *     ├── mods\                    ← 模组
- *     ├── saves\                   ← 存档
- *     └── .mc_launcher\            ← getLauncherDataPath()，隐藏
- *           ├── cache\                   下载缓存
- *           └── logs\                    启动器日志
- *
- * 设计要点：
- * - **游戏文件直接放在根目录下**，与 PCL/HMCL 一致，
- *   也能直接兼容用户已有的 .minecraft 整合包。
- * - `.mc_launcher` 只用于存放启动器的辅助数据（缓存、日志），
- *   它会被标记为隐藏，且**不作为目录管理列表的条目**出现。
- * - 启动器自身的配置（账号、Java 路径等）不在这里，
- *   而是存放在启动器程序目录。
- */
+/** 游戏目录条目 */
 public class GameDirectory {
 
     /** 隐藏文件夹名（存放启动器辅助数据：缓存、日志） */
@@ -137,12 +111,7 @@ public class GameDirectory {
         return rootPath != null && !rootPath.isBlank() && validateRoot(rootPath) == null;
     }
 
-    /**
-     * 校验游戏根目录，返回 null 表示可用，否则返回给用户看的原因。
-     *
-     * 早期只检查「非空」：用户选中 D:\ 时会在磁盘根目录直接创建 .mc_launcher
-     * 隐藏目录；填相对路径 "." 时位置随启动方式漂移。
-     */
+    /** 校验游戏根目录，返回 null 表示可用，否则返回给用户看的原因。 */
     public static String validateRoot(String root) {
         if (root == null || root.isBlank()) {
             return "目录不能为空";

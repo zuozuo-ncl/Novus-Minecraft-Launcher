@@ -41,39 +41,17 @@ public class JavaRuntimeManager {
 
     /**
      * BellSoft Liberica 的 CDN
-     *
      * 为什么引入它：Adoptium **不提供 32 位 Java 21**，
-     * 而在 32 位 Windows 上跑 MC 1.20.5+ 恰恰需要 Java 21。
-     * Liberica 三个 LTS 版本（8/17/21）都有 32 位和 64 位构建。
-     *
-     * 实测（2026-10-26）速度：1.2~4.1 秒响应，比 Adoptium 镜像还快。
      */
     private static final String LIBERICA_CDN = "https://download.bell-sw.com/java";
 
     /**
      * Azul Zulu FX 的 CDN
-     *
-     * **这是 32 位 JavaFX 的唯一来源。**
-     *
      * 为什么必须用它：启动器依赖 JavaFX，而
-     *   - Adoptium      : 有 32 位，但**不含 JavaFX**
-     *   - BellSoft      : 有 32 位，但**不含 JavaFX**
-     *   - Azul Zulu FX  : 有 32 位，**含 JavaFX**  ← 只有这个能用
-     *
-     * 实测（2026-10-26）：用 zulu17 的 32 位 JRE 跑本启动器，
-     * JavaFX 界面、主题、网络、版本清单全部正常。
      */
     private static final String ZULU_CDN = "https://cdn.azul.com/zulu/bin";
 
-    /**
-     * Zulu FX 已知文件名（按 版本 + 架构）
-     *
-     * 格式：{majorVersion, bitness, filename}
-     * 命名规律：zulu<build>-ca-fx-jre<javaVersion>-win_<arch>.zip
-     *   32 位 arch = i686，64 位 arch = x64
-     *
-     * 需随 Zulu 发版更新。这些是最新稳定版（2026-10）。
-     */
+    /** Zulu FX 已知文件名（按 版本 + 架构） */
     private static final String[][] ZULU_KNOWN = {
             // Java 8
             {"8",  "32", "zulu8.96.0.205-ca-fx-jre8.0.504-win_i686.zip"},
@@ -85,15 +63,7 @@ public class JavaRuntimeManager {
             {"21", "64", "zulu21.44.17-ca-fx-jre21.0.8-win_x64.zip"},
     };
 
-    /**
-     * Liberica 已知的 JRE 文件名（按 版本 + 架构）
-     *
-     * 格式：{majorVersion, bitness, version, filename}
-     * 32 位文件名含 i586，64 位含 amd64。
-     *
-     * 这些版本号需随 Liberica 发版更新。若失效，
-     * discoverLibericaFileName() 会通过 API 查最新。
-     */
+    /** Liberica 已知的 JRE 文件名（按 版本 + 架构） */
     private static final String[][] LIBERICA_KNOWN = {
             // Java 8
             {"8",  "32", "8u513+7",   "bellsoft-jre8u513+7-windows-i586.zip"},
@@ -198,13 +168,7 @@ public class JavaRuntimeManager {
         return findJava(requiredVersion) == null;
     }
 
-    /**
-     * 自动下载 Java
-     *
-     * @param majorVersion Java 主版本号（如 17, 21）
-     * @param callback     进度回调
-     * @return 下载后的 Java 可执行文件路径
-     */
+    /** 自动下载 Java */
     public Path downloadJava(int majorVersion, DownloadCallback callback) throws IOException {
         logger.info("开始下载 Java {}", majorVersion);
 
@@ -300,14 +264,7 @@ public class JavaRuntimeManager {
         List<String> candidateUrls = new ArrayList<>();
 
         // 1. Azul Zulu FX（**首选**）
-        //
         // 为什么排第一：**它是唯一自带 JavaFX 的 32 位构建**。
-        // 启动器的界面完全依赖 JavaFX，而：
-        //   Adoptium 有 32 位但无 JavaFX
-        //   Liberica 有 32 位但无 JavaFX
-        //   Zulu FX  有 32 位且含 JavaFX   ← 只有这个能让 32 位系统跑起来
-        //
-        // 实测：用 zulu17 的 32 位 JRE 跑本启动器，JavaFX 界面完全正常。
         String zulu = zuluUrl(majorVersion);
         if (zulu != null) {
             candidateUrls.add(zulu);
@@ -435,16 +392,7 @@ public class JavaRuntimeManager {
         return javaExe;
     }
 
-    /**
-     * 从国内镜像的目录列表（autoindex）中发现实际的 JRE 文件名
-     *
-     * 硬编码文件名会过期，而镜像目录列表永远是最新的。
-     * 目录结构：<镜像>/adoptium/<major>/jre/<arch>/<os>/
-     *
-     * @param versionPath 形如 "17/jre/x64/windows/"
-     * @param os          Adoptium 操作系统标识（windows/mac/linux）
-     * @return 文件名；镜像不可达或目录为空时返回 null
-     */
+    /** 从国内镜像的目录列表（autoindex）中发现实际的 JRE 文件名 */
     private String discoverFileNameFromMirrors(String versionPath, String os) {
         java.util.regex.Pattern pattern =
                 java.util.regex.Pattern.compile("OpenJDK\\d+U-jre_[A-Za-z0-9._\\-]+\\.zip");
@@ -503,22 +451,10 @@ public class JavaRuntimeManager {
         return best;
     }
 
-    /**
-     * 根据版本号和架构返回已知的 JRE ZIP 文件名
-     *
-     * 数据来源：Adoptium Releases API 的已知发布版本。
-     * 这些文件名需要定期更新（参考 https://api.adoptium.net/v3/assets/release/latest），
-     * 过期时会先被 discoverFileNameFromMirrors 的镜像目录列表兜底。
-     */
+    /** 根据版本号和架构返回已知的 JRE ZIP 文件名 */
     private String getKnownJreFileName(int majorVersion, String arch, String os) {
         // 硬编码文件名只覆盖 Windows（本启动器主要平台）；
-        //
         // 注意：这些版本号**必须与镜像上的实际文件一致**，否则会 404。
-        // 曾因版本号过期导致 Java 8/21 下载全线失败（只有 17 能下）。
-        // 修改前务必先用 HEAD 请求验证：
-        //   https://mirror.nju.edu.cn/adoptium/<ver>/jre/x64/windows/<file>
-        // 若镜像上文件名变了，下面的 discoverFileNameFromMirrors 会自动兜底。
-        // 其它平台交给镜像目录发现 / Adoptium API
         if (!"windows".equals(os)) {
             return null;
         }
@@ -630,8 +566,6 @@ public class JavaRuntimeManager {
 
     /**
      * 获取 Adoptium 的架构标识
-     *
-     * 返回 Adoptium API / 镜像目录的标准命名：
      * x64 / x86-32 / aarch64（注意 32 位是 "x86-32"，不是 "x32"）
      */
     private String getAdoptiumArch() {
@@ -647,10 +581,7 @@ public class JavaRuntimeManager {
 
     /**
      * 镜像目录用的架构名
-     *
-     * 与 getAdoptiumArch() 的区别：**镜像上的目录名是 x32**，
      * 而 Adoptium API 的参数是 x86-32。两者不能混用 ——
-     * 实测南大镜像上 /x86-32/ 返回 404，只有 /x32/ 可用。
      */
     private String getMirrorArch() {
         String a = getAdoptiumArch();
@@ -662,14 +593,11 @@ public class JavaRuntimeManager {
 
     /**
      * 当前 JVM 是 32 位还是 64 位
-     *
      * 判断依据是 os.arch —— 注意这反映的是**运行本程序的 JVM**，
-     * 不是操作系统本身。32 位 JVM 跑在 64 位 Windows 上时
-     * os.arch 仍是 "x86"，此时我们照样下 32 位 JRE，
-     * 与当前 JVM 保持一致（避免混用导致加载 native 库失败）。
      */
     private String getBitness() {
         String arch = System.getProperty("os.arch", "").toLowerCase();
+        // aarch64 / arm64 是 64 位，要特殊处理：「contains("64")」不会匹配 "aarch64"
         if (arch.contains("64") || arch.contains("aarch64")) {
             return "64";
         }

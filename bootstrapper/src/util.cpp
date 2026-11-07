@@ -1,9 +1,4 @@
 // ============================================================================
-//  util.cpp —— 路径、文件与字符串工具
-//
-//  全部使用宽字符版本 API（GetEnvironmentVariableW / CreateDirectoryW ...），
-//  保证中文用户名、中文路径都能正确处理。
-// ============================================================================
 #include "common.h"
 
 #include <shlwapi.h>
@@ -173,6 +168,30 @@ bool DeleteFileQuiet(const std::wstring& path) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+bool DeleteDirectoryQuiet(const std::wstring& path) {
+    if (path.empty()) {
+        return true;
+    }
+    if (!IsDirectory(path)) {
+        return true;
+    }
+    std::wstring buf = path;
+    buf.push_back(L'\0');   // SHFileOperationW 要求双 null 结尾
+    SHFILEOPSTRUCTW op;
+    ZeroMemory(&op, sizeof(op));
+    op.wFunc  = FO_DELETE;
+    op.pFrom  = buf.c_str();
+    op.pTo    = nullptr;
+    op.fFlags = FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_NO_UI;
+    int rc = SHFileOperationW(&op);
+    if (rc != 0 || op.fAnyOperationsAborted) {
+        Log::WriteF(L"删除目录失败: %s (rc=%d)", path.c_str(), rc);
+        return false;
+    }
+    return true;
+}
+
 uint64_t FileSize(const std::wstring& path) {
     WIN32_FILE_ATTRIBUTE_DATA fad;
     if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) {
@@ -260,11 +279,6 @@ bool EndsWithNoCase(const std::wstring& s, const std::wstring& suffix) {
     return _wcsicmp(s.c_str() + off, suffix.c_str()) == 0;
 }
 
-// ---------------------------------------------------------------------------
-//  查询指定路径所在磁盘的剩余空间
-//
-//  required 为需要的字节数；空间不足时 outFree 返回实际剩余量。
-//  路径不存在时向上逐级查找，直到找到一个存在的父目录。
 // ---------------------------------------------------------------------------
 bool HasFreeSpace(const std::wstring& path, uint64_t required, uint64_t& outFree) {
     outFree = 0;
@@ -455,24 +469,7 @@ bool ReadSmallFile(const std::wstring& path, std::string& out, size_t maxBytes) 
 } // namespace Util
 
 // ============================================================================
-//  架构检测
-//
-//  判据是**操作系统的原生位数**，不是进程位数。
-//
-//  为什么：引导器自己不加载任何 Java native 库 —— 它只是下载、解压，
-//  最后用 CreateProcess 拉起 javaw。所以「引导器是 32 位」这件事
-//  对选择 JRE 架构没有影响。
-//
-//  真正需要匹配的是「JVM 架构 ↔ 系统架构」：
-//    - 64 位 JVM 无法在 32 位系统上运行
-//    - 但 32 位 JVM 能在 64 位系统上运行（只是堆上限约 1.5G，
-//      跑大整合包会 OOM）
-//
-//  所以：64 位系统一律下 64 位 JRE（性能最优）；
-//        只有真正的 32 位系统才下 32 位 JRE。
-//
-//  这解决了「32 位引导器装在 64 位机器上会浪费性能」的问题。
-// ============================================================================
+// 为什么：引导器自己不加载任何 Java native 库 —— 它只是下载、解压，
 std::wstring g_archMirror = L"x64";
 std::wstring g_archApi    = L"x64";
 std::wstring g_jreFileName;
@@ -522,60 +519,6 @@ void InitArch() {
 // ============================================================================
 //  AppPaths::Init
 // ============================================================================
-// ============================================================================
-//  目录复制（用于从旧数据目录迁移）
-//
-//  用 SHFileOperationW 而不是手写递归：
-//    - 能正确处理超长路径、中文路径、隐藏文件
-//    - 目标已存在时的合并语义由系统负责
-//  代价是要 CoInitialize 并包含 <shellapi.h>。
-// ============================================================================
-bool Util::CopyDirectory(const std::wstring& from, const std::wstring& to) {
-    if (!Util::IsDirectory(from)) {
-        return false;
-    }
-
-    // SHFileOperationW 的路径必须是**双 null 结尾**的缓冲区
-    std::wstring src = from;
-    std::wstring dst = to;
-    src.push_back(L'\0');
-    dst.push_back(L'\0');
-
-    SHFILEOPSTRUCTW op;
-    ZeroMemory(&op, sizeof(op));
-    op.wFunc = FO_COPY;
-    op.pFrom = src.c_str();
-    op.pTo = dst.c_str();
-    // FOF_NOCONFIRMATION: 不弹"是否覆盖"对话框
-    // FOF_SILENT:         不显示进度条（迁移是在后台悄悄做的）
-    // FOF_NOERRORUI:      出错不弹窗（失败会走返回值）
-    // FOF_NOCONFIRMMKDIR: 不询问是否创建目录
-    op.fFlags = FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI
-              | FOF_NOCONFIRMMKDIR;
-
-    int rc = SHFileOperationW(&op);
-    if (rc != 0 || op.fAnyOperationsAborted) {
-        Log::WriteF(L"CopyDirectory 失败: rc=%d aborted=%d", rc,
-                    op.fAnyOperationsAborted ? 1 : 0);
-        return false;
-    }
-    return Util::IsDirectory(to);
-}
-
-// 目录里是否已有启动器 jar（只看顶层：jar 直接放在数据目录下）
-//
-//  「有 jar」与「有目录」是两回事：NCL_Launcher 可能早就存在，
-//  里面却只有 java/ 之类的缓存，这种情况仍需要从旧目录迁移。
-static bool HasLauncherJar(const std::wstring& dir) {
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW((dir + L"\\mc-launcher-*.jar").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        return false;
-    }
-    FindClose(h);
-    return true;
-}
-
 bool AppPaths::Init() {
     std::wstring roaming = Util::GetAppDataPath();
     if (roaming.empty()) {
@@ -586,28 +529,6 @@ bool AppPaths::Init() {
     javaDir = Util::JoinPath(appData, JAVA_DIR_NAME);
     jreHome.clear();
     jarPath.clear();
-
-    // ---- 从旧目录迁移（启动器改名：MC_Launcher -> NCL_Launcher）----
-    //
-    // 只在「新目录还没有启动器 jar」时做一次。
-    //
-    // 早期条件是「新目录不存在」：老玩家升级时 NCL_Launcher 已经存在
-    // （里面有 java/ho 缓存等），于是旧的 mc-launcher-*.jar 永远搬不过来，
-    // 每次启动都被当成首次运行去重新下载。现在改为检查 jar 是否在，
-    // 安全的理由：迁移只复制不删除；新目录里有 jar 时不会触发。
-    {
-        std::wstring oldDir = Util::JoinPath(roaming, OLD_APP_DIR_NAME);
-        if (!HasLauncherJar(appData) && Util::IsDirectory(oldDir)) {
-            Log::WriteF(L"检测到旧数据目录，开始迁移: %s -> %s",
-                        oldDir.c_str(), appData.c_str());
-
-            if (Util::CopyDirectory(oldDir, appData)) {
-                Log::WriteF(L"旧数据迁移完成（旧目录保留未删除）");
-            } else {
-                Log::Write(L"旧数据迁移失败，将使用全新目录");
-            }
-        }
-    }
 
     if (!Util::CreateDirectories(appData)) {
         return false;
@@ -662,13 +583,6 @@ void Init(const AppPaths& paths) {
     g_logPath = Util::JoinPath(paths.appData, L"bootstrap.log");
 
     // ---- 日志轮转 ----
-    //
-    // 早期日志只追加、永不清理。而 WriteF 会记录完整 URL 和接口响应，
-    // 长期使用（一年以上）日志能涨到几百 MB，占用户的磁盘。
-    //
-    // 策略：启动时若发现日志超过 MAX_LOG_BYTES，把它改名为 .old
-    // （覆盖上一次的 .old），然后从头写。这样最多保留两份日志，
-    // 既能追溯本次问题，也留了一份上次的作对照。
     try {
         uint64_t size = Util::FileSize(g_logPath);
         if (size > MAX_LOG_BYTES) {
@@ -766,13 +680,7 @@ void WriteF(const wchar_t* fmt, ...) {
 }
 
 // 格式化宽/窄字符串混用的日志
-//
-//  _vsnwprintf_s 只认宽字符格式符（%s = wchar_t*），不认 %S（NARROW
-//  转换）—— 在 MSVC 的宽字符 printf 里 %S 不是标准写法，会按 %s 处理，
-//  把 char* 当 wchar_t* 解引用，输出乱码（曾把版本号打成 "1"，
-//  导致「jar 哈希: 1 = …」这类日志完全读不了）。
-//  哈希、版本号都是 std::string，调用方不想每次手动转宽字符，
-//  所以这里先按原格式写到窄字符缓冲，再统一转成宽字符。
+// 把 char* 当 wchar_t* 解引用，输出乱码（曾把版本号打成 "1"，
 void WriteUtf8(const char* fmt, ...) {
     char buf[2048];
     va_list args;
@@ -785,12 +693,6 @@ void WriteUtf8(const char* fmt, ...) {
 } // namespace Log
 
 // ============================================================================
-//  SHA-256（Windows BCrypt）
-// ============================================================================
-//
-//  用系统自带 BCrypt，不引第三方库：
-//    - 兼容 Win7+，MinGW 链接 -lbcrypt，MSVC 链接 bcrypt.lib
-//    - 分块读取，45 MB 的 jar 只占 1 MB 内存
 namespace Hs {
 
 namespace {

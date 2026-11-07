@@ -14,17 +14,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * 界面文案
- *
- * 用法：{@code L.t("download.search")}，带参数时 {@code L.t("error.http", 404)}。
- *
  * <h3>为什么不用 ResourceBundle</h3>
- * ResourceBundle 对文件编码、缺失键回退的规则很绕（尤其 JDK 9 前后的差异），
- * 而且切换语言后已经构建好的界面不会自己更新。这里用自己的实现：
- * <ul>
- *   <li>properties 文件统一按 UTF-8 读取</li>
- *   <li>缺失的键 → 回退到中文 → 仍没有就返回键名本身（能一眼看出漏翻）</li>
- *   <li>{@link #addListener} 注册回调，切换语言后界面可以即时重建</li>
- * </ul>
+ * 用法：{@code L.t("download.search")}，带参数时 {@code L.t("error.http", 404)}。
  */
 public final class L {
 
@@ -127,13 +118,7 @@ public final class L {
         return s;
     }
 
-    /**
-     * 把文案里的字面 \\n 转成真实换行
-     *
-     * properties 里写单个反斜杠 + n 时，Properties.load 已经还原成换行了；
-     * 但被误写成两个反斜杠时，读出来就是字面两个字符（反斜杠 + n），
-     * 界面会直接显示成那样。这里统一兜底。
-     */
+    /** 把文案里的字面 \\n 转成真实换行 */
     private static String unescapeNewlines(String s) {
         if (s == null || s.indexOf(BS_SLASH) < 0) {
             return s;
@@ -180,12 +165,7 @@ public final class L {
         return true;
     }
 
-    /**
-     * 非中文语言缺少的键用简体中文补齐。
-     *
-     * 以前缺键时直接显示键名（如 s_3ac9f0012b），界面上就是一串乱码般的英文；
-     * 语言之间键集合本来就不同步，缺几个很常见，回退到中文至少能看懂。
-     */
+    /** 非中文语言缺少的键用简体中文补齐。 */
     private static void fillMissingFromOtherLanguages(Lang lang, Properties p) {
         if (lang == Lang.ZH_CN) {
             return;

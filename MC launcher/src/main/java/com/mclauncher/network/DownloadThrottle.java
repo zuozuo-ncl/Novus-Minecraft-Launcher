@@ -14,24 +14,7 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * 下载限流器（按站点独立限流 + 全局总量控制）
- *
  * ===== 为什么按站点独立 =====
- * 之前的实现是一个全局单例并发上限。这在多镜像场景下是错的：
- * 某个站被限流（429）会让**所有**站的并发都被压低，
- * 而那些没被限流的站本来可以继续全速跑。
- *
- * 现在改为按 host 分别维护并发额度：
- * - 每个 host 有自己的并发上限与冷却状态
- * - 一个站触发 429 只影响它自己
- * - 不同 host 之间互不干扰，总吞吐可以叠加
- *
- * ===== 为什么还要全局上限 =====
- * 线程/连接总数仍需要一个封顶，避免内存与 socket 耗尽。
- * 但全局上限设得比较高（因为它是分散到多个 host 的）。
- *
- * ===== 实测依据 =====
- * - BMCLAPI 官方节点：6 并发即触发 429，之后长时间降速
- * - 高校镜像站：单站可承受更高并发（见 MirrorPool 的测速数据）
  */
 public final class DownloadThrottle {
 
@@ -41,13 +24,7 @@ public final class DownloadThrottle {
 
     /**
      * 每个 host 的初始并发额度
-     *
      * 这个值会尽量从 {@link MirrorPool} 的实测数据里取该站的安全并发；
-     * 取不到时用这个默认值。
-     *
-     * 实测依据：南阳理工/上海交大在 64 并发下零 429，
-     * 因此主力站点可以用高并发；而 USTC/官方节点在 4 并发就限流，
-     * 已在 MirrorPool 中标记为不可用。
      */
     private static final int PER_HOST_DEFAULT = 8;
     /** 每个 host 的最低额度（被限流时可降到 1） */
@@ -78,8 +55,9 @@ public final class DownloadThrottle {
      */
     private static class HostState {
         final String host;
+        /** 当前并发额度。信号量本身**不替换**：只按额度增减许可。 */
         final AtomicInteger limit = new AtomicInteger(PER_HOST_DEFAULT);
-        volatile Semaphore semaphore = new Semaphore(PER_HOST_DEFAULT, true);
+        final Semaphore semaphore;
         final AtomicLong cooldownUntil = new AtomicLong(0);
         final AtomicInteger successStreak = new AtomicInteger(0);
         /** 累计被限流次数，用于诊断 */
@@ -92,6 +70,25 @@ public final class DownloadThrottle {
             int v = Math.max(PER_HOST_MIN, Math.min(PER_HOST_MAX, initialLimit));
             this.limit.set(v);
             this.semaphore = new Semaphore(v, true);
+        }
+
+        /**
+         * 把额度调整到 newLimit，并同步信号量里的许可数。
+         */
+        void adjustLimit(int newLimit, boolean grow) {
+            int old = limit.getAndSet(newLimit);
+            int delta = Math.abs(newLimit - old);
+            if (delta == 0) {
+                return;
+            }
+            if (grow) {
+                semaphore.release(delta);
+            } else {
+                // 回收差额许可。正在持锁的请求稍后 release 时，多出来的许可
+                // 会留在信号量里 —— 用 drain 的方式把多余许可扣掉，
+                // 保证「可用许可数 <= limit」这个不变式。
+                semaphore.tryAcquire(delta);
+            }
         }
     }
 
@@ -109,9 +106,7 @@ public final class DownloadThrottle {
 
     /**
      * 为某个 host 推导初始额度
-     *
      * 优先用 MirrorPool 里实测的安全并发值，
-     * 未知站点用保守默认值。
      */
     private static int initialLimitFor(String host) {
         try {
@@ -137,15 +132,7 @@ public final class DownloadThrottle {
 
     // ==================== 许可申请 ====================
 
-    /**
-     * 申请下载许可（会阻塞直到该 host 有空位或超时）
-     *
-     * 带超时 —— 超时后抛 TimeoutException，调用方可以换另一个主机重试，
-     * 而不是卡死在一个已被占满的 host 上（这是之前长时间等待的根因）。
-     *
-     * @param url           目标 URL（用于确定 host 分组）
-     * @param timeoutMillis 最大等待时间（毫秒）
-     */
+    /** 申请下载许可（会阻塞直到该 host 有空位或超时） */
     public void acquire(String url, long timeoutMillis) throws InterruptedException {
         HostState st = stateFor(url);
 
@@ -212,8 +199,7 @@ public final class DownloadThrottle {
         int newLimit = Math.max(PER_HOST_MIN, oldLimit - 1);
 
         if (newLimit != oldLimit) {
-            st.limit.set(newLimit);
-            st.semaphore = new Semaphore(newLimit, true);
+            st.adjustLimit(newLimit, false);
             logger.warn("[{}] 检测到限流（HTTP {}，累计 {} 次），本机并发 {} -> {}",
                     st.host, statusCode, count, oldLimit, newLimit);
         } else {
@@ -256,8 +242,7 @@ public final class DownloadThrottle {
             int oldLimit = st.limit.get();
             if (oldLimit < PER_HOST_MAX) {
                 int newLimit = oldLimit + 1;
-                st.limit.set(newLimit);
-                st.semaphore = new Semaphore(newLimit, true);
+                st.adjustLimit(newLimit, true);
                 logger.info("[{}] 下载稳定，本机并发 {} -> {}", st.host, oldLimit, newLimit);
             }
         }
@@ -302,9 +287,15 @@ public final class DownloadThrottle {
      * 某 host 是否正在冷却
      */
     public boolean isThrottled(String url) {
-        return stateFor(url).cooldownUntil.get() > System.currentTimeMillis();
+        String h = hostOf(url);
+        HostState st = hosts.get(h);
+        if (st == null) {
+            st = hosts.get(url);     // describe()/isAnyDegraded() 传的是 host 本身
+        }
+        return st != null && st.cooldownUntil.get() > System.currentTimeMillis();
     }
 
+    /** 清理长时间没有活动的 host 状态。 */
     /**
      * 是否存在任何被限流的 host（用于 UI 提示）
      */

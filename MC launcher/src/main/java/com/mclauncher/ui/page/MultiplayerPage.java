@@ -3,7 +3,9 @@ package com.mclauncher.ui.page;
 import java.io.IOException;
 import com.mclauncher.config.ConfigManager;
 import com.mclauncher.multiplayer.LocalPortScanner;
+import com.mclauncher.multiplayer.vpn.RelayEndpoints;
 import com.mclauncher.multiplayer.vpn.VpnSession;
+import com.mclauncher.multiplayer.vpn.VpnTunnel;
 import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -18,24 +20,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
-/**
- * 联机页（虚拟局域网）
- *
- * 只有一种联机方式：双方各建一块虚拟网卡，经中继按虚拟 IP 交换数据。
- *
- *   房主：开房 → 自己的 MC 点「对局域网开放」→ 把邀请发给朋友
- *   朋友：粘贴邀请加入 → 在 MC 里连 localhost:<房主局域网端口 + 1>
- *
- * 旧的「公网端口转发」已被移除（实测对 MC 不可用），中继也不再分配端口。
- */
+/** 联机页（虚拟局域网） */
 public class MultiplayerPage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(MultiplayerPage.class);
 
-    /** 中继的 HTTP 端口（VPN 帧走 HTTP_PORT + 1） */
-    private static final int RELAY_HTTP_PORT = 8080;
-
-    /** 中继端点：host + 对外 HTTP 端口（VPN 帧握手同样连这个端口） */
+    /** 中继端点类型（解析逻辑见 {@link RelayEndpoints}） */
     private static final class RelayEndpoint {
         final String host;
         final int port;
@@ -46,60 +36,17 @@ public class MultiplayerPage implements Page {
         }
 
         String label() {
-            return port == 8080 ? host : host + ":" + port;
+            return port == RelayEndpoints.DEFAULT_HTTP_PORT ? host : host + ":" + port;
         }
     }
 
-    /**
-     * 中继端点列表，按尝试顺序排列：第一个是首选，后面的是退回地址。
-     *
-     * 每个条目形如 {@code host}（端口用默认 8080）或 {@code host:端口}（经穿透映射）。
-     * 用 -Dmclauncher.relayHosts=a,b,... 覆盖整个列表；
-     * 没配置时依次尝试：39.106.60.15（主站）→ 45.64.229.50:41181（备站）。
-     */
-    private static final java.util.List<RelayEndpoint> RELAY_ENDPOINTS = parseRelayEndpoints(
-            System.getProperty("mclauncher.relayHosts"),
-            System.getProperty("mclauncher.relayHost"),
-            System.getProperty("mclauncher.relayHttpPort"));
+    /** 中继端点列表，按尝试顺序排列（第一个是首选，后面是退回地址）。 */
+    private final java.util.List<RelayEndpoint> relayEndpoints = loadRelayEndpoints();
 
-    private static java.util.List<RelayEndpoint> parseRelayEndpoints(String list, String singleHost, String singlePort) {
+    private static java.util.List<RelayEndpoint> loadRelayEndpoints() {
         java.util.List<RelayEndpoint> out = new java.util.ArrayList<>();
-        if (list != null && !list.isBlank()) {
-            for (String item : list.split(",")) {
-                String s = item.trim();
-                if (s.isEmpty()) {
-                    continue;
-                }
-                int colon = s.lastIndexOf(':');
-                try {
-                    if (colon > 0) {
-                        int p = Integer.parseInt(s.substring(colon + 1).trim());
-                        if (p > 0 && p <= 65535) {
-                            out.add(new RelayEndpoint(s.substring(0, colon).trim(), p));
-                            continue;
-                        }
-                    }
-                } catch (NumberFormatException ignored) {
-                    // 不合法，整条忽略
-                }
-                out.add(new RelayEndpoint(s, RELAY_HTTP_PORT));
-            }
-        }
-        // 兼容旧的单项参数：-Dmclauncher.relayHost / -Dmclauncher.relayHttpPort
-        if (singleHost != null && !singleHost.isBlank()) {
-            int p = RELAY_HTTP_PORT;
-            try {
-                if (singlePort != null && !singlePort.isBlank()) {
-                    p = Integer.parseInt(singlePort.trim());
-                }
-            } catch (NumberFormatException ignored) {
-                // 用默认端口
-            }
-            out.add(0, new RelayEndpoint(singleHost.trim(), p));
-        }
-        if (out.isEmpty()) {
-            out.add(new RelayEndpoint("39.106.60.15", RELAY_HTTP_PORT));
-            out.add(new RelayEndpoint("45.64.229.50", 41181));
+        for (RelayEndpoints.Endpoint ep : RelayEndpoints.load(com.mclauncher.utils.AppPaths.appDataDir())) {
+            out.add(new RelayEndpoint(ep.host, ep.port));
         }
         return java.util.List.copyOf(out);
     }
@@ -408,7 +355,7 @@ public class MultiplayerPage implements Page {
             try {
                 // 按顺序尝试各端点：首选失败自动退回后面的地址
                 Exception last = null;
-                for (RelayEndpoint ep : RELAY_ENDPOINTS) {
+                for (RelayEndpoint ep : relayEndpoints) {
                     try {
                         setVpnStatus("正在连接中继 " + ep.label() + "…");
                         VpnSession s = VpnSession.host(ep.host, ep.port, "我的联机房间", port, relayApiKey(ep));
@@ -424,7 +371,7 @@ public class MultiplayerPage implements Page {
                     } catch (Exception e) {
                         last = e;
                         logger.warn("中继 {} 创建房间失败：{}", ep.label(), e.getMessage());
-                        if (RELAY_ENDPOINTS.size() > 1) {
+                        if (relayEndpoints.size() > 1) {
                             setLog("中继 " + ep.label() + " 不可用：" + e.getMessage());
                         }
                     }
@@ -434,16 +381,39 @@ public class MultiplayerPage implements Page {
                 }
                 @SuppressWarnings("ConstantConditions")
                 VpnSession s = vpn;
-                if (RELAY_ENDPOINTS.size() > 1) {
+                if (relayEndpoints.size() > 1) {
                     setLog("已使用中继 " + used.label());
                 }
                 final String room = s.roomId();
                 final String baseInvite = buildInvite(playerPort, room, "");
                 // 房主自己在 MC 里点「对局域网开放」并让客户端连进来时，
                 // 中继会分配一个新的口令，界面随之更新
-                s.setPeerListener(peer -> {
-                    currentInvite = buildInvite(playerPort, room, peer.code);
-                    refreshInvite();
+                s.setPeerListener(new VpnSession.PeerListener() {
+                    @Override
+                    public void accept(VpnTunnel.Peer peer) {
+                        currentInvite = buildInvite(playerPort, room, peer.code);
+                        refreshInvite();
+                    }
+
+                    // 房间被中继回收且自动重建失败：必须告诉用户，否则界面
+                    // 仍显示「房间已开启」，朋友那边永远连不上
+                    @Override
+                    public void onRoomLost(String reason) {
+                        currentInvite = null;
+                        Platform.runLater(() -> {
+                            if (vpn != s) {
+                                return;   // 用户已经手动关掉/换了房间
+                            }
+                            stateLabel.setText("房间已断开");
+                            vpnInviteRow.setVisible(false);
+                            vpnInviteRow.setManaged(false);
+                            vpnStatusLabel.setText(reason + "。请点「停止」后重新开房。");
+                            vpnStopButton.setDisable(false);
+                            vpnHostButton.setDisable(false);
+                            vpnJoinButton.setDisable(false);
+                        });
+                        setLog("房间失联：" + reason);
+                    }
                 });
                 Platform.runLater(() -> {
                     stateLabel.setText("房间已开启");
@@ -503,7 +473,7 @@ public class MultiplayerPage implements Page {
             RelayEndpoint used = null;
             try {
                 Exception last = null;
-                for (RelayEndpoint ep : RELAY_ENDPOINTS) {
+                for (RelayEndpoint ep : relayEndpoints) {
                     try {
                         setVpnStatus("正在连接中继 " + ep.label() + "…");
                         VpnSession s = VpnSession.join(ep.host, ep.port, room, invite, relayApiKey(ep),
@@ -520,7 +490,7 @@ public class MultiplayerPage implements Page {
                     } catch (Exception e) {
                         last = e;
                         logger.warn("中继 {} 加入失败：{}", ep.label(), e.getMessage());
-                        if (RELAY_ENDPOINTS.size() > 1) {
+                        if (relayEndpoints.size() > 1) {
                             setLog("中继 " + ep.label() + " 不可用：" + e.getMessage());
                         }
                     }
@@ -528,12 +498,14 @@ public class MultiplayerPage implements Page {
                 if (used == null) {
                     throw last != null ? last : new java.io.IOException("没有可用的中继地址");
                 }
-                if (RELAY_ENDPOINTS.size() > 1) {
+                if (relayEndpoints.size() > 1) {
                     setLog("已通过中继 " + used.label() + " 加入");
                 }
                 Platform.runLater(() -> {
                     stateLabel.setText("已加入房间");
-                    addressLabel.setText("在 MC 里连：localhost:" + forwardPort(localMcPort));
+                    // 本机监听口是「游戏端口 + PEER_PORT_OFFSET」，不是游戏端口本身
+                    addressLabel.setText("在 MC 里连：localhost:"
+                            + VpnSession.peerLocalPort(forwardPort(localMcPort)));
                     addressLabel.setVisible(true);
                     addressLabel.setManaged(true);
                     vpnStatusLabel.setText("已加入房间 " + room);
@@ -617,18 +589,25 @@ public class MultiplayerPage implements Page {
         return k == null ? "" : k.trim();
     }
 
-    /**
-     * 按端点取密钥：可选 -Dmclauncher.relayApiKeys=key1,key2 与 RELAY_ENDPOINTS 一一对应，
-     * 两台中继用不同密钥时不必分开配置。未配置时所有端点共用 relayApiKey()。
-     */
-    private static String relayApiKey(RelayEndpoint ep) {
-        String list = System.getenv("MC_RELAY_API_KEYS");
-        if (list == null || list.isBlank()) {
-            list = System.getProperty("mclauncher.relayApiKeys");
+    /** 按端点取密钥。 */
+    private String relayApiKey(RelayEndpoint ep) {
+        String pairs = System.getenv("MC_RELAY_API_KEYS");
+        if (pairs == null || pairs.isBlank()) {
+            pairs = System.getProperty("mclauncher.relayApiKeys");
         }
-        if (list != null && !list.isBlank()) {
-            String[] parts = list.split(",", -1);
-            int i = RELAY_ENDPOINTS.indexOf(ep);
+        if (pairs != null && !pairs.isBlank()) {
+            // 1) 按 host=key 对匹配
+            for (String entry : pairs.split(",")) {
+                entry = entry.trim();
+                int eq = entry.indexOf('=');
+                if (eq > 0 && entry.substring(0, eq).trim().equals(ep.host)) {
+                    String key = entry.substring(eq + 1).trim();
+                    return key.isEmpty() ? relayApiKey() : key;
+                }
+            }
+            // 2) 退回按序号匹配
+            String[] parts = pairs.split(",", -1);
+            int i = relayEndpoints.indexOf(ep);
             if (i >= 0 && i < parts.length && !parts[i].isBlank()) {
                 return parts[i].trim();
             }
@@ -636,12 +615,7 @@ public class MultiplayerPage implements Page {
         return relayApiKey();
     }
 
-    /**
-     * 邀请串：<code>MCRELAY|&lt;端口&gt;#&lt;房间号&gt;#&lt;口令&gt;</code>
-     *
-     * 朋友在 MC 里一律连 localhost:&lt;端口&gt;（玩家的启动器会把它转进 VPN），
-     * 所以这里只需要带端口，不需要房主的任何公网地址。
-     */
+    /** 邀请串：<code>MCRELAY|&lt;端口&gt;#&lt;房间号&gt;#&lt;口令&gt;</code> */
     private static String buildInvite(int port, String room, String code) {
         return "MCRELAY|" + port + "#" + (room == null ? "" : room) + "#" + (code == null ? "" : code);
     }
@@ -808,31 +782,12 @@ public class MultiplayerPage implements Page {
         }
     }
 
-    /**
-     * 猜本地 MC 端口：启动日志 → server.properties → 历史端口 → 25565
-     *
-     * 日志优先：「对局域网开放」不改 server.properties，真正端口只出现在
-     * latest.log 的「本地游戏已在端口 N 上开启」里。
-     */
+    /** 猜本地 MC 端口：启动日志 → server.properties → 历史端口 → 25565 */
     private int detectMcPort() {
-        for (Path dir : gameDirs()) {
-            Integer p = LocalPortScanner.readPortFromLog(dir);
-            if (p != null) {
-                return p;
-            }
-        }
-        for (Path dir : gameDirs()) {
-            Integer p = LocalPortScanner.readServerPort(dir);
-            if (p != null) {
-                return p;
-            }
-        }
-        for (Integer p : rememberedPorts()) {
-            if (isPortListening(p)) {
-                return p;
-            }
-        }
-        return 25565;
+        // 推断规则统一放在 LocalPortScanner（GameLauncher 的 VPN 转发也用同一套），
+        // 避免「开房时探测的端口」和「游戏启动后实际用的端口」两边规则不一致。
+        int p = LocalPortScanner.detectOpenToLanPort(gameDirs(), rememberedPorts());
+        return p > 0 ? p : 25565;
     }
 
     // ==================== 日志 / 状态 ====================

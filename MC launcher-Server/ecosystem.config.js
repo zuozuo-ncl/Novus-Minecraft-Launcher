@@ -8,17 +8,32 @@ module.exports = {
       exec_mode: 'fork',
       watch: false,
       max_memory_restart: '500M',
+      // 注意：在 ecosystem 文件里显式给出的变量会**遮蔽**同名环境变量。
+      // 反馈功能需要的 SMTP_* / TARGET_EMAIL 也必须在这里透传，
+      // 否则即便 .env 里写了，pm2 生命周期里也读不到。
       env: {
         NODE_ENV: 'production',
         PORT: 5003,
         // 写接口令牌：务必在服务器上改成随机长串，未设置时增删版本接口会 503
-        ADMIN_TOKEN: process.env.ADMIN_TOKEN || ''
+        ADMIN_TOKEN: process.env.ADMIN_TOKEN || '',
+        SMTP_HOST: process.env.SMTP_HOST || '',
+        SMTP_PORT: process.env.SMTP_PORT || '465',
+        SMTP_SECURE: process.env.SMTP_SECURE || 'true',
+        SMTP_USER: process.env.SMTP_USER || '',
+        SMTP_PASS: process.env.SMTP_PASS || '',
+        TARGET_EMAIL: process.env.TARGET_EMAIL || ''
       },
       env_production: {
         NODE_ENV: 'production',
         PORT: 5003,
         // 写接口令牌：务必在服务器上改成随机长串，未设置时增删版本接口会 503
-        ADMIN_TOKEN: process.env.ADMIN_TOKEN || ''
+        ADMIN_TOKEN: process.env.ADMIN_TOKEN || '',
+        SMTP_HOST: process.env.SMTP_HOST || '',
+        SMTP_PORT: process.env.SMTP_PORT || '465',
+        SMTP_SECURE: process.env.SMTP_SECURE || 'true',
+        SMTP_USER: process.env.SMTP_USER || '',
+        SMTP_PASS: process.env.SMTP_PASS || '',
+        TARGET_EMAIL: process.env.TARGET_EMAIL || ''
       },
       error_file: './logs/pm2-error.log',
       out_file: './logs/pm2-out.log',

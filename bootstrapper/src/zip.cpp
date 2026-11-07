@@ -1,14 +1,5 @@
 // ============================================================================
-//  zip.cpp —— 使用 Windows 自带能力解压 ZIP
-//
-//  为什么不用第三方库（如 miniz / libzip）：
-//    需求明确要求避免第三方依赖导致的编译问题。
-//    Windows 自带两种可靠的解压途径，按顺序尝试：
-//      1) Shell.Application COM —— 原生、无额外进程
-//      2) PowerShell Expand-Archive —— 兼容性最好的兜底
-//
-//  两者都通过 CreateProcessW 拉起，全程宽字符，中文路径安全。
-// ============================================================================
+// 为什么不用第三方库（如 miniz / libzip）：
 #include "common.h"
 
 #include <shlobj.h>
@@ -75,11 +66,6 @@ DWORD RunAndWait(const std::wstring& cmdLine, bool hidden = true) {
     return exitCode;
 }
 
-// ---------------------------------------------------------------------------
-// Shell CopyHere 是**异步**的（无消息泵时也照样立即返回 S_OK）。
-// 以前把 S_OK 当「解压完成」，紧接着去找 javaw.exe 会找不到（解压还没写完）。
-// 这里解析 CopyHere 的返回文件夹对象，轮询其条目数是否稳定；
-// 拿不到条目数时退回「轮询目标目录字节数是否稳定」。
 // ---------------------------------------------------------------------------
 static unsigned long long DirByteSizeNoWait(const std::wstring& dir);
 
@@ -365,11 +351,6 @@ bool ExtractWithPowerShell(const std::wstring& zipPath,
 
 // ---------------------------------------------------------------------------
 // ZIP 条目名安全检查（防 zip-slip）
-//
-// Shell CopyHere 与 Expand-Archive 对 ../、绝对路径条目的处理各不相同，
-// 历史上多次被利用把文件写进解压目录之外。解压前先读中央目录，
-// 任何可疑条目都直接拒绝整个包。
-// ---------------------------------------------------------------------------
 bool IsSafeZipEntryName(const wchar_t* name) {
     if (!name || !*name) {
         return false;
@@ -419,12 +400,7 @@ bool ReadAt(HANDLE f, unsigned long long offset, void* out, DWORD len) {
 }
 
 // 读 ZIP 的中央目录，逐个检查条目名；按需分段读取，不整包载入内存。
-//
 // 安全要点（历史缺陷）：
-//   · 以前 EOCD 里「条目数 == 0xFFFF」（ZIP64 占位）时直接返回「校验通过」，
-//     恶意 zip 只要改写这一个字段就能让 zip-slip 检查整体失效；
-//   · 以前把整个包 malloc 进内存、ReadFile 长度按 DWORD 截断，大包直接失败。
-//   现在：识别到 ZIP64 就去解析 ZIP64 EOCD 拿到真实条目数；解析不了就拒绝（fail-closed）。
 bool ValidateZipEntries(const std::wstring& zipPath) {
     HANDLE f = CreateFileW(zipPath.c_str(), GENERIC_READ, FILE_SHARE_READ,
                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);

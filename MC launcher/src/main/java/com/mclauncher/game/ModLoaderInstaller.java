@@ -35,13 +35,7 @@ public class ModLoaderInstaller {
         this.gson = new GsonBuilder().setPrettyPrinting().create();
     }
 
-    /**
-     * 安装 Fabric
-     *
-     * @param gameVersion   原版游戏版本
-     * @param loaderVersion Fabric Loader 版本
-     * @return 安装后的版本 ID
-     */
+    /** 安装 Fabric */
     public String installFabric(String gameVersion, String loaderVersion) throws IOException {
         logger.info("开始安装 Fabric: {}-{}", gameVersion, loaderVersion);
 
@@ -75,14 +69,7 @@ public class ModLoaderInstaller {
         return versionId;
     }
 
-    /**
-     * 下载 Fabric 的库文件
-     *
-     * Fabric 的 profile JSON 里每个库都带 downloads.artifact.url 和 sha1，
-     * 这里优先用镜像地址 + SHA-1 校验，失败时回退官方 URL。
-     *
-     * @return 成功下载/校验通过的库数量
-     */
+    /** 下载 Fabric 的库文件 */
     private int downloadFabricLibraries(JsonObject fabricObj) throws IOException {
         JsonArray libraries = fabricObj.getAsJsonArray("libraries");
         if (libraries == null) {
@@ -184,21 +171,7 @@ public class ModLoaderInstaller {
 
     /**
      * 安装 Forge
-     *
-     * 实现原理：
-     * Forge 官方安装器（installer.jar）内部已经打包了最终要写入的
-     * version.json —— 它包含真实的 mainClass、库清单和 JVM 参数。
-     * 因此我们不需要真的去执行安装器（那需要 launcher_profiles.json
-     * 且会长时间联网），而是直接从 JAR 里提取 version.json，
-     * 改写 id / inheritsFrom 后保存，再把里面的库文件下载齐全。
-     *
      * 注意：现代 Forge（1.13+）的库是从 Maven 仓库下载的普通 JAR，
-     * 不需要运行 processors 也能启动客户端（processors 主要用于
-     * 生成服务端补丁和反混淆，客户端启动由 BootstrapLauncher 处理）。
-     *
-     * @param gameVersion   原版游戏版本
-     * @param forgeVersion  Forge 版本
-     * @return 安装后的版本 ID
      */
     public String installForge(String gameVersion, String forgeVersion) throws IOException {
         logger.info("开始安装 Forge: {}-{}", gameVersion, forgeVersion);
@@ -275,17 +248,7 @@ public class ModLoaderInstaller {
         return versionId;
     }
 
-    /**
-     * 从 Forge 安装器 JAR 中提取 version.json
-     *
-     * 现代 Forge 安装器结构：
-     * - install_profile.json : 安装元数据（含 processor 定义）
-     * - version.json         : 最终要写入 versions/ 的版本定义（成品）
-     * - data/client.lzma     : 客户端补丁数据（我们不需要）
-     *
-     * 老版本 Forge（1.12 及以前）把版本信息放在 install_profile.json 的
-     * versionInfo 字段里，这里一并兼容。
-     */
+    /** 从 Forge 安装器 JAR 中提取 version.json */
     private JsonObject extractVersionJsonFromInstaller(Path installerJar) {
         // 优先读取 version.json（现代 Forge）
         try {
@@ -343,13 +306,7 @@ public class ModLoaderInstaller {
         }
     }
 
-    /**
-     * 下载 Forge 版本定义中列出的所有库文件
-     *
-     * Forge 的库来自不同的 Maven 仓库，需要根据库的来源选择正确的下载地址。
-     *
-     * @return 成功下载的库数量
-     */
+    /** 下载 Forge 版本定义中列出的所有库文件 */
     private int downloadForgeLibraries(JsonObject forgeJson) {
         JsonArray libraries = forgeJson.getAsJsonArray("libraries");
         if (libraries == null || libraries.isEmpty()) {
@@ -435,13 +392,7 @@ public class ModLoaderInstaller {
         return allowed;
     }
 
-    /**
-     * 解析库的下载地址
-     *
-     * 依据 BMCLAPI 文档，Forge / Fabric / NeoForge 的库都在
-     * `https://bmclapi2.bangbang93.com/maven` 下镜像，因此统一优先走镜像，
-     * 只有镜像缺失时才回退到库自带的官方 URL。
-     */
+    /** 解析库的下载地址 */
     private String resolveLibraryUrl(JsonObject lib, String mavenPath) {
         String group = lib.get("name").getAsString().split(":")[0];
 
@@ -514,13 +465,7 @@ public class ModLoaderInstaller {
         return "linux";
     }
 
-    /**
-     * 安装 OptiFine
-     *
-     * @param gameVersion    原版游戏版本
-     * @param optifineVersion OptiFine 版本
-     * @return 安装后的版本 ID
-     */
+    /** 安装 OptiFine */
     public String installOptifine(String gameVersion, String optifineVersion) throws IOException {
         logger.info("开始安装 OptiFine: {}-{}", gameVersion, optifineVersion);
 
@@ -547,12 +492,7 @@ public class ModLoaderInstaller {
         return versionId;
     }
 
-    /**
-     * 合并版本 JSON（处理继承关系）
-     *
-     * @param childVersionId 子版本 ID（如 Fabric 版本）
-     * @return 合并后的完整版本 JSON
-     */
+    /** 合并版本 JSON（处理继承关系） */
     public JsonObject mergeVersionJson(String childVersionId) throws IOException {
         Path childJsonPath = gameDir.resolve("versions").resolve(childVersionId)
                                     .resolve(childVersionId + ".json");

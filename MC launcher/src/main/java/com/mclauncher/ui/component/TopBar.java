@@ -11,15 +11,7 @@ import javafx.scene.layout.*;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
 
-/**
- * 顶部栏
- *
- * 布局（按需求）：
- *   左侧：启动器 Logo
- *   右侧：当前账号（头像 + 用户名 + 账号类型）
- *
- * 账号信息从侧边栏/状态栏移到这里的顶栏。
- */
+/** 顶部栏 */
 public class TopBar {
 
     private final HBox root;

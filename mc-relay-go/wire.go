@@ -59,15 +59,7 @@ func (c *tcpConn) closeQuietly() {
 }
 
 // replyAndClose 先回一行 JSON 再关闭连接。
-//
-// 之前握手的各种失败路径只写日志、一声不响地断开，客户端只能看到「连接被重置」，
-// 分不清是口令过期、房间不存在还是网络问题。这里统一改成先回一行
-// {"error":"..."}：裸 TCP 客户端可以直接看到原因；经 HTTP 端口进来的，
-// 这一行会落在 HTTP 响应体里。
-//
 // 不能写完立刻 Close：内核发送缓冲里还没发出去的数据会被 RST 丢掉
-// （经过 frp 之类的隧道时尤其明显）。所以先 CloseWrite 半关闭，
-// 等对端收走并关闭，最多等 replyDrainTimeout。
 func (c *tcpConn) replyAndClose(errMsg string) {
 	if c == nil {
 		return

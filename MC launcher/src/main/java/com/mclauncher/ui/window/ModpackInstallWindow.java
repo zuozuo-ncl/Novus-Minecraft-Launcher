@@ -20,23 +20,7 @@ import java.nio.file.Path;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
-/**
- * 整合包版本选择与一键安装窗口
- *
- * 与 {@link ModVersionChooserWindow} 分开的原因：整合包是「一整个游戏环境」，
- * 安装到独立目录、带原版与加载器，参数和流程完全不同。
- *
- * <h3>界面</h3>
- * <pre>
- *   包名 / 简介                ← 顶部
- *   [版本下拉]  游戏版本 / 加载器 / 大小   ← 选中版本后显示这些信息
- *   安装到: D:\...\packs\xxx  [更改…]
- *   [开始安装]                ← 底部
- * </pre>
- *
- * 安装在一个新的独立游戏目录（{@code <当前目录>\packs\<包名>}），
- * 不会污染已有的游戏目录 —— 玩家可以同时保留多个整合包。
- */
+/** 整合包版本选择与一键安装窗口 */
 public class ModpackInstallWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(ModpackInstallWindow.class);
@@ -61,8 +45,6 @@ public class ModpackInstallWindow {
     private volatile boolean closed = false;
     /**
      * 本次安装的轮次号
-     *
-     * 关闭窗口再打开（或点「重试」）时，上一轮的后台任务可能还在跑，
      * 它回来时不得改写新窗口的按钮 / 进度 / 日志，更不能替用户「关闭」新窗口。
      */
     private volatile int runId = 0;

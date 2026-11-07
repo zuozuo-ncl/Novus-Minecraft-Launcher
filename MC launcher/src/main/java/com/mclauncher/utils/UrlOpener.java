@@ -6,14 +6,7 @@ import org.slf4j.LoggerFactory;
 import java.awt.Desktop;
 import java.net.URI;
 
-/**
- * 用系统默认浏览器打开链接
- *
- * 集中处理，避免每个页面各写一份（原来 AccountPage 里有一份私有实现，
- * 其它页面需要时只能复制粘贴）。
- *
- * 失败不抛出：打不开浏览器不该让调用方的流程中断 —— 用户仍可手动复制链接。
- */
+/** 用系统默认浏览器打开链接 */
 public final class UrlOpener {
 
     private static final Logger logger = LoggerFactory.getLogger(UrlOpener.class);

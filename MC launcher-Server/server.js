@@ -1,37 +1,39 @@
-/**
- * NCL 启动器服务端
- *
- * 提供两类能力：
- *
- *   1. 版本管理（更新检查 / 版本列表）—— 启动器 UpdateClient 与 Web 管理页共用
- *        POST   /api/check-update        { currentVersion } -> { updateAvailable, latestVersion, allVersions }
- *        GET    /api/versions            -> { latest, versions: [] }
- *        POST   /api/versions            { version }       添加
- *        PUT    /api/versions/latest     { version }       指定最新
- *        DELETE /api/versions/:version                     删除
- *
- *   2. 静态数据（启动器直接从本站下载）
- *        GET    /mcmod_intros.json       模组中文简介表（~8 MB）
- *        GET    /mcmod_intros.json.meta  简介表元信息（条数 / 生成时间 / 大小 / 版本号）
- *
- * 设计要点
- * --------
- * - **版本文件读改写要串行**：多个请求同时改 version.json 会互相覆盖。
- *   这里用一条 Promise 链把写操作排成队（单进程 fork 模式下足够）。
- * - **写入要原子**：先写临时文件再 rename，避免进程中途被杀留下半个 JSON，
- *   下次启动直接读不出来 —— 那会让所有客户端「检查更新」失败。
- * - **简介表走流式发送 + ETag**：文件 8 MB，一次性 readFileSync 会吃掉十几 MB
- *   堆内存并阻塞事件循环；启动器每 7 天拉一次，ETag 命中时直接 304。
- * - **端口 / 文件路径可用环境变量覆盖**：pm2 与 systemd 两种部署方式都能配。
- */
+/** NCL 启动器服务端 */
 'use strict';
+
+const path = require('path');
+
+/** 加载项目目录下的 .env。 */
+(function loadDotEnv() {
+  const envFile = path.join(__dirname, '.env');
+  const fs = require('fs');
+  if (!fs.existsSync(envFile)) {
+    return;                     // 没有 .env 是合法情况（全靠环境变量）
+  }
+  if (typeof process.loadEnvFile !== 'function') {
+    console.warn('[配置] 当前 Node 版本不支持 process.loadEnvFile（需 v20.12+），'
+        + '.env 未被读取，请升级 Node 或用系统环境变量');
+    return;
+  }
+  try {
+    process.loadEnvFile(envFile);
+  } catch (err) {
+    // .env 写错（编码/语法）不应让服务起不来：提示后按裸环境变量继续
+    console.warn('[配置] 读取 .env 失败:', err.message);
+  }
+})();
 
 const express = require('express');
 const fs = require('fs');
-const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { pipeline } = require('stream');
+
+/**
+ * 意见反馈模块：校验、限流、SMTP 转发、本地日志。
+ * 不会随启动器一起下发（否则授权码等于公开）。
+ */
+const feedback = require('./feedback');
 
 const app = express();
 
@@ -45,13 +47,7 @@ const HOST = process.env.HOST || '0.0.0.0';
 const VERSION_FILE = process.env.VERSION_FILE || path.join(__dirname, 'version.json');
 const INTRO_FILE = process.env.INTRO_FILE || path.join(__dirname, 'mcmod_intros.json');
 
-/**
- * 各版本 jar 的 SHA-256 清单（文件替代）
- *
- * 结构：{ "1.0.2": "f241...", "1.0.1": "9b42..." }
- * 由发布脚本生成（见 publish-jar.js），不是手工维护的接口。
- * 这里只读文件、不做热更新：每 30 秒按 mtime 重新加载一次。
- */
+/** 各版本 jar 的 SHA-256 清单（文件替代） */
 const SHA_FILE = process.env.SHA_FILE || path.join(__dirname, 'artifacts.json');
 
 /** sha256 -> 版本 的反查表，用于给调用方补上缺失的哈希 */
@@ -113,12 +109,7 @@ function shaFor(version) {
 
 /**
  * 补上版本对象里的 sha256 字段
- *
- * 只在能定位到这个 jar 时给出哈希：
- * - artifacts.json 里有该版本 -> 直接给；
  * - 否则若 artifacts.json 里恰好某个版本的文件名与请求的 jar 同名
- *   （发布时用 .jar 名字登记），也能对上。
- * 查不到就返回 null，客户端会走自己的信任锚校验。
  */
 function withSha(version) {
   return { version, sha256: shaFor(version) };
@@ -148,9 +139,7 @@ function compareVersions(v1, v2) {
 
 /**
  * 规范化版本对象
- *
  * 历史数据里 versions 可能是乱序、含重复或含 latest 不存在的值，
- * 统一校正成「升序、去重、latest 一定在列表里」。
  */
 function normalizeVersionData(raw) {
   let list = Array.isArray(raw && raw.versions) ? raw.versions : [];
@@ -179,24 +168,14 @@ function readVersionFile() {
   }
 }
 
-/**
- * 原子写版本文件
- *
- * 先写 .tmp 再 rename：rename 在同一文件系统上是原子的，
- * 读者要么看到旧文件、要么看到完整的新文件，不会读到半个 JSON。
- */
+/** 原子写版本文件 */
 function writeVersionFile(data) {
   const tmp = `${VERSION_FILE}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n', 'utf8');
   fs.renameSync(tmp, VERSION_FILE);
 }
 
-/**
- * 串行化「读-改-写」
- *
- * 不排队的话，两个并发的 POST 会同时读到同一份旧数据，
- * 后写的那个把前一个的修改整个覆盖掉（丢版本）。
- */
+/** 串行化「读-改-写」 */
 let writeQueue = Promise.resolve();
 function mutateVersions(fn) {
   const task = writeQueue.then(async () => {
@@ -221,15 +200,7 @@ function ok(res, data) {
   res.json({ success: true, data });
 }
 
-/**
- * 管理令牌：写接口（增删版本 / 指定 latest）必须携带。
- *
- * 以前这三个接口完全没有鉴权且默认监听 0.0.0.0 —— 任何人都能改掉
- * 推给全部客户端的「最新版本」。现在：
- * - 未配置 ADMIN_TOKEN 时写接口一律 503（fail-closed，不允许无鉴权放行）
- * - 已配置时校验 Authorization: Bearer <token> 或 X-Admin-Token
- * 公开的 Web 管理页可以把令牌存在本地，请求时带上。
- */
+/** 管理令牌：写接口（增删版本 / 指定 latest）必须携带。 */
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 
 function safeEqual(a, b) {
@@ -256,17 +227,26 @@ function requireAdmin(req, res, next) {
 
 app.disable('x-powered-by');
 
-/**
- * 版本接口的请求体上限。
- *
- * 以前全局 50MB、且挂在鉴权之前：匿名请求往任意路由塞 50MB body 就能让
- * 服务端缓冲 + JSON 解析，几个连接就能打满内存。版本接口的 body 只有几十字节，
- * 64KB 足够；超限返回 413。
- */
+/** 信任代理：只有服务本身不直接暴露公网时才开启。 */
+if (process.env.TRUST_PROXY === '1') {
+  app.set('trust proxy', process.env.TRUST_PROXY_CIDR || 'loopback');
+}
+
+/** 版本接口的请求体上限。 */
 const jsonBody = express.json({ limit: '64kb' });
 
 // 只需要 JSON 的版本接口才解析 body（且只解析一次）
 app.use(['/api/check-update', '/api/versions'], jsonBody);
+
+/**
+ * 意见反馈：body 只有一段 2000 字的文本 + 少量系统信息，
+ * 32KB 足够；单独一个小上限，避免匿名接口被塞大 body。
+ * 处理逻辑（校验 / 限流 / SMTP / 本地日志）见 feedback.js。
+ */
+app.use('/api/feedback', express.json({ limit: '32kb' }));
+app.post('/api/feedback', (req, res, next) => {
+  feedback.handleFeedback(req, res).catch(next);
+});
 
 // API 响应一律禁止缓存：版本信息一变就该立刻生效，
 // 不希望中间的反代 / CDN 把「已是最新」缓存住。
@@ -310,13 +290,7 @@ app.use((req, res, next) => {
 
 // ==================== 版本管理 API ====================
 
-/**
- * 检查更新
- *
- * 启动器契约（UpdateClient.checkUpdate）：
- *   有更新   -> { updateAvailable: true,  latestVersion: "x.y.z", allVersions: [...] }
- *   无更新   -> { updateAvailable: false, latestVersion: null, currentVersion: "x.y.z" }
- */
+/** 检查更新 */
 app.post('/api/check-update', (req, res, next) => {
   try {
     const currentVersion = req.body && req.body.currentVersion;
@@ -353,12 +327,7 @@ app.post('/api/check-update', (req, res, next) => {
   }
 });
 
-/** 版本列表
- *
- * 保持向后兼容：latest / versions 的字段不变；
- * 额外给出 sha256（最新版本）以及 files 数组（每个版本 + 哈希），
- * 老客户端忽略新字段，新客户端用它校验下载内容。
- */
+/** 版本列表 */
 app.get('/api/versions', (req, res, next) => {
   try {
     const data = readVersionFile();
@@ -445,9 +414,7 @@ app.delete('/api/versions/:version', requireAdmin, async (req, res, next) => {
 
 /**
  * 指定最新版本
- *
  * 注意：这个路由必须写在 DELETE/POST 之后、且路径带 latest，
- * Express 按注册顺序匹配，不会和 /api/versions/:version 冲突。
  */
 app.put('/api/versions/latest', requireAdmin, async (req, res, next) => {
   try {
@@ -477,8 +444,6 @@ app.put('/api/versions/latest', requireAdmin, async (req, res, next) => {
 
 /**
  * 简介表元信息
- *
- * 启动器可以先用它做一次很小的探测（拿到条数/版本号/大小），
  * 再决定要不要拉那 8 MB。不带缓存头，保证拿到最新。
  */
 app.get('/mcmod_intros.json.meta', (req, res, next) => {
@@ -501,13 +466,7 @@ app.get('/mcmod_intros.json.meta', (req, res, next) => {
   });
 });
 
-/**
- * 模组中文简介表
- *
- * - ETag：内容一变才变，启动器带 If-None-Match 时回 304（省 8 MB 流量）
- * - 流式发送：不把整个文件读进内存
- * - 支持 gzip：8 MB 的 JSON 压缩后通常只有 1~2 MB
- */
+/** 模组中文简介表 */
 /*
  * gzip 结果缓存：8 MB 的 JSON 用 level 9 压缩要几百毫秒同步地吃一颗 CPU 核，
  * 以前每个请求都现压一遍 —— 几个客户端同时拉就会把事件循环堵死。
@@ -597,10 +556,7 @@ app.get('/mcmod_intros.json', (req, res, next) => {
 /** 根路径：Web 管理页 */
 /**
  * 管理页文件名。
- *
  * 以前「优先 index.html，否则取排序后第一个 .html」——发布时多拷一个任意
- * html 到 public/ 就可能顶替管理页。现在：优先 index.html；否则只认部署时
- * 用 ADMIN_PAGE 指定的文件名（默认管理页），其它 html 不会自动成为入口。
  */
 const ADMIN_PAGE = process.env.ADMIN_PAGE || 'zuozuo110927.html';
 
@@ -675,8 +631,18 @@ const server = app.listen(PORT, HOST, () => {
   if (!ADMIN_TOKEN) {
     console.warn('[警告] 未配置 ADMIN_TOKEN：增删版本 / 指定 latest 的接口已禁用（503）');
   }
+  // 反馈接口：SMTP 缺配置时不报错，只降级为「写本地日志 + 返回提示」
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS
+      || !process.env.TARGET_EMAIL) {
+    console.warn('[警告] SMTP 配置不完整：/api/feedback 只会写 data/feedback.log，不会发邮件');
+  }
   console.log(`版本文件: ${VERSION_FILE}`);
   console.log(`简介表: ${INTRO_FILE}`);
+  if (process.env.TRUST_PROXY === '1') {
+    console.log(`信任代理: 是（req.ip 参考 X-Forwarded-For，来源范围 ${process.env.TRUST_PROXY_CIDR || 'loopback'}）`);
+  } else {
+    console.log('信任代理: 否（反馈限流按直连地址计数；经 Cloudflare/frp 时所有人共享同一个 IP）');
+  }
 });
 
 /** 端口被占用时给出人话提示，而不是一大段堆栈 */

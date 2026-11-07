@@ -10,13 +10,7 @@ import java.util.List;
 
 /**
  * 窗口图标
- *
- * 从 resources/ui/icon-{16,32,48,64,128,256}.png 读取多档尺寸交给 Stage。
- * 由 {@code tools/make-app-icons.py} 从 NCL_Icon.png 生成 —— 换图标只改源图重跑脚本，
- * 不需要动代码。
- *
  * 为什么不只用一张大图：Windows 任务栏要 16/32，标题栏在 150% 缩放下要 48/64，
- * 只给一张 1024 会让系统各尺寸各自缩放，小尺寸糊成一团。
  */
 public final class AppIcon {
 

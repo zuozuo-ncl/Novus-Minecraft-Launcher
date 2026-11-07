@@ -17,25 +17,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
-/**
- * VPN 隧道的客户端（房主与玩家共用同一套帧协议）
- *
- * <h3>帧格式（小端 u32 长度前缀，与 mc-relay/vpn-room.js 一致）</h3>
- * <pre>
- *   房主 → 服务器：  u32 len | u8 uuidLen | uuid | ipPacket
- *   服务器 → 房主：  u32 len | u8 uuidLen | uuid | ipPacket
- *   玩家 ↔ 服务器：  u32 len | ipPacket
- * </pre>
- *
- * <p><b>ipPacket 是裸 IPv4 报文</b>（首字节 0x4X）。Wintun 的接收缓冲区和发送
- * 缓冲区都是完整 IP 包，**没有**任何额外前缀 —— 早期代码按「4 字节合成帧头」
- * 猜测 IP 头偏移，导致包被发到错误目的地址。
- *
- * <p>帧内长度上限 64KB（IPv4 报文本身最大 65535，服务器按此校验）；
- * 单个以太网 MTU 之内的包直接整包发送，超过 MTU 的发到网卡时驱动会自动分片。
- *
- * <p>房主按「目标 IP」决定这个包发给哪个玩家；玩家只管收发，不关心 uuid。
- */
+/** VPN 隧道的客户端（房主与玩家共用同一套帧协议） */
 public final class VpnTunnel implements AutoCloseable {
 
     private static final Logger logger = LoggerFactory.getLogger(VpnTunnel.class);
@@ -45,6 +27,12 @@ public final class VpnTunnel implements AutoCloseable {
     private static final int UUID_MAX = 40;
     /** 发送队列：网卡 → 网络 方向的积压上限，超过说明网络跟不上，丢包比 OOM 好 */
     private static final int TX_QUEUE_MAX = 512;
+
+    /**
+     * 「这条连接有没有被中继当成 VPN 处理」的探测握手。
+     * 中继对新版在 HTTP 端口上也接受 VPN 握手，但探测不能直接发 vpn-host /
+     */
+    static final String PROBE_TYPE = "vpn-probe";
 
     public enum Role { HOST, PEER }
 
@@ -57,7 +45,7 @@ public final class VpnTunnel implements AutoCloseable {
     private final String token;
     private final Role role;
     private final String uuid;
-    private final WintunAdapter adapter;
+    private final PacketIo adapter;
 
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicLong rx = new AtomicLong();
@@ -66,6 +54,13 @@ public final class VpnTunnel implements AutoCloseable {
     private volatile OutputStream out;
     /** 房主侧：目的地是 10.77.0.1（本机 MC）的包交给它，而不写回 Wintun */
     private volatile java.util.function.Consumer<byte[]> gatewaySink;
+
+    /**
+     * 连接断开回调（只在「不是被 close() 主动关闭」时触发一次）。
+     * 房主用它在中继回收房间后自动重建控制通道与隧道 —— 否则界面一直显示
+     */
+    private volatile Runnable onLost;
+    private final AtomicBoolean lostNotified = new AtomicBoolean(false);
     private volatile boolean stopping;
 
     /** 房主侧：虚拟 IP -> 玩家 uuid */
@@ -74,13 +69,7 @@ public final class VpnTunnel implements AutoCloseable {
     private final java.util.Set<String> knownUuids =
             java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    /**
-     * 房主侧：新玩家的接入口令。
-     *
-     * 玩家第一次为本机 MC 建立连接时，房主为他向中继申请 join token 与
-     * 虚拟 IP（10.77.0.N），玩家连上 10.77.0.1:端口 时就带着这个口令加入。
-     * 不再有「所有玩家都抢 seat=1 → 都是 10.77.0.2」的问题。
-     */
+    /** 房主侧：新玩家的接入口令。 */
     private final ConcurrentHashMap<String, Peer> pendingPeers = new ConcurrentHashMap<>();
 
     /** 一个待接入的玩家（房主侧） */
@@ -102,8 +91,17 @@ public final class VpnTunnel implements AutoCloseable {
     /** 发送队列的元素：一个 IP 包（玩家为裸包，房主为「uuid 前缀 + 包」） */
     private final LinkedBlockingQueue<byte[]> txQueue = new LinkedBlockingQueue<>(TX_QUEUE_MAX);
 
+    /** 隧道只依赖网卡的两件事：发一个包、收一个包。 */
+    public interface PacketIo {
+        /** 把一个 IPv4 报文交给网卡；返回 false 表示发送环已满 */
+        boolean send(byte[] packet);
+
+        /** 从网卡取一个 IPv4 报文；没有时返回 null */
+        byte[] receive();
+    }
+
     public VpnTunnel(String relayHost, int relayPort, String roomId, String token,
-                     Role role, String uuid, WintunAdapter adapter) {
+                     Role role, String uuid, PacketIo adapter) {
         this.relayHost = relayHost;
         this.relayPort = relayPort;
         this.roomId = roomId;
@@ -162,6 +160,43 @@ public final class VpnTunnel implements AutoCloseable {
     public void setGatewaySink(java.util.function.Consumer<byte[]> sink) {
         this.gatewaySink = sink;
     }
+
+    /**
+     * 注册「连接被断开」回调（只在不是 close() 主动关闭时触发一次）。
+     * **回调在 VPN 接收/发送线程上执行**：实现里不要做耗时操作，
+     */
+    public void setOnLost(Runnable r) {
+        this.onLost = r;
+    }
+
+    // ---------------------------------------------------------------
+    //  「出生参数」：房主重连时要用同样一组值重建隧道
+    // ---------------------------------------------------------------
+    String relayHost() { return relayHost; }
+    int relayPort() { return relayPort; }
+    String roomToken() { return token; }
+    String uuidValue() { return uuid; }
+    PacketIo adapterRef() { return adapter; }
+
+    /**
+     * 判断「这次关闭是不是因为对端/网络把连接弄断了」，是则回调 onLost。
+     *
+     * close() 主动关闭时 stopping=true，不会触发。
+     */
+    private void notifyLost() {
+        if (stopping || !lostNotified.compareAndSet(false, true)) {
+            return;
+        }
+        Runnable r = onLost;
+        if (r != null) {
+            try {
+                r.run();
+            } catch (RuntimeException e) {
+                logger.warn("VPN 断开回调异常: {}", e.getMessage());
+            }
+        }
+    }
+
 
     // ---------------------------------------------------------------
     //  启动
@@ -268,6 +303,7 @@ public final class VpnTunnel implements AutoCloseable {
             }
         } finally {
             shutdown();
+            notifyLost();
         }
     }
 
@@ -317,6 +353,7 @@ public final class VpnTunnel implements AutoCloseable {
             }
         } finally {
             shutdown();
+            notifyLost();
         }
     }
 

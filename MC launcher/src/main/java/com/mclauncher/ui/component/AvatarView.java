@@ -9,15 +9,7 @@ import javafx.scene.shape.Circle;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
 
-/**
- * 头像组件
- *
- * 按需求：显示用户名旁边的头像；没有头像资源时，
- * 用用户名首字母生成一个圆形占位图。
- *
- * 占位图的圆形背景色由用户名哈希决定 —— 同一个用户名
- * 每次启动颜色一致，不同用户颜色不同，便于区分。
- */
+/** 头像组件 */
 public final class AvatarView {
 
     private AvatarView() {}
@@ -34,12 +26,7 @@ public final class AvatarView {
             "#6366F1",  // 靛
     };
 
-    /**
-     * 创建头像节点
-     *
-     * @param username 用户名（用于取首字母与配色）
-     * @param size     直径（像素）
-     */
+    /** 创建头像节点 */
     public static Node create(String username, double size) {
         String initial = initialOf(username);
         String color = colorFor(username);

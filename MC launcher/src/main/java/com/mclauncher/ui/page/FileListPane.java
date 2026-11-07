@@ -22,12 +22,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
-/**
- * 可复用的文件列表组件
- *
- * 用于「世界管理」「原理图管理」「光影管理」「本地文件浏览」等模块：
- * 列出目录内容，支持双击打开文件夹、删除、进入子目录。
- */
+/** 可复用的文件列表组件 */
 public class FileListPane {
 
     private static final Logger logger = LoggerFactory.getLogger(FileListPane.class);

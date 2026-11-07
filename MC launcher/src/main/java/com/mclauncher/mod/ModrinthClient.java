@@ -21,29 +21,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Modrinth API 客户端
- *
- * 文档: https://docs.modrinth.com/api/
- *
- * 说明：
- * 本阶段只实现「搜索 -> 选版本 -> 下载 jar」。
- * 不处理依赖关系解析与整合包安装。
- *
- * ===== 关于镜像 (mod.mcimirror.top) =====
- * Modrinth 官方域名 api.modrinth.com 在部分网络环境下可访问，
- * 但 cdn.modrinth.com（文件下载）常被阻断。
- * 因此这里统一走国内镜像 mod.mcimirror.top：
- *   - API   : https://mod.mcimirror.top/modrinth/v2/...
- *   - 文件  : https://mod.mcimirror.top/data/{project_id}/versions/{version_id}/{file_name}
- *
- * 该镜像只镜像 API；文件端点会 302 重定向到实际源。
- * 若重定向目标不可达，可通过 setUseMirror(false) 切回官方源。
- *
- * ===== 关于 User-Agent =====
- * Modrinth 要求所有请求携带可识别身份的 UA，
- * 格式为 `启动器名/版本号 (联系方式)`。
- */
+/** Modrinth API 客户端 */
 public class ModrinthClient {
 
     private static final Logger logger = LoggerFactory.getLogger(ModrinthClient.class);
@@ -64,34 +42,14 @@ public class ModrinthClient {
     private final OkHttpClient httpClient;
     private final Gson gson;
 
-    /**
-     * projectId -> raw_icon_url（值为 null 表示「查过但没有」）
-     *
-     * JavaFX 解不了 WebP，热门模组的图标都需要走一次原始格式查询，
-     * 缓存可以避免列表滚动时反复请求 API。
-     */
+    /** projectId -> raw_icon_url（值为 null 表示「查过但没有」） */
     private static final java.util.Map<String, String> RAW_ICON_CACHE
             = new java.util.concurrent.ConcurrentHashMap<>();
 
-    /**
-     * API 是否走国内镜像
-     *
-     * 实测结论（2026-10-24）：
-     *   同一份 190KB 数据 — 镜像 8.1 秒，官方源 1.2 秒
-     *   同一份 536KB 版本列表 — 镜像 17.1 秒，官方源 2.0 秒
-     * 即**镜像对 API 响应体做了限速（约 23KB/s，官方约 150KB/s）**。
-     * 因此 API 默认走官方源。
-     *
-     * 若某网络环境下 api.modrinth.com 不可达，可置为 true 切回镜像。
-     */
+    /** API 是否走国内镜像 */
     private final boolean useMirrorApi;
 
-    /**
-     * 文件/图标是否走国内镜像
-     *
-     * 文件 CDN（cdn.modrinth.com）在国内**不可达**（实测 curl 返回 000），
-     * 而镜像的文件服务很快（图标 0.3-0.9 秒）。因此文件始终走镜像。
-     */
+    /** 文件/图标是否走国内镜像 */
     private final boolean useMirrorFiles;
 
     public ModrinthClient() {
@@ -136,24 +94,11 @@ public class ModrinthClient {
 
     /**
      * 把文件 URL 改写到镜像
-     *
-     * 镜像返回的 files[].url 仍指向 cdn.modrinth.com，
      * 必须改写为 mod.mcimirror.top/data/... 才能走镜像。
-     *
-     * 官方格式: https://cdn.modrinth.com/data/{project}/versions/{version}/{file}
-     * 镜像格式: https://mod.mcimirror.top/data/{project}/versions/{version}/{file}
      */
     /**
      * 下载图片字节（用于模组图标）
-     *
      * 为什么不用 JavaFX 的 Image(url) 直接加载：
-     * 实测 JavaFX 内部用 HttpsURLConnection 直连，在部分网络环境下
-     * 会 Connection timed out（而 OkHttp/curl 能正常访问）。
-     * 因此统一走这里的 OkHttp（已配好 UA 与重定向），
-     * 拿到字节后再交给 JavaFX 解码。
-     *
-     * @param url 图标 URL（会自动改写到镜像）
-     * @return 图片字节；失败返回 null
      */
     public byte[] downloadImageBytes(String url) {
         if (url == null || url.isBlank()) {
@@ -161,15 +106,7 @@ public class ModrinthClient {
         }
 
         // 依次尝试：镜像改写后的地址 -> 原始地址
-        //
         // 为什么要两个都试：镜像站可能已停服（实测 mod.mcimirror.top
-        // 会返回 HTTP 200 + 一个 HTML「服务不可用」页面）。
-        // 但**只在网络层失败时**才回退 —— 若镜像明确回了「不是图片」
-        // 的内容，说明它在正常工作、只是这个资源没有，再试原始地址
-        // 只会白等一轮超时（原始 CDN 在国内同样不通）。
-        // 快速通道：URL 已经是 .webp 时**直接跳过首次下载**。
-        // JavaFX 没有 WebP 解码器，下下来也用不了；每张图省掉一次
-        // 下载 + 一次「查原始地址」的往返。实测这是热门模组图标慢的主因。
         if (url.toLowerCase().endsWith(".webp")) {
             byte[] raw = fetchRawIcon(url);
             if (raw != null && isDecodable(raw)) {
@@ -214,15 +151,7 @@ public class ModrinthClient {
         return null;
     }
 
-    /**
-     * 取作者的原始上传图标
-     *
-     * 只在需要时（下载到的图解码不了）调用，而且**每个项目只查一次**，
-     * 结果不论成败都记进 RAW_ICON_CACHE —— 列表滚动会反复请求同一批图标。
-     *
-     * @param iconUrl 形如 https://cdn.modrinth.com/data/{projectId}/{hash}_96.webp
-     * @return PNG/JPEG 字节；拿不到返回 null
-     */
+    /** 取作者的原始上传图标 */
     private byte[] fetchRawIcon(String iconUrl) {
         String projectId = projectIdOf(iconUrl);
         if (projectId == null) {
@@ -244,10 +173,6 @@ public class ModrinthClient {
 
         // 原始图是作者上传的完整尺寸，实测 200KB~350KB。
         // 必须用宽超时的客户端：IMAGE_CLIENT 的 5 秒读超时对它们来说太短，
-        // 会被判成失败（表现为「图标一直是占位字母」）。
-        //
-        // 直接走官方 CDN：镜像对原始图路径一律返回 567（实测），
-        // 试镜像只会多等一次往返。
         return fetchImage(RAW_ICON_CLIENT, rawUrl);
     }
 
@@ -265,12 +190,7 @@ public class ModrinthClient {
         return end > start ? iconUrl.substring(start, end) : null;
     }
 
-    /**
-     * 查项目的 raw_icon_url
-     *
-     * 用 /v2/projects?ids=[...] 批量接口，单次只查一个也能用；
-     * 失败返回 null（调用方会退回首字母占位图）。
-     */
+    /** 查项目的 raw_icon_url */
     private String queryRawIconUrl(String projectId) {
         try {
             // ids 是 JSON 数组，整体做一次 URL 编码
@@ -298,10 +218,6 @@ public class ModrinthClient {
 
     /**
      * 判断字节流能否被 JavaFX 解码
-     *
-     * 实测 JavaFX 17 **没有 WebP 解码器**（抛 "No loader for image data"），
-     * 而 Modrinth 的 icon_url 绝大多数是 WebP。这里只放行 PNG/JPEG/GIF/BMP。
-     *
      * 在后台线程调用，线程安全。
      */
     private boolean isDecodable(byte[] b) {
@@ -322,14 +238,7 @@ public class ModrinthClient {
 
     /**
      * 下载图片并校验内容确实是图片
-     *
      * 关键：**不能只看 HTTP 状态码**。
-     * 实测镜像站在停服期间返回的是 200 + HTML 错误页，
-     * 只看 isSuccessful() 会把 HTML 当成图片交给 JavaFX 解码，
-     * 结果是既没图标、也刷不出错误日志。
-     *
-     * 用独立的短超时客户端：图标是列表里的小图，
-     * 等 20 秒才失败会让整个列表卡住不动。3 秒拿不到就当没有。
      */
     private byte[] fetchImage(String target) {
         return fetchImage(IMAGE_CLIENT, target);
@@ -368,10 +277,7 @@ public class ModrinthClient {
 
     /**
      * 图标专用 HTTP 客户端
-     *
-     * 与主客户端分开的原因：
-     *   - 超时要短（3 秒）—— 图标失败不该拖慢列表渲染
-     *   - Accept 要 image/*，不能沿用主客户端的 application/json
+     * - Accept 要 image/*，不能沿用主客户端的 application/json
      */
     private static final OkHttpClient IMAGE_CLIENT = new OkHttpClient.Builder()
             .connectTimeout(3, TimeUnit.SECONDS)
@@ -380,13 +286,7 @@ public class ModrinthClient {
             .followSslRedirects(true)
             .build();
 
-    /**
-     * 原始图标专用客户端
-     *
-     * 原始图是作者上传的完整尺寸（实测最大 350KB+），国内直连官方 CDN 时
-     * 单张可能要 10 秒。给它单独放宽超时，并复用连接 ——
-     * 图标是一批一批出现的，连接复用能省掉每张一次的 TLS 握手。
-     */
+    /** 原始图标专用客户端 */
     private static final OkHttpClient RAW_ICON_CLIENT = new OkHttpClient.Builder()
             .connectTimeout(8, TimeUnit.SECONDS)
             .readTimeout(25, TimeUnit.SECONDS)
@@ -394,12 +294,7 @@ public class ModrinthClient {
             .followSslRedirects(true)
             .build();
 
-    /**
-     * 判断字节流是否真的是图片
-     *
-     * 查文件头（magic number），这是最可靠的判断 ——
-     * Content-Type 可能是错的或缺失，但文件头骗不了人。
-     */
+    /** 判断字节流是否真的是图片 */
     private boolean looksLikeImage(byte[] b, String contentType) {
         if (b == null || b.length < 12) {
             return false;
@@ -461,26 +356,14 @@ public class ModrinthClient {
 
     /**
      * 搜索模组
-     *
      * @param query        关键词（可为空，表示按条件浏览）
-     * @param gameVersion  游戏版本筛选（如 "1.20.1"，可为 null）
-     * @param loader       加载器筛选（如 "fabric" / "forge"，可为 null）
-     * @param offset       分页偏移
-     * @param limit        返回条数（上限 100）
      */
     public SearchResult search(String query, String gameVersion, String loader,
                                int offset, int limit) throws IOException {
         return search(query, gameVersion, loader, offset, limit, null);
     }
 
-    /**
-     * 搜索模组（可指定排序方式）
-     *
-     * @param index 排序方式，Modrinth 支持：
-     *              relevance（相关度，默认）/ downloads（下载量）/ follows（关注数）/
-     *              newest（最新）/ updated（最近更新）
-     *              传 null 使用默认（relevance）
-     */
+    /** 搜索模组（可指定排序方式） */
     public SearchResult search(String query, String gameVersion, String loader,
                                int offset, int limit, String index) throws IOException {
         return search(query, gameVersion, loader, offset, limit, index, "mod");
@@ -605,13 +488,7 @@ public class ModrinthClient {
 
     // ==================== 版本 ====================
 
-    /**
-     * 获取模组的版本列表
-     *
-     * @param projectId    项目 ID 或 slug
-     * @param gameVersion  游戏版本筛选（可为 null）
-     * @param loader       加载器筛选（可为 null）
-     */
+    /** 获取模组的版本列表 */
     public List<ModVersion> getVersions(String projectId, String gameVersion, String loader)
             throws IOException {
         StringBuilder url = new StringBuilder(apiBase())
@@ -635,12 +512,7 @@ public class ModrinthClient {
         return parseVersions(body);
     }
 
-    /**
-     * 只取最新的 N 个版本（首屏用）
-     *
-     * 完整版本列表对热门模组有 1MB 以上、要十几秒；
-     * `?limit=1` 只返回最新一条，几百毫秒就能让界面有内容。
-     */
+    /** 只取最新的 N 个版本（首屏用） */
     public List<ModVersion> getLatestVersions(String projectId, int limit) throws IOException {
         String url = apiBase() + "/project/" + encodePath(projectId)
                 + "/version?limit=" + Math.max(1, Math.min(limit, 10));
@@ -650,17 +522,7 @@ public class ModrinthClient {
     /** 版本列表单页条数上限（Modrinth 接口上限是 100） */
     public static final int VERSION_PAGE_SIZE = 100;
 
-    /**
-     * 分页拉取项目的完整版本列表
-     *
-     * 之前一次性取全量：热门项目 258 个版本、530KB，整段解析要好几秒，
-     * 期间界面只有「正在加载完整版本列表」。现在按页拉，每页到了就回调一次，
-     * 界面逐步补全；同时用 offset 探测是否还有下一页。
-     *
-     * @param firstPageSize 第一页条数（首屏要快就传小值）
-     * @param onPage 每拉到一页就回调（在调用线程执行，调用方自己切到 FX 线程）
-     * @return 是否全部拉完（false 表示中途失败，但已回调的部分有效）
-     */
+    /** 分页拉取项目的完整版本列表 */
     public boolean fetchVersionsPaged(String projectId, int firstPageSize,
                                       java.util.function.BooleanSupplier cancelled,
                                       java.util.function.Consumer<List<ModVersion>> onPage)

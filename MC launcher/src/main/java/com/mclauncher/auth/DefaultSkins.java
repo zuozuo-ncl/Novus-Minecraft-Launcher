@@ -13,23 +13,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/**
- * 内置基础皮肤
- *
- * Minecraft 自带 9 个官方默认皮肤（Steve、Alex 等 9 位角色）。
- * 玩家没有上传自己的皮肤、或想换回官方造型时，可以直接选其中一套。
- *
- * <h3>图片来源</h3>
- * 纹理取自官方 1.21.4 客户端的
- * {@code assets/minecraft/textures/entity/player/slim/*.png}
- * （slim 与 wide 两套模型下同名皮肤的**纹理内容完全相同**，只差渲染模型），
- * 已打包进启动器的 {@code /skins/default/} 资源目录 —— 断网也能显示。
- *
- * <h3>只影响显示</h3>
- * 本类只决定「启动器里看到什么皮肤」。进入服务器后看到的仍是账号在
- * 皮肤站/Mojang 上登记的皮肤 —— 这是 Minecraft 的机制，启动器无法单方面修改。
- * {@link #getValue()} 存储的 key 会在设置页明文说明这一点。
- */
+/** 内置基础皮肤 */
 public final class DefaultSkins {
 
     private static final Logger logger = LoggerFactory.getLogger(DefaultSkins.class);
@@ -111,14 +95,7 @@ public final class DefaultSkins {
         return PRESETS.get(key);
     }
 
-    /**
-     * 加载内置皮肤图
-     *
-     * 优先从类路径读（打包进 jar 里）；没有时返回 null，调用方退回首字母占位。
-     * 结果缓存 —— 同一张图只解码一次。
-     *
-     * @return 64x64 皮肤图；失败返回 null
-     */
+    /** 加载内置皮肤图 */
     public static Image load(Preset preset) {
         if (preset == null) {
             return null;

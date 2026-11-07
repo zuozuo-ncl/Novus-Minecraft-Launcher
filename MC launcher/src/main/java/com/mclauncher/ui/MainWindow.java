@@ -33,12 +33,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
-/**
- * 主窗口
- *
- * 布局：侧边栏导航 + 中间页面区 + 底部状态栏
- * 点击侧边栏切换整个内容区（不再使用弹窗）
- */
+/** 主窗口 */
 public class MainWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(MainWindow.class);
@@ -145,9 +140,7 @@ public class MainWindow {
 
     /**
      * 语言切换后重建常驻界面
-     *
      * 侧边栏、状态栏、窗口标题都是构建时取文案的，切换语言必须重建。
-     * 页面本身由各自的 rebuildAfterLanguageChange 处理。
      */
     public void rebuildForLanguage() {
         if (stage == null || scene == null) {
@@ -170,8 +163,6 @@ public class MainWindow {
         accountManager = new AccountManager();
         apiClient = new BMCLApiClient("bmcl".equals(config.getSourceType()));
         // 启动器数据目录：与 C++ 引导器保持一致（%APPDATA%\NCL_Launcher）
-        // 旧目录迁移放后台做：它可能涉及上千个文件，不能卡住窗口出现
-        com.mclauncher.utils.AppPaths.migrateInBackground();
         Path launcherDir = com.mclauncher.utils.AppPaths.appDataDir();
         bootstrap = new DependencyBootstrap(config);
         gameLauncher = new GameLauncher(config, launcherDir);
@@ -311,12 +302,7 @@ public class MainWindow {
         sidebarAccountName.setText(a != null ? a.getUsername() : L.t("s_475a0b4c23"));
     }
 
-    /**
-     * 侧边栏的目录管理行（紧凑版）
-     *
-     * 只占一行：显示当前目录名，点击整行即打开目录管理窗口。
-     * 完整路径作为 tooltip 显示，不占布局空间。
-     */
+    /** 侧边栏的目录管理行（紧凑版） */
     private VBox buildCompactDirectoryRow() {
         VBox box = new VBox(4);
         box.setPadding(new Insets(0, 0, 8, 0));
@@ -579,9 +565,7 @@ public class MainWindow {
 
     /**
      * 游戏运行中点击关闭：弹确认面板，用户选择后再真正关闭。
-     *
      * 面板回调里不能直接 stage.close() 再走一遍 setOnCloseRequest —— 那时
-     * closingConfirmed 已置位，事件会被放行。这里统一收尾，避免重复执行 shutdown。
      */
     private void askCloseWithGameRunning() {
         if (closeAsked) {
@@ -617,6 +601,19 @@ public class MainWindow {
         com.mclauncher.ui.page.Page mp = pages.get("multiplayer");
         if (mp instanceof com.mclauncher.ui.page.MultiplayerPage m) {
             m.shutdown();
+        }
+        // 其它页面持有的下载器 / 网络客户端也统一释放（Page.shutdown 默认空实现）
+        if (pages != null) {
+            for (com.mclauncher.ui.page.Page p : pages.values()) {
+                if (p == mp) {
+                    continue;
+                }
+                try {
+                    p.shutdown();
+                } catch (Exception e) {
+                    logger.debug("关闭页面资源失败: {}", e.getMessage());
+                }
+            }
         }
         config.forceSave();
 

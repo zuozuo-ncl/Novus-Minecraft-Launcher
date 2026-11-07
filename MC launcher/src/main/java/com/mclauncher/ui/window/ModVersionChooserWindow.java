@@ -18,18 +18,7 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
-/**
- * 模组版本选择面板（内嵌弹窗）
- *
- * 交互要点：
- * 1. 内嵌在主窗口内（ModalHost），跟随主窗口移动
- * 2. 打开时先显示加载圈，数据到位后替换为内容
- * 3. 顶部「智能推荐」卡片，高亮置顶
- * 4. **版本按游戏版本分组，可折叠展开**（默认只展开最新一组）
- * 5. 每行格式为 `游戏版本 --> 模组版本`
- *
- * 所有网络请求都在后台线程执行，不阻塞 JavaFX 线程。
- */
+/** 模组版本选择面板（内嵌弹窗） */
 public class ModVersionChooserWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(ModVersionChooserWindow.class);
@@ -50,13 +39,7 @@ public class ModVersionChooserWindow {
     private ModrinthClient.ModVersion recommended;
     /** 当前选中的版本 */
     private ModrinthClient.ModVersion selected;
-    /**
-     * 本窗口是否已经关闭
-     *
-     * 首次打开就要分页拉几百个版本；玩家扫一眼就关掉是常态。
-     * 不拦一下，关窗后剩下的每一页都会继续下载并构建界面（浪费流量，
-     * 而且在不可见节点上反复布局）。
-     */
+    /** 本窗口是否已经关闭 */
     private volatile boolean closed = false;
     /** 分组容器是否有待重建（在一次批量更新里只重建最后一遍） */
     private boolean rebuildPending = false;
@@ -95,12 +78,7 @@ public class ModVersionChooserWindow {
         this.statusConsumer = statusConsumer;
     }
 
-    /**
-     * 设置中文简介来源
-     *
-     * 详情页原本直接显示 Modrinth 的英文描述，和列表页的中文简介不一致。
-     * 列表页已经加载了映射表，这里复用同一个实例即可（不重复下载）。
-     */
+    /** 设置中文简介来源 */
     public void setIntroMap(com.mclauncher.mod.McmodIntroMap introMap) {
         this.introMap = introMap;
     }
@@ -299,10 +277,7 @@ public class ModVersionChooserWindow {
 
     /**
      * 结束一次批量更新
-     *
      * rebuildPending 必须是「自从 begin 之后有没有过重建请求」的标记 ——
-     * 之前 refreshAll 自己先把它置 true，于是第一页数据到达时
-     * endBulkUpdate 误以为已经重建过，分组永远不画，页面只剩「正在获取版本列表」。
      */
     private void endBulkUpdate() {
         if (bulkUpdateDepth > 0 && --bulkUpdateDepth == 0 && rebuildPending) {
@@ -310,14 +285,7 @@ public class ModVersionChooserWindow {
         }
     }
 
-    /**
-     * 加载版本列表（流式）
-     *
-     * 先拉第一页（默认 30 条）：通常半秒内就能看到可用版本。
-     * 之后在后台继续按页拉完 —— 之前是一次性取全量再整段解析，
-     * 几百个版本期间界面一直只有「正在加载完整版本列表」，
-     * 玩家等不及关掉窗口，就觉得「版本不全」。
-     */
+    /** 加载版本列表（流式） */
     private void loadVersions() {
         CompletableFuture.runAsync(() -> {
             boolean complete;
@@ -372,12 +340,6 @@ public class ModVersionChooserWindow {
         }
 
         // 顺序很重要：先刷新筛选、再重画分组。
-        // buildFilters 里 select() 会触发 onAction → rebuildGroups，
-        // 而它此时沿用的还是**旧的**筛选值（例如上一批数据里的「全部」），
-        // 重画出来的是全量视图；紧接着这次重建又会重新计算筛选下拉框，
-        // 选中项被改回偏好版本，再次重建后只筛选了工具函数，分组就只剩一个。
-        // 所以：buildFilters 自己变了选中值时，由它的 onAction 负责重建；
-        // 次数增减导致这次才首次选中时，onAction 未必再触发，这里补一次。
         computeRecommendation();
         boolean filterChanged;
         beginBulkUpdate();
@@ -471,13 +433,7 @@ public class ModVersionChooserWindow {
 
         List<String> gv = new ArrayList<>(gameVersions);
         // 注意不能用字符串倒序：那样 1.9.x 会排在 1.21 前面，
-        // 玩家选「最新版本」时选到的其实是 1.9 那一栏
         // 比较器必须自洽：compare(a,b) 与 -compare(b,a) 结果一致，且
-        // a<b、b<c 时 a<c。以前的写法「一个以数字开头、另一个不以数字开头」
-        // 时按首字符决定先后，但两个都以数字开头、其中一个解析不出数字时
-        // 又走 compareVersion 的「有数字的排前面」分支，三者组合可构成环，
-        // TimSort 检测到后会直接抛 IllegalArgumentException 让整个窗口崩掉。
-        // 这里只按「是否解析出版本号」分区，再在区内用全序比较。
         gv.sort((a, b) -> {
             boolean an = parseVersion(a).length > 0;
             boolean bn = parseVersion(b).length > 0;
@@ -518,16 +474,7 @@ public class ModVersionChooserWindow {
                 || !java.util.Objects.equals(ldSel, loaderFilter.getSelectionModel().getSelectedItem());
     }
 
-    /**
-     * 计算智能推荐
-     *
-     * 优先级：
-     * 1. 游戏版本包含用户当前版本
-     * 2. 优先 release（排除 beta/alpha）
-     * 3. 发布日期最新
-     *
-     * 无精确匹配时退化为「最新的 release」。
-     */
+    /** 计算智能推荐 */
     private void computeRecommendation() {
         ModrinthClient.ModVersion before = recommended;
         recommended = null;
@@ -616,12 +563,7 @@ public class ModVersionChooserWindow {
 
     // ==================== 分组渲染 ====================
 
-    /**
-     * 重建分组列表
-     *
-     * 按游戏版本分组，每组一个可折叠的标题行；
-     * 默认只展开「推荐版本所在的那一组」，其余折叠。
-     */
+    /** 重建分组列表 */
     private void rebuildGroups() {
         if (groupContainer == null) {
             return;
@@ -724,12 +666,7 @@ public class ModVersionChooserWindow {
     /** 单个分组一次最多直接构建的行数（其余展开时再建） */
     private static final int ROWS_PER_CHUNK = 40;
 
-    /**
-     * 构建一个折叠分组
-     *
-     * 折叠状态的分组只建标题行，展开时才建版本行：一个模组可能有
-     * 30 个游戏版本、几百行，全部建出来会让首次显示变慢。
-     */
+    /** 构建一个折叠分组 */
     private VBox buildGroup(String gameVersion, List<ModrinthClient.ModVersion> versions,
                             boolean expanded) {
         VBox group = new VBox(6);

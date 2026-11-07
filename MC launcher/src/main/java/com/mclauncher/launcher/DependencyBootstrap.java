@@ -16,27 +16,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
 
-/**
- * 依赖引导器
- * 负责在首次运行时检查并下载必要的依赖
- *
- * 对应模块 1：项目骨架与本地配置管理
- */
+/** 依赖引导器 */
 public class DependencyBootstrap {
 
     private static final Logger logger = LoggerFactory.getLogger(DependencyBootstrap.class);
 
     /**
      * 启动器自身的数据目录名
-     *
      * 注意与「游戏数据目录」区分：
-     * - 本目录（启动器目录）：存放启动器配置、账号、Java 运行时、缓存
-     *   位置 = 启动器程序所在目录/.mc_launcher
-     * - 游戏数据目录：存放版本、库、资源、存档、模组
-     *   位置 = 用户选定的游戏根目录/.mc_launcher
-     *
-     * 两者同名是历史原因（都叫 .mc_launcher），但它们位于不同父目录下，
-     * 不会冲突。游戏数据目录由 GameDirectory 负责管理。
      */
     public static final String LAUNCHER_DIR = ".mc_launcher";
 
@@ -131,15 +118,7 @@ public class DependencyBootstrap {
 
     /**
      * 确保配置文件存在
-     *
-     * 配置的创建与读写**完全由 ConfigManager 负责**（它使用锚定在
-     * 启动器程序目录的绝对路径）。这里只做一个「兜底触发」，
-     * 不直接操作文件。
-     *
      * 历史教训：此前这里会用相对路径读一份 config.json、
-     * 再用绝对路径 + REPLACE_EXISTING 覆盖另一份，
-     * 导致进程工作目录变化时用户设置被默认值覆盖
-     * （表现为「重启后设置全部消失」）。已移除该逻辑。
      */
     private void ensureDefaultConfig() {
         // ConfigManager 的构造函数在文件不存在时已自动写入默认配置，
@@ -148,13 +127,7 @@ public class DependencyBootstrap {
         logger.debug("配置文件路径: {}", ConfigManager.getConfigPath());
     }
 
-    /**
-     * 检查启动器依赖
-     *
-     * 这里检查的是启动器运行所需的本地库文件。
-     * 由于我们使用 Fat JAR 打包，大部分依赖已经包含在内。
-     * 这里检查的是一些运行时的辅助文件。
-     */
+    /** 检查启动器依赖 */
     private void checkLauncherDependencies() throws IOException {
         List<DependencyInfo> dependencies = getRequiredDependencies();
 
@@ -192,9 +165,7 @@ public class DependencyBootstrap {
 
     /**
      * 获取必需的依赖列表
-     *
      * 注意：这些是启动器运行时的辅助资源。
-     * 主要的 Java 库已经打包在 Fat JAR 中。
      */
     private List<DependencyInfo> getRequiredDependencies() {
         List<DependencyInfo> deps = new ArrayList<>();

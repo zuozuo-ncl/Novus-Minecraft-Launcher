@@ -1,16 +1,6 @@
 package com.mclauncher.network;
 
-/**
- * 网络常量
- *
- * 关于 User-Agent 的重要说明：
- * BMCLAPI（及其背后的高校镜像节点，如中科大、南大等）会对
- * 「伪装成浏览器的 User-Agent」返回 403 Forbidden，
- * 例如 `Mozilla/5.0 (Windows NT 10.0; Win64; x64) ... Chrome/120...` 会被拒绝。
- *
- * 正确做法是使用一个能表明自身身份的 UA（这也是 BMCLAPI 协议所期望的
- * ——让镜像站知道请求来自哪个启动器）。带联系方式的 UA 更佳。
- */
+/** 网络常量 */
 public final class NetworkConstants {
 
     private NetworkConstants() {}

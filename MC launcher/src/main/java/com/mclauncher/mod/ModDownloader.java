@@ -13,12 +13,6 @@ import java.nio.file.Path;
 
 /**
  * 模组下载器
- *
- * 职责：把 Modrinth 的版本文件下载到游戏目录的 mods 文件夹。
- *
- * 复用现有的 {@link Downloader}，因此自动获得
- * 断点续传、重试、退避等能力。
- *
  * 注意：本阶段不处理模组依赖。要装前置模组请手动安装。
  */
 public class ModDownloader {
@@ -46,14 +40,7 @@ public class ModDownloader {
         this(null);
     }
 
-    /**
-     * 下载模组文件
-     *
-     * @param gameDir   游戏目录（mods 会建在此目录下）
-     * @param version   选定的模组版本
-     * @param listener  进度回调（可为 null）
-     * @return 下载结果
-     */
+    /** 下载模组文件 */
     public DownloadResult downloadMod(Path gameDir, ModrinthClient.ModVersion version,
                                       ProgressListener listener) {
         ModrinthClient.ModFile file = version.getPrimaryFile();

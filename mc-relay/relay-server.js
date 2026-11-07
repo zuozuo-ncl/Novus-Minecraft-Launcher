@@ -1,13 +1,5 @@
 #!/usr/bin/env node
-/**
- * MC 联机中继（VPN 专用）
- *
- * 房主和玩家各建一条 TCP 长连接到本服务器，按「虚拟 IP」交换 IP 包。
- * **不再监听玩家端口**，不再提供端口转发 / 二进制申请。
- *
- *   房主启动器 ──①申请房间(HTTP /api/host)──► 中继 ◄──② VPN 长连接(vpn-host)
- *   玩家启动器 ──③凭口令领 token(vpn-claim)──► 中继 ◄──④ VPN 长连接(vpn-join)
- */
+/** MC 联机中继（VPN 专用） */
 'use strict';
 
 const net = require('net');
@@ -42,14 +34,7 @@ const HEARTBEAT_MISS = 3;
 const HOST_RATE_LIMIT = 10;
 const HOST_RATE_WINDOW_MS = 60_000;
 
-/**
- * CORS 允许的来源。
- *
- * 以前一律 `Access-Control-Allow-Origin: *`：任意网站都能在访客浏览器里
- * 匿名调用 /api/host 建房、读 /api/rooms 房间列表。启动器是原生客户端，
- * 浏览器根本不需要跨域 —— 默认关闭，确有网页端需求时用
- * CORS_ORIGINS=https://a.example 显式放行。
- */
+/** CORS 允许的来源。 */
 const CORS_ORIGINS = new Set(
   (process.env.CORS_ORIGINS || '')
     .split(',').map((v) => v.trim()).filter(Boolean)
@@ -60,14 +45,7 @@ const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ============ 房间状态 ============
 
-/**
- * room = {
- *   roomId, token, name,
- *   control: Socket|null   房主控制通道（心跳 + 签发邀请）
- *   vpn:     VpnRoom|null  VPN 房间（房主/玩家长连接，见 vpn-room.js）
- *   createdAt, lastSeen
- * }
- */
+/** room = { */
 const rooms = new Map();
 const hostRate = new Map();     // ip -> { count, windowStart }
 
@@ -156,12 +134,7 @@ function closeRoom(roomId, reason) {
 
 // ============ 控制通道 ============
 
-/**
- * 房主的控制通道（魔数 + hello）。
- *
- * 只承载信令：心跳 ping/pong，以及「为某位玩家签发 VPN 邀请」的 vpn-token 请求。
- * 玩家实际的数据走 vpn-host / vpn-join 两条长连接（见 vpn-room.js）。
- */
+/** 房主的控制通道（魔数 + hello）。 */
 function attachControl(sock, msg) {
   const room = rooms.get(msg.room);
   if (!room || room.token !== msg.token) {
@@ -430,12 +403,7 @@ vpnServer.listen(VPN_PORT, HOST, () => {
   log(`VPN 帧端口监听 ${HOST}:${VPN_PORT}`);
 });
 
-/**
- * 校验 X-Api-Key。
- *
- * - 恒定时间比较（以前是普通字符串 !=，理论上可做时序侧信道）
- * - 未配置 API_KEY 时仍然放行（启动器/部署脚本的默认行为），但启动时会打醒目警告
- */
+/** 校验 X-Api-Key。 */
 function apiKeyOk(req) {
   if (!API_KEY_REQUIRED) return true;
   const key = String(req.headers['x-api-key'] || '');

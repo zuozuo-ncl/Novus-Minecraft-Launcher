@@ -50,13 +50,7 @@ public class PlatformUtils {
         return isWindows() ? "\\" : "/";
     }
 
-    /**
-     * 设置文件可执行权限（Unix/Linux/macOS）
-     * Windows 上是空操作
-     *
-     * @param path 可执行文件路径
-     * @throws IOException 设置失败时抛出
-     */
+    /** 设置文件可执行权限（Unix/Linux/macOS） */
     public static void setExecutable(Path path) throws IOException {
         if (isWindows()) {
             return;

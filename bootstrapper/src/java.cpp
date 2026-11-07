@@ -1,14 +1,4 @@
 // ============================================================================
-//  java.cpp —— Java 17 的检测与自动安装
-//
-//  检测顺序（从快到慢、从准到糙）：
-//    1) 引导器自己下载的 %APPDATA%\MC_Launcher\java
-//    2) JAVA_HOME 环境变量
-//    3) 注册表（JavaSoft\Java Runtime Environment / Java Development Kit）
-//    4) PATH 中的 java.exe
-//
-//  每一处候选都会实际执行 `javaw -version` 校验主版本号，避免误判。
-// ============================================================================
 #include "common.h"
 
 #include <shlwapi.h>
@@ -19,11 +9,7 @@
 namespace {
 
 // ---------------------------------------------------------------------------
-// 执行 `javaw.exe -version` 并解析主版本号
-//
 // 注意：java -version 把版本信息输出到 **stderr**。
-// 这里用管道捕获 stderr 并解析形如 "17.0.20" / "1.8.0_292" 的版本号。
-// ---------------------------------------------------------------------------
 bool QueryJavaMajorVersion(const std::wstring& javawPath, int& outMajor) {
     outMajor = 0;
 
@@ -210,15 +196,7 @@ bool FindJavaInPath(std::wstring& outJavaw) {
 }
 
 // ---------------------------------------------------------------------------
-// JRE 包下载源白名单
-//
-// JRE 包解压后立刻被执行（javaw.exe），是引导器里风险最高的一次下载：
-//   · 以前只校验「文件头 PK」，镜像/CDN 投毒或 MITM 都能塞进任意 zip；
-//   · Adoptium API 返回的 "link" 是外部给的任意地址，以前照单全收；
-//   · 重定向会无条件跟随，包括降级到 http://。
 // 现在：地址（含每一跳重定向）必须落在下面这些官方/CDN 域名内且是 https。
-// 新增镜像时务必在这里登记。
-// ---------------------------------------------------------------------------
 bool IsAllowedJreUrl(const std::wstring& url) {
     if (url.rfind(L"https://", 0) != 0 && url.rfind(L"HTTPS://", 0) != 0) {
         return false;
@@ -254,11 +232,6 @@ bool IsAllowedJreUrl(const std::wstring& url) {
 }
 
 // ---------------------------------------------------------------------------
-// 内置的 JRE 包 SHA-256（按镜像架构 x64 / x32 区分）
-//
-// 默认两项都为空：此时下载后做严格的 ZIP 结构校验。发布新 JRE 时把
-// 核验过的哈希填进 KNOWN_JRE_SHA256_LIST，就能得到逐字节一致的保证。
-// ---------------------------------------------------------------------------
 std::string KnownJreHash(const std::wstring& arch) {
     static const std::pair<std::wstring, std::wstring> kTable[] = {
         KNOWN_JRE_SHA256_LIST
@@ -271,13 +244,6 @@ std::string KnownJreHash(const std::wstring& arch) {
     return std::string();
 }
 
-// ---------------------------------------------------------------------------
-// 从 Adoptium 的 JSON 中抽出 zip 下载地址
-//
-// 响应形如：
-//   [{ "binary": { "package": { "link": "https://...zip", "name": "...", "size": N }}}]
-//
-// 这里不引 JSON 库，直接找 "link" 字段 —— 对固定格式足够稳健。
 // ---------------------------------------------------------------------------
 bool ExtractAdoptiumZipUrl(const std::wstring& json,
                            std::wstring& outUrl,
@@ -347,16 +313,7 @@ bool ExtractAdoptiumZipUrl(const std::wstring& json,
 namespace Java {
 
 // ---------------------------------------------------------------------------
-// 校验某个 javaw.exe 是否 >= 17
-// ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// 读取 PE 文件头判断 exe 的架构
-//
-//  返回 0x14C (x86) / 0x8664 (x64) / 0xAA64 (ARM64)，失败返回 0。
-//
-//  为什么不用执行 java.exe 来判断：在位数不兼容的系统上它**根本起不来**，
-//  拿不到任何输出。直接读 PE 头是唯一可靠的方式。
-// ---------------------------------------------------------------------------
+// 为什么不用执行 java.exe 来判断：在位数不兼容的系统上它**根本起不来**，
 static WORD ReadPeMachine(const std::wstring& exePath) {
     HANDLE h = CreateFileW(exePath.c_str(), GENERIC_READ,
                            FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -545,14 +502,6 @@ StepResult EnsureJava(const AppPaths& paths,
     }
 
     // ---- 确定下载地址：国内镜像优先，官方兜底 ----
-    //
-    // 顺序：
-    //   1. 三个国内镜像 + 已知文件名（实测最快、最稳）
-    //   2. Adoptium API 取最新地址（网络允许时）
-    //   3. 官方 GitHub 直链（最后的兜底）
-    //
-    // 之前的实现直接用 API 返回的地址，而那个地址指向 GitHub，
-    // 国内会完全超时 —— 这是「下载失败」的根因。
     std::wstring zipPath = Util::JoinPath(paths.javaDir, L"jre17.zip");
 
     // 候选地址列表
@@ -571,11 +520,7 @@ StepResult EnsureJava(const AppPaths& paths,
     }
 
     // 1) BellSoft Liberica 官方 CDN（备选）
-    //
-    //    为什么排第一：
-    //      - 它是 32 位 Java 21 的唯一来源（Adoptium 没有）
-    //      - 实测响应 1.2~4.1 秒，比国内镜像还快
-    //      - URL 由版本号直接拼出，不依赖镜像目录结构
+    // 为什么排第一：
     {
         bool sys64 = (g_archMirror == L"x64");
         std::wstring fn = sys64
@@ -702,12 +647,7 @@ StepResult EnsureJava(const AppPaths& paths,
     }
 
     // ---- 解压前：完整性校验 ----
-    //
-    // JRE 包解压后立刻被执行。以前只在下完时看过「前两个字节是 PK」，
-    // 被截断或被替换的 zip 也能进去。现在：
-    //   1) 若内置了该架构的 SHA-256（KNOWN_JRE_SHA256_LIST），必须逐字节一致；
-    //   2) 否则做完整的 ZIP 结构校验（中央目录完整、条目名安全、无符号链接）。
-    // 需要更强保证时，把发布时记录的哈希填进 KNOWN_JRE_SHA256_LIST 即可。
+    // 1) 若内置了该架构的 SHA-256（KNOWN_JRE_SHA256_LIST），必须逐字节一致；
     {
         const std::string expectedJre = KnownJreHash(g_archMirror);
         if (!expectedJre.empty()) {
@@ -740,6 +680,9 @@ StepResult EnsureJava(const AppPaths& paths,
     if (r != StepResult::Ok) {
         Log::WriteF(L"JRE 解压失败");
         Util::DeleteFileQuiet(zipPath);
+        // 半成品目录里的 javaw.exe 可能是损坏的；如果被 FindJava17 先发现，
+        // 下次启动会直接用它（不做版本校验），跳过一个正常下载的机会
+        Util::DeleteDirectoryQuiet(paths.javaDir);
         return r;
     }
 

@@ -12,32 +12,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * BMCLAPI 高校镜像站池
- *
  * ===== 为什么直连镜像站 =====
- * BMCLAPI 官方节点（bmclapi2.bangbang93.com）会把请求转发给多所高校镜像，
- * 且对连接数限流极严（实测 4 并发即 HTTP 429，之后长时间降速）。
- * 直连这些上游镜像站可以绕开该限制并获得更高带宽。
- *
- * ===== 实测数据（2026-10-24，7 站点 × 多并发档位扫描）=====
- *
- * 站点            峰值速度      最佳并发   4 并发是否 429
- * ----------------------------------------------------------
- * 南阳理工 NYIST   28.11 MB/s    64       否
- * 上海交大 SJTU    25.07 MB/s   128       否
- * 河南教育网 HA    10.23 MB/s    16       否（32 仍安全）
- * 哈工大 HIT        7.71 MB/s    64       否
- * 齐鲁工大 QLU      1.92 MB/s     8       否
- * 中科大 USTC       5.41 MB/s     1       是（且不支持 Range）
- * BMCLAPI 官方      9.08 MB/s     1       是
- *
- * 结论：
- * - USTC 与 BMCLAPI 官方节点**必须排除**在并发下载之外
- *   （4 并发即 429；USTC 还完全不支持 Range，无法分块）
- * - 前四名站点在 64 并发下依然零 429，因此并发可以放心开大
- *
- * ===== 能力范围 =====
- * 支持：库文件（根路径 + Maven 坐标）、assets（/assets/<hash>，扁平）、Forge 安装器
- * 不支持：版本清单 / 版本 JSON / fabric-meta（这些仍需走官方节点）
  */
 public final class MirrorPool {
 
@@ -98,22 +73,7 @@ public final class MirrorPool {
         }
     }
 
-    /**
-     * 实测数据构建的站点表（2026-11-04 实测）
-     *
-     * | 站点 | 库文件 /maven | assets | Range | 备注 |
-     * |------|--------------|--------|-------|------|
-     * | 上海交大 | 200 | 404 | ✓ | |
-     * | 南阳理工 | 200 | 404 | ✓ | |
-     * | 河南教育网 | 200 | 404 | ✓ | |
-     * | 哈工大 | 200 | 404 | ✓ | |
-     * | 南京大学 | 200 | 404 | ✓ | |
-     * | 齐鲁工大 | 200 | 404 | ✓ | |
-     * | 中科大 | 200 | 404 | ✗ | 回退用 |
-     * | BMCLAPI2 | 200 | 200 | ✓ | 唯一支持 assets |
-     * | 重庆大学 | 认证网关 | 认证网关 | - | 不可程序化使用 |
-     * | 浙江大学 | 超时 404 | 404 | - | 不纳入 |
-     */
+    /** 实测数据构建的站点表（2026-11-04 实测） */
     private static final Mirror[] KNOWN_MIRRORS = {
         // ---- 库文件主力站（会走多镜像轮询） ----
         new Mirror(L.t("s_25c10df594"), "https://mirror.nyist.edu.cn/bmclapi",
@@ -180,12 +140,7 @@ public final class MirrorPool {
 
     /**
      * 轮询取下一个镜像（用于把文件分散到各站）
-     *
-     * 分配策略：按「实测速度」加权轮询 —— 快的站承担更多文件。
-     *
      * 关键：会参考各站**当前剩余的并发额度**，
-     * 跳过已被占满的站，避免大量线程堵在同一个慢站上
-     * （这是之前出现「下载卡住数分钟」的根因）。
      */
     public Mirror next() {
         List<Mirror> available = getAvailableMirrors();
@@ -274,13 +229,7 @@ public final class MirrorPool {
         return base + relativePath;
     }
 
-    /**
-     * 拼接 assets 资源 URL
-     *
-     * 实测：各高校镜像**不透传** assets（全部 404），只有 BMCLAPI2 可用；
-     * BMCLAPI2 的结构是两级的 /assets/<前两位>/<hash>。
-     * 直接走扁平路径 /assets/<hash> 会 404。
-     */
+    /** 拼接 assets 资源 URL */
     public String buildAssetUrl(Mirror mirror, String hash) {
         if (mirror == null || hash == null || hash.length() < 2) {
             return null;

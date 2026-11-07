@@ -2,12 +2,7 @@ package com.mclauncher.ui.page;
 
 import javafx.scene.layout.Region;
 
-/**
- * 页面接口
- *
- * 启动器的主内容区由多个页面组成，侧边栏点击时整体切换。
- * 每个页面自行构建 UI，并在被显示时刷新数据。
- */
+/** 页面接口 */
 public interface Page {
 
     /** 页面标题（用于顶部显示） */
@@ -28,11 +23,9 @@ public interface Page {
      */
     default void onHide() {}
 
-    /**
-     * 注入内嵌弹窗宿主
-     *
-     * 默认空实现，需要弹窗的页面自行覆盖。
-     * 这样 MainWindow 可以对所有页面统一调用，不必逐页面判断类型。
-     */
+    /** 注入内嵌弹窗宿主 */
     default void setModalHost(com.mclauncher.ui.component.ModalHost host) {}
+
+    /** 启动器退出时调用：释放页面持有的线程池、连接池等资源。 */
+    default void shutdown() {}
 }

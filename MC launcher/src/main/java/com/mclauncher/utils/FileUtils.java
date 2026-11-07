@@ -32,12 +32,7 @@ public class FileUtils {
         Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
     }
 
-    /**
-     * 原子写文本文件：先写同目录临时文件，再 rename 覆盖目标。
-     *
-     * 直接 writeString 覆盖时，进程在写到一半被杀 / 断电会留下截断的 JSON，
-     * 下次启动读取失败 —— 配置文件和账号文件都经不起这个。
-     */
+    /** 原子写文本文件：先写同目录临时文件，再 rename 覆盖目标。 */
     public static void writeAtomic(Path target, String content) throws IOException {
         Path dir = target.toAbsolutePath().getParent();
         if (dir != null) {

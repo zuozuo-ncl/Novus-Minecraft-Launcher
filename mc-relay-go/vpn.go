@@ -1,11 +1,11 @@
 package main
 
 import (
-	"errors"
-	"io"
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 	"time"
 )
@@ -33,6 +33,14 @@ func decodeRelaxed(body string, out any) error {
 
 // handleVPNSession 处理房主/玩家/口令领取三种 VPN 握手
 func handleVPNSession(c *tcpConn, br *bufio.Reader, hs vpnHandshake) {
+	// 纯探测：客户端在真正连 VPN 之前，先确认「这个端口会不会把 MCRELAY
+	// 不能拿 vpn-host / vpn-join 来探测：那会真的接管连接 —— 房主侧探测会
+	if hs.Type == "vpn-probe" {
+		_, _ = c.Write([]byte("{\"type\":\"pong\"}\n"))
+		c.closeQuietly()
+		return
+	}
+
 	// 房间号会被拼进日志：先校验
 	if !roomIDRe.MatchString(hs.Room) {
 		logf("VPN 连接失败：房间号格式不正确")
@@ -369,6 +377,8 @@ func attachControl(c *tcpConn, br *bufio.Reader, hs vpnHandshake) {
 	}()
 
 	for {
+		// 读超时 20 秒；15 秒无消息时 heartbeatLoop 会先回收（两处互为兜底）。
+		// 客户端每 4 秒发一次 ping，正常房间不会被这条超时影响。
 		_ = c.SetReadDeadline(time.Now().Add(heartbeatInterval * (heartbeatMiss + 1)))
 		line, err := br.ReadBytes('\n')
 		if err != nil {
@@ -391,6 +401,8 @@ func attachControl(c *tcpConn, br *bufio.Reader, hs vpnHandshake) {
 		switch m.Type {
 		case "ping":
 			_, _ = c.Write([]byte("{\"type\":\"pong\"}\n"))
+		case "pong":
+			// 客户端主动回的 pong 也算心跳；lastSeenMs 已在上面更新
 		case "vpn-token":
 			if m.ID != nil {
 				issueJoinToken(r, *m.ID)

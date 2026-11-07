@@ -17,21 +17,7 @@ import java.util.Set;
 
 /**
  * 本地 Minecraft 开服端口探测
- *
- * 以前的联机页把端口写死成 25565（最多再读一次 server.properties），
- * 但抄作业常见的是「对局域网开放」，游戏会**随机挑一个五位数端口**，
- * 或者玩家在 server.properties 里改过端口。这里把几种来源都试一遍：
- *
- * <ol>
- *   <li>当前游戏目录下的 server.properties（单机存档也写在里面）</li>
- *   <li>所有游戏目录（每个目录一份 server.properties）</li>
- *   <li>历史记录（上次用过的端口）</li>
- *   <li>解析启动日志里的「本地游戏已在端口 XXXXX 上公开」/ "Local game hosted on port XXXXX"</li>
- *   <li>端口扫描兜底：127.0.0.1 上的 25565 与 49152-65535</li>
- * </ol>
- *
- * 只有当端口上真的能完成一次 Minecraft 握手（回包里有 JSON status）
- * 才认为是「我的世界」的服务端，避免把别的程序误认成游戏。
+ * <li>历史记录（上次用过的端口）</li>
  */
 public final class LocalPortScanner {
 
@@ -54,37 +40,17 @@ public final class LocalPortScanner {
     /** status 握手拿到的版本信息 */
     public record StatusInfo(String name, int protocol) {}
 
-    /**
-     * 服务端是否强制正版验证（login 探测结果）
-     *
-     * <ul>
-     *   <li>{@link #ONLINE}：服务端回 Encryption Request(0x01)，即 online-mode=true，
-     *       离线账号在加密验证阶段必然被踢；单人存档的「对局域网开放」就是这种；</li>
-     *   <li>{@link #OFFLINE}：服务端回 Login Success(0x02)，即 online-mode=false，
-     *       离线账号可以正常加入；</li>
-     *   <li>{@link #UNKNOWN}：连不上 / 被断开 / 协议异常，无法判定，调用方不应据此
-     *       拦截用户，按原流程走。</li>
-     * </ul>
-     */
+    /** 服务端是否强制正版验证（login 探测结果） */
     public enum OnlineMode { ONLINE, OFFLINE, UNKNOWN }
 
     /**
      * 扫描可能的本地 MC 端口。
-     *
-     * @param gameDirs       要读取 server.properties 的游戏目录（可为空）
      * @param rememberedPorts 历史用过的端口，优先探测
-     * @param logDirs        在这些目录下找最新的 latest.log（可为空）
-     * @return 按优先级排序的候选端口；scanned=true 表示做了端口扫描，
-     *         found 为空时可根据它决定要不要提示用户手动填写
      */
     public static List<Found> scan(List<Path> gameDirs, List<Integer> rememberedPorts,
                                    List<Path> logDirs) {
         // 优先级：latest.log 里「已在端口 N 上开启」 > server.properties 的 server-port
-        //        > 历史用过的端口
-        //
-        // 「对局域网开放」不会改 server.properties，那份文件只反映独立服务端的配置；
-        // 单人存档开局域网用的端口只出现在 latest.log 里。反过来，只要日志里
-        // 有这句话，就是最近一次真正开服的端口，可信度最高。
+        // > 历史用过的端口
         Set<Integer> candidates = new LinkedHashSet<>();
         if (logDirs != null) {
             for (Path dir : logDirs) {
@@ -185,10 +151,7 @@ public final class LocalPortScanner {
 
     /**
      * 走一遍 Minecraft 状态协议（status），返回版本名与协议号。
-     *
      * 协议号会在 login 探测里作为握手的 protocol version：必须用服务端自己的
-     * 协议号，版本对不上时服务端会直接回 Login Disconnect 而不是
-     * Encryption Request / Login Success，探测就失效了。
      */
     public static StatusInfo mcStatusInfo(int port) {
         try (Socket s = new Socket()) {
@@ -249,23 +212,7 @@ public final class LocalPortScanner {
         }
     }
 
-    /**
-     * 对本地端口做一次完整 login 探测，判断服务端是否强制正版验证。
-     *
-     * 流程：先用 status 拿到服务端自己的协议号，再新建一条连接发
-     * Handshake(next state=login) + Login Start，然后读第一个回包：
-     *
-     * <ul>
-     *   <li>Encryption Request(0x01) → {@link OnlineMode#ONLINE}（online-mode=true）；</li>
-     *   <li>Login Success(0x02)      → {@link OnlineMode#OFFLINE}（online-mode=false）；</li>
-     *   <li>Set Compression(0x03)    → 旧版（1.8~1.20.1）离线服务端登录阶段的首包，
-     *       压缩在登录成功前协商，在线模式下首包一定是 0x01，所以 0x03 只会出现在
-     *       离线服务端；继续读下一帧并按压缩格式拆包确认；</li>
-     *   <li>Login Disconnect(0x00) / 其它 / 异常 → {@link OnlineMode#UNKNOWN}。</li>
-     * </ul>
-     *
-     * 探测结束就关闭连接，不完成后续登录，对正在运行的服务端没有副作用。
-     */
+    /** 对本地端口做一次完整 login 探测，判断服务端是否强制正版验证。 */
     public static OnlineMode probeOnlineMode(int port) {
         StatusInfo info = mcStatusInfo(port);
         if (info == null) {
@@ -292,11 +239,6 @@ public final class LocalPortScanner {
             out.write(hp);
 
             // ---- Login Start (0x00) ----
-            // 不同版本字段不同，缺字段时服务端会一直等数据，探测超时：
-            //   ≤1.18.2 (proto≤758)：仅 name
-            //   1.19~1.19.2 (759/760)：name + 无签名(false) + 无 UUID(false)
-            //   1.19.3 (761)：name + 无 UUID(false)
-            //   ≥1.19.4 (proto≥762)：name + UUID(16 字节)
             java.io.ByteArrayOutputStream ls = new java.io.ByteArrayOutputStream();
             writeVarInt(ls, 0x00);
             writeString(ls, "NCLProbe");
@@ -414,15 +356,7 @@ public final class LocalPortScanner {
 
     /**
      * 从最新一份 logs/latest.log 里找「对局域网开放」时打印的端口：
-     *   中文：「本地游戏已在端口 53211 上开启」（旧版是「上公开」）
-     *   英文： "Local game hosted on port 53211"
-     *
      * <b>必须匹配整句，不能只匹配「端口 N」。</b>
-     * 日志里还有大量「端口 56803」这类字样，例如：
-     *   zuozuo (/127.0.0.1:56803) lost connection: 连接中断
-     * 那里的 56803 是<b>别人连进来时用的出口端口</b>，不是本地开服端口。
-     * 早期版本用「端口\s*(\d+)」宽匹配并倒序扫描，会把最后一条断线记录里的
-     * 对端端口当成开服端口，联机时房主一直去连那个不存在的本地端口。
      */
     public static Integer readPortFromLog(Path gameDir) {
         if (gameDir == null) {
@@ -458,6 +392,37 @@ public final class LocalPortScanner {
             // 日志可能正在被写，读失败就算了
         }
         return null;
+    }
+
+    /**
+     * 推断「本机 MC 当前正在使用的局域网端口」。
+     * 历史用过的端口（且此刻确实在监听）。
+     */
+    public static int detectOpenToLanPort(List<Path> gameDirs, List<Integer> rememberedPorts) {
+        if (gameDirs != null) {
+            for (Path dir : gameDirs) {
+                Integer p = readPortFromLog(dir);
+                if (p != null) {
+                    return p;
+                }
+            }
+        }
+        if (gameDirs != null) {
+            for (Path dir : gameDirs) {
+                Integer p = readServerPort(dir);
+                if (p != null) {
+                    return p;
+                }
+            }
+        }
+        if (rememberedPorts != null) {
+            for (Integer p : rememberedPorts) {
+                if (p != null && p > 0 && p < 65535 && isTcpOpen(p)) {
+                    return p;
+                }
+            }
+        }
+        return 0;
     }
 
     // ---------- VarInt 小工具 ----------

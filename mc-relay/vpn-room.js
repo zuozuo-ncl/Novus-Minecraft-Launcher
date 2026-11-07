@@ -1,27 +1,7 @@
 'use strict';
 /**
  * VPN 转发房间（挂在 relay-server.js 启动时 require 一次）
- *
- * 职责
- * ----
- *   · 房主开一条 TCP 长连接到 HTTP 端口，握手 {type:"vpn-host"}，成为该房间的转发出口
- *   · 每个玩家开一条 TCP 长连接到同一端口，握手 {type:"vpn-join"}，登记到该房间
- *   · 双方发的都是帧（见 vpn-tunnel.js），服务器只做「按 uuid 交换 IP 包」
- *
- * 虚拟地址的分配权在**服务器**手里
- * --------------------------------
- *   玩家拿到的 uuid 与虚拟 IP（10.77.0.N）都由这里分配，并通过
- *   `vpn-assign` 同时告知玩家本人和房主（房主收到 `vpn-peer` 事件）。
- *   早期版本让客户端自报 uuid、客户端自己算 IP（固定 seat=1 → 所有人都是
- *   10.77.0.2），结果地址冲突、房主按预填的字面量 "peer-N" 查不到真实 uuid，
- *   双向包全部被丢。
- *
  * 安全性
- * ------
- *   · vpn-join 必须携带房主签发的 join token（房主在控制通道上用
- *     `{type:"vpn-token", id, token}` 为即将接入的玩家签发）
- *   · 同一 token 只能登记一次；同一 uuid 在线时拒绝覆盖
- *   · 房主连接断开 = 房间结束，所有玩家连接一起关闭
  */
 
 const net = require('net');
@@ -45,10 +25,7 @@ const PEER_IP_MAX = 9;
 
 /**
  * VPN 连接空闲超时：这段时间内一个帧都没收到就断开。
- *
  * 为什么必须有：VPN 连接不走房间端口，frontServer 的静默超时在识别出 VPN
- * 之后就不再生效。没有这道兜底时，攻击者只要知道房间号，连上发一帧
- * vpn-join 然后什么都不发，就能永久占住一条连接 + 一个 peer 名额。
  */
 const VPN_IDLE_TIMEOUT_MS = Number(process.env.VPN_IDLE_TIMEOUT_MS || 60_000);
 
@@ -111,16 +88,7 @@ class VpnRoom {
         return writeWithBackpressure(p, frame(ipPacket));
     }
 
-    /**
-     * 玩家 → 房主（前缀为玩家的虚拟 IP，而不是 uuid）
-     *
-     * 房主启动器在**同一台机器**上可能同时有两个角色：
-     *   · VPN 房主：所有玩家都连它（此时需要知道是谁发的，用 uuid 最直接）；
-     *   · 自己的 MC 客户端：连本机转发口 —— 这条连接的目的地址是玩家自己的
-     *     虚拟 IP，房主转发出去的包目的地址就是 10.77.0.N。
-     * 房主侧统一用「包的目的地址」反查，所以前缀取**目的地址**：
-     * 从玩家虚拟 IP 连到本机转发口时，包的目的地址就是该 IP。
-     */
+    /** 玩家 → 房主（前缀为玩家的虚拟 IP，而不是 uuid） */
     toHost(uuid, ipPacket) {
         if (!this.host || this.host.destroyed) return false;
         return writeWithBackpressure(this.host, frameToHost(uuid, ipPacket));
@@ -196,14 +164,7 @@ function isSaneIpPacket(ip) {
     return total > 0 && total <= ip.length;
 }
 
-/**
- * 处理一条 VPN 连接。
- *
- * @param sock    已建立的 TCP 连接
- * @param line    握手行（已去掉魔数前缀）
- * @param rooms   relay-server 的 rooms（Map）
- * @param log     relay-server 的 log 函数
- */
+/** 处理一条 VPN 连接。 */
 function handleVpnConnection(sock, line, rooms, log, prefetched, knownRoom) {
     let msg;
     try {
@@ -289,11 +250,6 @@ function handleVpnConnection(sock, line, rooms, log, prefetched, knownRoom) {
         return;
     }
 
-    // ------------------------------------------------------------------
-    //  玩家：两步加入
-    //    ① vpn-claim（短连接）：用房主分享的口令换取 {token, uuid, ip}
-    //    ② vpn-join （长连接）：带上 ① 拿到的 token/uuid 正式登记
-    //    口令一次性；旧客户端手里只有房间号、没有口令，会被明确拒绝。
     // ------------------------------------------------------------------
     if (msg.type === 'vpn-claim') {
         const vpn = room.vpn;
@@ -393,12 +349,7 @@ function handleVpnConnection(sock, line, rooms, log, prefetched, knownRoom) {
     sock.destroy();
 }
 
-/**
- * 在 frontServer 上挂 VPN 处理：识别首行是否为 VPN 握手。
- *
- * 只认「魔数 + 合法 JSON + type 字段」的形式。以前用 includes('"vpn-join"')
- * 子串匹配，任何包含这串字符的普通 HTTP 请求都会被当成 VPN 连接并断开。
- */
+/** 在 frontServer 上挂 VPN 处理：识别首行是否为 VPN 握手。 */
 function looksLikeVpnHandshake(line) {
     if (!line) return false;
     // 魔数（MCRELAY / MCDATA）后面紧跟 JSON；没有魔数前缀的行不算 VPN 握手

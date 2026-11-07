@@ -19,37 +19,13 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * MC 百科中文简介映射
- *
- * Modrinth 只提供英文简介，这里用 MC 百科（mcmod.cn）的中文介绍替换，
- * 让模组列表对中文用户更友好。
- *
- * <h3>数据来源</h3>
- * 映射表由离线工具 {@code tools/fetch_mcmod_intros.py} 生成：
- * 它遍历 MC 百科的模组详情页（{@code /class/<id>.html}），提取
- * 「中文名 / 英文名 / 简介」，导出成 JSON。
- *
  * <h3>为什么不直接查 MC 百科</h3>
- * MC 百科的搜索接口（{@code search.mcmod.cn/s}）在 robots.txt 中写着
- * {@code Disallow: /s}，明确禁止爬取。所以这里**不做在线查询**，
- * 只用离线生成的映射表 —— 对站点友好，启动器也不用等网络。
- *
- * <h3>工作方式</h3>
- * 启动时异步拉取映射表并缓存到本地；之后按模组英文名查中文简介。
- * 拉取失败不影响使用，只是继续显示英文。
  */
 public class McmodIntroMap {
 
     private static final Logger logger = LoggerFactory.getLogger(McmodIntroMap.class);
 
-    /**
-     * 映射表地址（按优先级排列）
-     *
-     * 1) 3984235.xyz —— COS 绑定的自有域名。实测 4.9MB 约 1 秒
-     * 2) 自有服务器 —— 备份；实测只有 50~160KB/s，同一份文件要 35~50 秒
-     *
-     * 用自定义域名而不是 COS 默认域名：默认域名（*.myqcloud.com）
-     * 在部分网络下被限速或解析异常，且有被回收的风险。
-     */
+    /** 映射表地址（按优先级排列） */
     private static final String[] MAP_URLS = {
             "https://3984235.xyz/mcmod_intros.json",
             "https://version-interface.us.ci/mcmod_intros.json",
@@ -58,19 +34,11 @@ public class McmodIntroMap {
     /** 缓存文件（放在启动器的数据目录） */
     private static final String CACHE_NAME = "mcmod_intros.json";
 
-    /**
-     * 缓存有效期：1 天
-     *
-     * 7 天太长——重新导出数据后玩家要等一周才能看到新的中文简介。
-     * 1 天 + 4.9MB/1 秒的下载成本可以接受。
-     */
+    /** 缓存有效期：1 天 */
     private static final long CACHE_TTL_MS = 24L * 3600 * 1000;
 
     /**
      * 简介表专用客户端
-     *
-     * 不再是 2MB 以内的小文件：实测在慢网络（50~160KB/s）下要 30 秒以上。
-     * readTimeout 是**两次读之间的最大间隔**，只要数据还在流动就不会触发，
      * 但给足余量更稳妥 —— 否则慢速连接会被中途掐断，玩家看到的就是英文。
      */
     private static final OkHttpClient HTTP = new OkHttpClient.Builder()
@@ -90,12 +58,7 @@ public class McmodIntroMap {
     /** 英文名（小写） -> 条目 */
     private final Map<String, Entry> byName = new HashMap<>();
 
-    /**
-     * 归一化名（去空格/连字符/下划线、小写） -> 条目
-     *
-     * 预建索引，避免每次查询都线性遍历一万多条做字符串归一化。
-     * 映射表有 1700+ 条、列表滚动时会频繁查询，这个差别很明显。
-     */
+    /** 归一化名（去空格/连字符/下划线、小写） -> 条目 */
     private final Map<String, Entry> byNorm = new HashMap<>();
 
     /** 是否已成功加载 */
@@ -103,28 +66,18 @@ public class McmodIntroMap {
 
     /**
      * 加载完成回调
-     *
-     * 列表页在映射表就绪**之前**就已经把热门模组渲染出来了（英文），
-     * 没有这个回调就没有任何机制让那些单元格换成中文 —— 表现为
      * 「必须手动点开一次才变中文」。加载完成后统一通知一次。
      */
     private final java.util.List<Runnable> loadListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     /**
      * 进程内的共享实例
-     *
      * 启动时预热和下载页共用同一个实例，否则会下载/解析两份数据，
-     * 而且预热的成果无法被下载页复用。
      */
     private static volatile McmodIntroMap shared;
 
     /**
      * 启动预热
-     *
-     * 在启动器主窗口出现时调用。简介表 4.9MB（gzip 传输），
-     * 实测 1~3 秒下载 + 1~2 秒解析；提前跑的话，玩家点进「下载」页时
-     * 通常已经就绪，不必在页面上干等。
-     *
      * @return 共享实例（调用方应直接使用它，不要自己 new）
      */
     public static McmodIntroMap prewarmAsync() {
@@ -159,8 +112,6 @@ public class McmodIntroMap {
 
         /**
          * 别名列表（slug / 标题 / 各种写法）
-         *
-         * 数据里每个模组只存一条，slug、标题、标题变体都放在这里。
          * 启动器从 Modrinth 拿到的可能是任意一种写法，必须都能命中。
          */
         public java.util.List<String> keys;
@@ -179,13 +130,7 @@ public class McmodIntroMap {
         return byName.size();
     }
 
-    /**
-     * 注册「加载完成」回调
-     *
-     * 若映射表**已经**加载完成，回调会立即执行（在调用线程里）。
-     *
-     * @param r 回调（会在加载线程执行，不是 FX 线程 —— 调用方自己切线程）
-     */
+    /** 注册「加载完成」回调 */
     public void onLoaded(Runnable r) {
         if (r == null) {
             return;
@@ -261,13 +206,7 @@ public class McmodIntroMap {
         }, "mcmod-intro-loader").start();
     }
 
-    /**
-     * 依次尝试各地址下载映射表
-     *
-     * 主地址（COS）通常 1 秒内完成；只有它失败才去试备份地址。
-     *
-     * @return JSON 文本；全部失败返回 null
-     */
+    /** 依次尝试各地址下载映射表 */
     private String fetchAny() {
         for (String url : MAP_URLS) {
             long t0 = System.currentTimeMillis();
@@ -373,16 +312,7 @@ public class McmodIntroMap {
 
     /**
      * 按模组的英文名/标题查中文简介
-     *
-     * 匹配顺序（从严到宽）：
-     *   1. 完全相同的名字
-     *   2. 去掉空格/连字符/下划线后相同
-     *
      * 不做模糊匹配 —— 宁可显示英文，也不要把别的模组简介安错。
-     *
-     * @param title Modrinth 的模组标题（英文）
-     * @param slug  Modrinth 的 slug（可为 null）
-     * @return 中文简介，没匹配到返回 null
      */
     public String lookupIntro(String title, String slug) {
         if (!loaded) {

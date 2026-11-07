@@ -212,15 +212,7 @@ public class JavaDetector {
         return output == null ? "" : output.trim();
     }
 
-    /**
-     * 执行 {@code <java> -version} 并返回合并后的输出；超时或无法启动返回 null。
-     *
-     * 输出在独立线程里读、当前线程只负责计时：读循环等 EOF 是没有超时的，
-     * 如果 java.exe 挂起（被杀软拦截、对损坏的 exe），先读后 waitFor 的写法
-     * 会永久阻塞在 readLine 上，waitFor 的超时根本轮不到执行。
-     *
-     * @param timeoutSeconds 超时秒数
-     */
+    /** 执行 {@code <java> -version} 并返回合并后的输出；超时或无法启动返回 null。 */
     public static String runVersionCommand(String javaExe, int timeoutSeconds) {
         Process process;
         try {
@@ -295,12 +287,7 @@ public class JavaDetector {
         return 0;
     }
 
-    /**
-     * 引号里的版本号。
-     *
-     * 用字符类 [^&#34;]+ 而不是在字符串里写引号，避免转义地狱；
-     * &#34; 即双引号字符。
-     */
+    /** 引号里的版本号。 */
     private static final java.util.regex.Pattern QUOTED_VERSION = buildQuoted();
     private static final java.util.regex.Pattern BARE_VERSION = buildBare();
 

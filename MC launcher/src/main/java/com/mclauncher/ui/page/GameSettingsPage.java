@@ -20,14 +20,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
-/**
- * 游戏设置页
- *
- * 包含：
- * - 模组管理：启用/禁用（改扩展名）、删除
- * - 加载器管理：安装/卸载 Forge、Fabric、OptiFine
- * - 世界管理 / 原理图管理 / 光影管理 / 本地文件浏览
- */
+/** 游戏设置页 */
 public class GameSettingsPage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(GameSettingsPage.class);

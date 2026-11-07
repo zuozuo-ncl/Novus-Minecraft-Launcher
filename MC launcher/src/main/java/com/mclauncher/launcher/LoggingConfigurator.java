@@ -7,29 +7,13 @@ import java.nio.file.Path;
 
 /**
  * 日志目录配置
- *
  * 必须在**任何 Logger 被创建之前**调用 —— logback 是在第一次
- * LoggerFactory.getLogger() 时完成初始化的，之后再改系统属性就晚了。
- * 因此 LauncherApp.main() 的第一行就调用这里。
- *
- * 为什么需要它：
- * logback.xml 里若写相对路径 logs/launcher.log，日志会落到
- * **进程的工作目录**。用户以不同「起始位置」启动（快捷方式差异、
- * 从别的目录执行 jar）时，日志会散落在各处，甚至跑进游戏目录。
- *
- * 现在统一放到：
- *   <启动器程序目录>/.mc_launcher/logs/
- * 与配置、账号、缓存保持一致（见 ConfigManager.launcherHome()）。
  */
 public final class LoggingConfigurator {
 
     /**
      * 系统属性名，供 logback.xml 引用。
-     *
      * 注意：名字用 "mc.launcher.logdir"（带点的标准属性名）。
-     * 之前用的是全大写的 "LOG_DIR"，logback 解析 ${LOG_DIR} 时
-     * 拿不到该属性，直接生成了一个名为 "LOG_DIR_IS_UNDEFINED" 的目录 ——
-     * 日志没有落到预期位置。
      */
     private static final String PROP_LOG_DIR = "mc.launcher.logdir";
 
@@ -62,16 +46,7 @@ public final class LoggingConfigurator {
 
     /**
      * 日志目录 = 启动器数据目录 / logs
-     *
      * 注意：这里**刻意不去调用 ConfigManager**。
-     * 因为 ConfigManager 类里有静态 logger 字段，一旦引用它就会触发
-     * logback 初始化 —— 而那时本方法还没设置好系统属性，
-     * logback 就只能用默认值（表现为日志跑到工作目录的 logs/）。
-     *
-     * 所以这里用独立的轻量解析逻辑，路径规则与 ConfigManager 保持一致：
-     *   1. -Dmc.launcher.home / MC_LAUNCHER_HOME 显式指定
-     *   2. 程序自身位置（JAR 同级；若在 target/ 内则上溯到项目根）
-     *   3. 用户主目录兜底
      */
     private static Path resolveLogDir() {
         try {

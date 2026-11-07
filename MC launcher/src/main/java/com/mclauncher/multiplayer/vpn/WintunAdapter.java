@@ -15,23 +15,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 
-/**
- * Wintun 虚拟网卡（WireGuard 官方驱动）
- *
- * <p>Wintun 是一个单文件驱动（wintun.dll，约 400KB），不需要安装、不需要
- * 修改注册表。调用它在系统里「创建」一块虚拟网卡，之后：
- * <ul>
- *   <li>用 {@code WintunReceivePacket} 读网卡里的 IP 包</li>
- *   <li>用 {@code WintunAllocateSendPacket} / {@code SendPacket} 往网卡里写 IP 包</li>
- * </ul>
- * 网卡的 IP 地址、路由需要另用 {@code netsh interface ip} 配置。
- *
- * <p><b>首次使用需要管理员权限</b>（安装驱动 + 创建网卡）。之后网卡会保留，
- * 非管理员也能打开它（WintunOpenAdapter）。
- *
- * <p>本类只做「驱动层」：不处理 IP 包内容，也不做加密/转发。
- */
-public final class WintunAdapter implements AutoCloseable {
+/** Wintun 虚拟网卡（WireGuard 官方驱动） */
+public final class WintunAdapter implements AutoCloseable, VpnTunnel.PacketIo {
 
     private static final Logger logger = LoggerFactory.getLogger(WintunAdapter.class);
 
@@ -66,14 +51,7 @@ public final class WintunAdapter implements AutoCloseable {
     private Pointer adapter;
     /** volatile：close() 可能来自另一线程，转发循环要能立刻看到 null */
     private volatile Pointer session;
-    /**
-     * 会话的读写锁。
-     *
-     * close() 可能在任意线程（VPN 断开 / 窗口关闭）里 EndSession，而收发包线程
-     * 随时可能还在 ReceivePacket / AllocateSendPacket —— 不互斥的话驱动会读写
-     * 已经释放的会话指针，直接原生 ACCESS_VIOLATION，整个启动器崩溃。
-     * nativeLock 只保护 native 调用本身（收包拷贝完立刻释放），等待事件时绝不持有。
-     */
+    /** 会话的读写锁。 */
     private final Object nativeLock = new Object();
     /** 正在 native 调用中的线程数（用于 close 前等待它们退出） */
     private final java.util.concurrent.atomic.AtomicInteger inNative =
@@ -95,9 +73,7 @@ public final class WintunAdapter implements AutoCloseable {
     // ---------------------------------------------------------------
     /**
      * 把 jar 里的 wintun.dll 解压到临时目录并加载。
-     *
      * 为什么不直接 System.load 资源：JNA 需要文件路径，而 jar 内是压缩流。
-     * 解压到带版本号的临时目录，已存在就复用（避免每次启动都写盘）。
      */
     private static synchronized Wintun loadLibrary() throws IOException {
         if (lib != null) {
@@ -213,9 +189,7 @@ public final class WintunAdapter implements AutoCloseable {
 
     /**
      * 读一个 IP 包；没有数据时返回 null（非阻塞）。
-     *
      * 会话已关闭时返回 null。注意：close() 与 receive() 之间存在竞态窗口，
-     * 捕获错误 code 保证不因竞态崩溃（驱动返回 ERROR_NO_MORE_ITEMS 表示暂无数据）。
      */
     public byte[] receive() {
         if (closing) {

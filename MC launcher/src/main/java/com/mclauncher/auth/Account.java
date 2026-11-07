@@ -36,13 +36,7 @@ public class Account {
     private String xuid;
     private String clientId;
 
-    /**
-     * 皮肤站
-     *
-     * null / "" / "auto"   = 按默认顺序（LittleSkin → Blessing Skin → Mojang）
-     * "mojang"             = 只查 Mojang 官方（正版账号）
-     * 其它（URL 或域名）     = 该站点的 Yggdrasil API，例如 https://littleskin.cn
-     */
+    /** 皮肤站 */
     private String skinSite;
 
     /** 刷新令牌用的回调（登录时注入，不参与序列化） */

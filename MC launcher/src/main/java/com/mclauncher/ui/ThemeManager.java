@@ -7,15 +7,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * 主题管理
- *
- * 采用「双 CSS 文件切换」方案：
- *   - 深色：/css/launcher.css
- *   - 浅色：/css/launcher-light.css
- *
- * 切换时把旧的 stylesheet 移除、加入新的，界面立即生效（无需重启）。
- *
  * 注意：内嵌弹窗（ModalHost）是主窗口 Scene 内的节点，
- * 因此主题切换会自动覆盖到弹窗，不需要单独处理。
  */
 public final class ThemeManager {
 
@@ -90,19 +82,7 @@ public final class ThemeManager {
 
     /**
      * 当前应使用的样式表 URL
-     *
-     * 给 Alert / TextInputDialog 这类**独立 Dialog**用：
-     * 它们自带 DialogPane，不会自动继承主窗口 Scene 的样式表，
      * 必须手动 add。此前这些对话框硬编码 /css/launcher.css，
-     * 于是选浅色时提示框仍是深色。
-     *
-     * 取值优先级：
-     *   1. 当前显示的主窗口 Scene（最可靠 —— 用户看到的主题就是它）
-     *   2. 最近一次 apply() 记录的主题（主窗口尚未显示时的兜底）
-     *   3. 深色（默认）
-     *
-     * 走第 1 条还有个附带好处：连没调用 apply() 的独立窗口
-     * （如 Java 下载进度小窗）也能跟着当前主题走。
      */
     public static String currentStylesheet() {
         String path = null;

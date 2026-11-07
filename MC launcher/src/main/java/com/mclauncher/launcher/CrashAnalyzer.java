@@ -15,26 +15,7 @@ import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * 游戏崩溃日志分析
- *
- * 玩家看到「游戏崩溃了」时通常无从下手：日志几千行，全是英文堆栈。
- * 这里按一组已知的崩溃模式做匹配，把结果翻译成人话并给出处理建议。
- *
- * <h3>设计原则</h3>
- * <ul>
- *   <li><b>宁可漏报，不可误报</b>：拿不准的就不说，绝不编造原因。
- *       分析失败时如实告诉用户「没识别出已知模式」，并给出日志路径。</li>
- *   <li><b>一条崩溃可能命中多条规则</b>：按优先级排序，把最可能的放前面。</li>
- *   <li><b>不依赖外部服务</b>：全部本地正则匹配，不联网、不上传日志。</li>
- * </ul>
- *
- * <h3>分析的日志来源</h3>
- * <ol>
- *   <li>{@code <gameDir>/crash-reports/crash-*.txt}（最新一个）—— 游戏自己生成的崩溃报告，信息最全</li>
- *   <li>{@code <gameDir>/logs/latest.log} —— 没有崩溃报告时退而求其次</li>
- * </ol>
- */
+/** 游戏崩溃日志分析 */
 public class CrashAnalyzer {
 
     private static final Logger logger = LoggerFactory.getLogger(CrashAnalyzer.class);
@@ -110,12 +91,7 @@ public class CrashAnalyzer {
         }
     }
 
-    /**
-     * 规则库
-     *
-     * **顺序有意义**：越靠前的越具体，命中后优先展示。
-     * 修改时请保持「具体规则在前、宽泛规则在后」。
-     */
+    /** 规则库 */
     private static final List<Rule> RULES = Arrays.asList(
 
         // ---------- 一、内存相关 ----------
@@ -308,12 +284,7 @@ public class CrashAnalyzer {
         return report;
     }
 
-    /**
-     * 找最近的日志文件
-     *
-     * 优先 crash-reports/ 下最新的 crash-*.txt（信息最全），
-     * 其次 logs/latest.log。
-     */
+    /** 找最近的日志文件 */
     private Path findLatestLog(Path gameDir) {
         Path crashDir = gameDir.resolve("crash-reports");
         if (Files.isDirectory(crashDir)) {
@@ -347,24 +318,35 @@ public class CrashAnalyzer {
     private String readSafely(Path file) {
         try {
             long size = Files.size(file);
-            String text = Files.readString(file, StandardCharsets.UTF_8);
-            if (text.length() > MAX_READ) {
-                text = text.substring(text.length() - MAX_READ);
-            }
-            logger.debug("读取日志 {} ({}) 字节", file.getFileName(), size);
-            return text;
-        } catch (Exception e) {
-            // 日志常含非 UTF-8 字节（游戏输出混编码），退回宽松解码
-            try {
-                byte[] bytes = Files.readAllBytes(file);
-                if (bytes.length > MAX_READ) {
-                    bytes = Arrays.copyOfRange(bytes, bytes.length - MAX_READ, bytes.length);
+            // 只读尾部 MAX_READ 字节：崩溃信息总在最后，而 latest.log 可能是
+            // 几百 MB。以前先 readString/readAllBytes 读整个文件再截尾 ——
+            // 一次崩溃分析就可能吃掉几百 MB 内存，在 4G 堆的机器上直接 OOM。
+            byte[] tail;
+            if (size > MAX_READ) {
+                try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file.toFile(), "r")) {
+                    raf.seek(size - MAX_READ);
+                    tail = new byte[MAX_READ];
+                    raf.readFully(tail);
                 }
-                return new String(bytes, StandardCharsets.UTF_8);
-            } catch (Exception e2) {
-                logger.warn("读取日志失败: {}", e2.getMessage());
-                return null;
+                // 切在字节中间时可能截断一个多字节字符，丢掉第一个不完整的行
+                int nl = 0;
+                for (int i = 0; i < 4 && i < tail.length; i++) {
+                    if (tail[i] == '\n') {
+                        nl = i + 1;
+                        break;
+                    }
+                }
+                tail = Arrays.copyOfRange(tail, nl, tail.length);
+            } else {
+                tail = Files.readAllBytes(file);
             }
+            logger.debug("读取日志 {} ({} 字节，取尾部 {} 字节)", file.getFileName(), size, tail.length);
+            // 游戏日志基本都是 UTF-8；个别崩溃栈混入非 UTF-8 字节时选用替换字符解码，
+            // 而不是整体失败
+            return new String(tail, StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            logger.warn("读取日志失败: {}", e.getMessage());
+            return null;
         }
     }
 

@@ -24,12 +24,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 
-/**
- * 主页
- *
- * 内容：公告 + 启动游戏按钮
- * 玩家进入启动器后看到的第一屏。
- */
+/** 主页 */
 public class HomePage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(HomePage.class);
@@ -99,12 +94,7 @@ public class HomePage implements Page {
         checkUpdateOnStartup();
     }
 
-    /**
-     * 启动时自动检查更新
-     *
-     * 有新版则弹出内嵌面板（用户可选择立即更新 / 稍后）。
-     * 整个检查在后台线程执行，失败静默忽略（不打扰用户）。
-     */
+    /** 启动时自动检查更新 */
     private void checkUpdateOnStartup() {
         if (updateChecked) {
             return;     // 每次运行只查一次
@@ -195,11 +185,7 @@ public class HomePage implements Page {
 
     /**
      * 公告卡片
-     *
      * 注意：这里用 Label 而不是 Text。
-     * JavaFX 的 Text 节点只认 CSS 的 `-fx-fill`，对 `-fx-text-fill` 无效 ——
-     * 之前用 Text 导致文字没被主题着色，在深色背景上显示为黑色，几乎看不清。
-     * Label 正常响应 `-fx-text-fill`，并能自动换行。
      */
     private VBox buildAnnouncement() {
         VBox box = new VBox(6);
@@ -543,14 +529,7 @@ public class HomePage implements Page {
             }));
     }
 
-    /**
-     * 后台分析崩溃日志，然后弹窗告诉用户原因
-     *
-     * 设计取舍：
-     *   - 没识别出已知模式时**不弹窗**，只在日志区提示一句 —— 弹一个
-     *     "没分析出原因" 的框只会增加困惑
-     *   - 识别出多条时按级别排序，全部列出（玩家自己判断哪条最像）
-     */
+    /** 后台分析崩溃日志，然后弹窗告诉用户原因 */
     private void analyzeCrashAsync() {
         final java.nio.file.Path gameDir = config.getGameDir();
         if (gameDir == null) {

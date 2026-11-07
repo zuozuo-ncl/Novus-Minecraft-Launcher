@@ -50,12 +50,7 @@ public class Downloader {
      */
     private static final long MULTITHREAD_THRESHOLD = 8L * 1024 * 1024;  // 8MB
 
-    /**
-     * 分块下载的最大线程数。
-     *
-     * 实测南阳理工/上海交大在 64 并发下零限流，
-     * 因此分块上限放宽到 16（超过 16 段收益递减，且调度开销上升）。
-     */
+    /** 分块下载的最大线程数。 */
     private static final int MAX_CHUNK_THREADS = 16;
 
     private volatile OkHttpClient httpClient;
@@ -65,11 +60,29 @@ public class Downloader {
     private final AtomicLong totalDownloaded;
 
     /**
-     * 取消标志：cancel() 置位，进行中的单线程读 / 分块任务 / 重试退避都会检查。
-     * 以前 cancel() 只 shutdownNow 了异步执行器，真正在跑的下载完全不受影响。
+     * 「全部取消」标志：给 cancelAll() 用（例如只保留公开的 cancel() 兼容方法）。
+     * 注意这是**实例级**标志，不能拿它表示「某一次下载被取消」：
      */
     private final java.util.concurrent.atomic.AtomicBoolean cancelled =
             new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    /**
+     * 正在进行的下载任务：token -> {取消标志, 当前 Call}。
+     * cancelToken() 置位标志并 cancel()/中断对应的请求，不会波及别的文件。
+     */
+    private final java.util.concurrent.ConcurrentHashMap<Object, TaskState> activeTasks =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** 当前线程正在执行的下载任务（executeThrottled 用它在请求期间登记 Call） */
+    private static final ThreadLocal<TaskState> CURRENT_TASK = new ThreadLocal<>();
+
+    /** 一次下载任务的状态 */
+    private static final class TaskState {
+        final java.util.concurrent.atomic.AtomicBoolean cancelled =
+                new java.util.concurrent.atomic.AtomicBoolean(false);
+        volatile okhttp3.Call call;
+        volatile Thread worker;
+    }
 
     /** 全局限流器：按连接数限流，429 时自动降级 */
     private final DownloadThrottle throttle = DownloadThrottle.getInstance();
@@ -182,14 +195,7 @@ public class Downloader {
                 .build();
     }
 
-    /**
-     * 核心下载逻辑
-     *
-     * 增强点：
-     * 1. 自动重试：网络中断（如 HTTP/2 的 PROTOCOL_ERROR）时最多重试 MAX_RETRIES 次
-     * 2. 断点续传：每次重试都从已下载的字节位置继续，而不是从头再来
-     * 3. 完整性校验：拿到总大小后确认最终文件大小一致
-     */
+    /** 核心下载逻辑 */
     public DownloadResult download(String url, Path destination, DownloadListener listener) {
         return download(url, destination, listener, false);
     }
@@ -211,30 +217,69 @@ public class Downloader {
         return download(url, destination, listener, resume, -1);
     }
 
-    /**
-     * 便捷重载：已知大小 + 监听器（参数顺序更适合调用方阅读）
-     *
-     * @param resume      是否允许断点续传
-     * @param expectedSize 预期大小（-1 表示未知）
-     */
+    /** 便捷重载：已知大小 + 监听器（参数顺序更适合调用方阅读） */
     public DownloadResult download(String url, Path destination, boolean resume,
                                    long expectedSize, DownloadListener listener) {
         return download(url, destination, listener, resume, expectedSize);
     }
 
-    /**
-     * 核心下载逻辑（调用方已知文件大小时使用）
-     *
-     * 传入 expectedSize 的好处：
-     * - 大文件可以直接走多线程分块下载，省去一次 HEAD 探测往返
-     * - 能更早地判断「已下载完整」而跳过
-     *
-     * @param expectedSize 预期文件大小（字节），未知传 -1
-     */
+    /** 核心下载逻辑（调用方已知文件大小时使用） */
     public DownloadResult download(String url, Path destination, DownloadListener listener,
                                    boolean resume, long expectedSize) {
+        return downloadTask(url, destination, listener, resume, expectedSize, null, null);
+    }
+
+    /**
+     * 带任务标识的下载：cancelToken(token) 只会取消这一个下载。
+     * @param token 任务标识（调用方自选，通常是目标文件路径）；不同任务必须不同
+     */
+    public DownloadResult downloadTask(String url, Path destination, DownloadListener listener,
+                                       boolean resume, long expectedSize,
+                                       Object token, java.util.function.Consumer<okhttp3.Call> outCall) {
+        TaskState st = new TaskState();
+        st.worker = Thread.currentThread();
+        // 分块任务跑在 chunkExecutor 的线程上，同样要能查到取消状态
+        if (token != null) {
+            activeTasks.put(token, st);
+        }
+        TaskState prev = CURRENT_TASK.get();
+        CURRENT_TASK.set(st);
+        try {
+            return downloadTask0(url, destination, listener, resume, expectedSize, st, outCall);
+        } finally {
+            CURRENT_TASK.set(prev);
+            if (token != null) {
+                activeTasks.remove(token, st);
+            }
+        }
+    }
+
+    /** 只取消 token 对应的那一次下载（不影响同一个 Downloader 上的其它文件） */
+    public boolean cancelToken(Object token) {
+        if (token == null) {
+            return false;
+        }
+        TaskState st = activeTasks.get(token);
+        if (st == null) {
+            return false;
+        }
+        st.cancelled.set(true);
+        okhttp3.Call call = st.call;
+        if (call != null) {
+            call.cancel();     // 立刻打断正在阻塞的读，不必等下一次循环
+        }
+        return true;
+    }
+
+    private DownloadResult downloadTask0(String url, Path destination, DownloadListener listener,
+                                         boolean resume, long expectedSize,
+                                         TaskState st, java.util.function.Consumer<okhttp3.Call> outCall) {
         long startTime = System.currentTimeMillis();
-        cancelled.set(false);
+        // 实例级的「全部取消」只在所有任务开始前生效；
+        // 任务自身的取消走 st.cancelled，避免并行下载互相误伤
+        boolean globalCancelled = cancelled.get();
+        final java.util.function.BooleanSupplier isCancelledFlag =
+                () -> globalCancelled || st.cancelled.get() || Thread.currentThread().isInterrupted();
         logger.info("开始下载: {} -> {}", url, destination);
 
         if (listener != null) {
@@ -247,7 +292,7 @@ public class Downloader {
             Files.createDirectories(destination.getParent());
 
             for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-                if (cancelled.get() || Thread.currentThread().isInterrupted()) {
+                if (isCancelledFlag.getAsBoolean()) {
                     return cancelledResult(destination, startTime);
                 }
                 // 决定是否需要探测文件大小：
@@ -332,24 +377,31 @@ public class Downloader {
                             && attempt == 1
                             && supportsRange(url);
 
+                    boolean sizeKnown = totalSize > 0;
+                    long written;
                     if (useChunks) {
                         logger.info("文件 {} MB，启用多线程分块下载",
                                 String.format("%.1f", totalSize / 1048576.0));
-                        downloadInChunks(url, destination, totalSize, listener);
+                        downloadInChunks(url, destination, totalSize, listener, isCancelledFlag);
+                        written = Files.size(destination);
                     } else {
-                        long written = downloadFile(url, destination, startPosition,
-                                totalSize, listener);
-                        // 未探测大小的情况下，用实际写入量补齐
-                        if (totalSize <= 0) {
-                            totalSize = written;
-                        }
+                        written = downloadFile(url, destination, startPosition,
+                                totalSize, listener, isCancelledFlag);
                     }
 
-                    // 校验最终大小
+                    // 校验最终大小。
                     long actual = Files.size(destination);
-                    if (totalSize > 0 && actual != totalSize) {
+                    if (sizeKnown && startPosition == 0 && actual != totalSize) {
                         throw new IOException(String.format(
                                 "下载不完整：期望 %d 字节，实际 %d 字节", totalSize, actual));
+                    }
+                    if (!sizeKnown) {
+                        // 大小未知时，服务端没给流长度就无从校验，交给调用方按
+                        // 哈希判断（游戏资源/库文件都有 SHA-1）
+                        logger.debug("下载大小未知，跳过大小校验: {}", destination.getFileName());
+                    }
+                    if (totalSize <= 0) {
+                        totalSize = written;
                     }
 
                     long duration = System.currentTimeMillis() - startTime;
@@ -369,14 +421,7 @@ public class Downloader {
                     long partial = Files.exists(destination) ? Files.size(destination) : 0;
 
                     // 区分错误类型，决定处理方式：
-                    //
-                    // 1. 限流（403/429）：保留已下载内容（下次可续传），
-                    //    但要等更久 —— 立即重试只会加重限流。
-                    // 2. 其它错误（网络中断、连接重置）：同样保留内容以便续传，
-                    //    短暂退避后重试。
-                    //
                     // 注意：以前对限流错误会删除已下载文件，导致每次都从 0 开始，
-                    // 在慢速链路上白白浪费大量时间，这里已修正。
                     boolean isThrottled = e instanceof HttpStatusException
                             && ((HttpStatusException) e).isRetryable();
 
@@ -413,13 +458,12 @@ public class Downloader {
                             // 分段等待：cancel() 不一定会 interrupt 当前线程，
                             // 必须定时检查取消标志，否则最长要等满整个退避时间
                             long waited = 0;
-                            while (waited < backoff && !cancelled.get()
-                                    && !Thread.currentThread().isInterrupted()) {
+                            while (waited < backoff && !isCancelledFlag.getAsBoolean()) {
                                 long step = Math.min(200, backoff - waited);
                                 Thread.sleep(step);
                                 waited += step;
                             }
-                            if (cancelled.get()) {
+                            if (isCancelledFlag.getAsBoolean()) {
                                 throw new InterruptedException("cancelled");
                             }
                         } catch (InterruptedException ie) {
@@ -463,17 +507,9 @@ public class Downloader {
 
     /**
      * 检测服务器是否支持 Range 请求（用于决定能否断点续传）
-     *
      * 注意：这是一个额外的网络请求，只在「确实需要从非零位置续传」时才应调用，
-     * 否则会显著增加请求数（有触发服务器限流的风险）。
-     * 结果按 host 缓存，避免同一域名重复探测。
      */
-    /**
-     * host -> {是否支持 Range, 记录时间}。
-     *
-     * 以前只缓存布尔值、永不过期：探测失败（临时断网/429）的 host 会被永久
-     * 判成「不支持 Range」，之后分块下载/断点续传长期失准。现在 10 分钟后重探。
-     */
+    /** host -> {是否支持 Range, 记录时间}。 */
     private static final long RANGE_CACHE_TTL_MS = 10 * 60 * 1000L;
     private final Map<String, Object[]> rangeSupportCache = new ConcurrentHashMap<>();
 
@@ -494,6 +530,7 @@ public class Downloader {
         }
 
         boolean supported = false;
+        boolean networkError = false;
         try {
             Request request = new Request.Builder()
                     .url(url)
@@ -508,11 +545,12 @@ public class Downloader {
             }
         } catch (Exception e) {
             logger.debug("检测 Range 支持失败: {}", e.getMessage());
+            networkError = true;
         }
 
-        // 只缓存成功探测的结果；探测异常时本次直接返回 false，不污染缓存
-        if (supported) {
-            rangeSupportCache.put(host, new Object[]{Boolean.TRUE, System.currentTimeMillis()});
+        // 成功与失败都缓存（带 TTL）。
+        if (!networkError) {
+            rangeSupportCache.put(host, new Object[]{supported, System.currentTimeMillis()});
         }
         return supported;
     }
@@ -645,9 +683,6 @@ public class Downloader {
 
     /**
      * 获取文件总大小
-     *
-     * 通过 HEAD 请求读取 Content-Length。
-     * 部分服务器不响应 HEAD 或使用分块传输，此时返回 -1，
      * 调用方会退化为「下载到 EOF」的模式。
      */
     private long getFileSize(String url, long startPosition) {
@@ -691,19 +726,11 @@ public class Downloader {
 
     /**
      * 多线程分块下载
-     *
-     * 原理：把文件按字节区间切分成 N 段，每段用独立连接并发下载到
-     * 临时目录下的分段文件，最后按顺序合并为目标文件。
-     *
      * 为什么快：HTTP/1.1 单连接受限于服务端单连接限速，
-     * 多个连接并行能提高总吞吐（实测单连接 ~0.8MB/s，4 并发 ~3.2MB/s）。
-     *
-     * 重要：分块数受**该 URL 所属 host** 的当前并发额度约束。
-     * 因为所有分块都从同一个 host 拉取，不能越过该站被允许的并发，
-     * 否则会挤占其它下载并可能触发该站的限流惩罚。
      */
     private void downloadInChunks(String url, Path destination, long totalSize,
-                                  DownloadListener listener) throws IOException {
+                                  DownloadListener listener,
+                                  java.util.function.BooleanSupplier isCancelled) throws IOException {
         // 该 host 当前允许的并发（按站独立，不是全局）
         int allowed = throttle.getLimit(url);
         int desired = (int) Math.max(2, totalSize / (2L * 1024 * 1024));  // 每段至少 ~2MB
@@ -714,7 +741,7 @@ public class Downloader {
         // 如果该站只允许 1 个并发，分块毫无意义，退回单线程
         if (threadCount <= 1) {
             logger.debug("[{}] 当前并发额度为 1，改用单线程下载", DownloadThrottle.hostOf(url));
-            downloadFile(url, destination, 0, totalSize, listener);
+            downloadFile(url, destination, 0, totalSize, listener, isCancelled);
             return;
         }
 
@@ -748,7 +775,7 @@ public class Downloader {
 
                 futures.add(chunkExecutor.submit(() -> {
                     try {
-                        downloadRangeToFile(url, partPath, s, e);
+                        downloadRangeToFile(url, partPath, s, e, isCancelled);
 
                         long len = Files.size(partPath);
                         long total = downloadedBytes.addAndGet(len);
@@ -773,7 +800,7 @@ public class Downloader {
                             f.get(500, TimeUnit.MILLISECONDS);
                             break;
                         } catch (java.util.concurrent.TimeoutException poll) {
-                            if (cancelled.get()) {
+                            if (isCancelled.getAsBoolean()) {
                                 throw new IOException("分块下载已取消");
                             }
                         }
@@ -812,7 +839,8 @@ public class Downloader {
     /**
      * 下载一个字节区间到指定文件
      */
-    private void downloadRangeToFile(String url, Path target, long start, long end)
+    private void downloadRangeToFile(String url, Path target, long start, long end,
+                                     java.util.function.BooleanSupplier isCancelled)
             throws IOException {
         Request request = new Request.Builder()
                 .url(url)
@@ -854,7 +882,7 @@ public class Downloader {
                 long written = 0;
                 int n;
                 while ((n = is.read(buffer)) != -1) {
-                    if (cancelled.get()) {
+                    if (isCancelled.getAsBoolean()) {
                         throw new InterruptedIOException("已取消");
                     }
                     if (written + n > expected) {
@@ -924,32 +952,30 @@ public class Downloader {
 
     /**
      * 执行请求（带全局限流控制）
-     *
      * 所有网络请求都必须经过这里：
-     * - 请求前申请许可（受全局并发上限约束）
-     * - 遇到 429/403 时通知限流器降低并发
-     * - 成功后上报，供限流器缓慢恢复并发
-     *
-     * 注意：调用方负责 close 返回的 Response。
      */
     /**
      * 执行请求（带全局限流控制）
-     *
      * 关键：许可只在「等待响应头」期间占用，拿到 Response 后立即归还。
-     * 以前放在 finally 里、要等整个响应体读完（甚至文件写完）才释放，
-     * 结果 443 个资源文件只有几十个能同时在跑，后面的全部堵在许可上 ——
-     * 这就是「越到后面越慢」的主要原因。
-     *
-     * 注意：调用方负责 close 返回的 Response。
      */
     private Response executeThrottled(Request request) throws IOException {
         String url = request.url().toString();
         boolean acquired = false;
+        okhttp3.Call call = httpClient.newCall(request);
+        // 把这次请求登记到当前任务：取消时可以直接 call.cancel() 打断阻塞的读，
+        // 注意：Call 必须保留到 Response 关闭为止，不能在这里的 finally 里清掉。
+        TaskState st = CURRENT_TASK.get();
+        if (st != null) {
+            if (st.cancelled.get()) {
+                call.cancel();
+            }
+            st.call = call;
+        }
         try {
             throttle.acquire(url, ACQUIRE_TIMEOUT_MS);
             acquired = true;
 
-            Response response = httpClient.newCall(request).execute();
+            Response response = call.execute();
 
             if (response.code() == 429 || response.code() == 403) {
                 throttle.reportThrottled(url, response.code());
@@ -980,7 +1006,8 @@ public class Downloader {
      * @return 实际写入的字节数
      */
     private long downloadFile(String url, Path destination, long startPosition,
-                             long totalSize, DownloadListener listener) throws IOException {
+                             long totalSize, DownloadListener listener,
+                             java.util.function.BooleanSupplier isCancelled) throws IOException {
         Request request = new Request.Builder()
                 .url(url)
                 .addHeader("Range", "bytes=" + startPosition + "-")
@@ -1026,7 +1053,7 @@ public class Downloader {
                         byte[] buf = new byte[DEFAULT_BUFFER_SIZE];
                         int n;
                         while ((n = restart.read(buf)) != -1) {
-                            if (cancelled.get()) {
+                            if (isCancelled.getAsBoolean()) {
                                 throw new InterruptedIOException("已取消");
                             }
                             trunc.write(buf, 0, n);
@@ -1077,7 +1104,7 @@ public class Downloader {
             byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
             int bytesRead;
             while ((bytesRead = is.read(buffer)) != -1) {
-                if (cancelled.get()) {
+                if (isCancelled.getAsBoolean()) {
                     throw new InterruptedIOException("已取消");
                 }
                 os.write(buffer, 0, bytesRead);
@@ -1130,15 +1157,16 @@ public class Downloader {
         }
     }
 
-    /**
-     * 取消下载
-     */
+    /** 取消这个 Downloader 上**所有**正在进行的下载（兼容旧调用点）。 */
     public void cancel() {
         cancelled.set(true);
-        downloadExecutor.shutdownNow();
-        // 分块任务在 chunkExecutor 里跑（共享线程池，不能 shutdownNow 整个，
-        // 否则会影响其它并发下载），交给各分段循环检查 cancelled 标志退出
-        downloadExecutor = Executors.newFixedThreadPool(4);
+        for (TaskState st : activeTasks.values()) {
+            st.cancelled.set(true);
+            okhttp3.Call c = st.call;
+            if (c != null) {
+                c.cancel();
+            }
+        }
     }
 
     private DownloadResult cancelledResult(Path destination, long startTime) {

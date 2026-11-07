@@ -1,20 +1,8 @@
 #!/usr/bin/env node
 /**
  * MC 联机 —— 房主端命令行工具（调试/应急用）
- *
- * 启动器里的「虚拟局域网」是用 Java 实现的；这个脚本是同一套协议的最小
- * Node 参考实现，用来快速验证中继是否正常。
- *
- * 用法：
- *     node relay-host.js --server 1.2.3.4 [--http-port 8080] [--api-key xxx]
- *
- * 做的事（与 Java VpnSession.host 一致）：
- *   1. POST /api/host 申请房间（只拿到房间号 + token，不再有端口）
- *   2. 在 HTTP 端口上建控制通道（MCRELAY + {"type":"hello"}）
- *   3. 在 HTTP_PORT+1 上建 VPN 长连接（MCRELAY + {"type":"vpn-host"}）
- *   4. 通过控制通道申请玩家邀请（{"type":"vpn-token","id":N}），把邀请码打印出来
- *
  * 注意：这里不跑虚拟网卡，只验证中继侧协议；真实联机请用启动器的「虚拟局域网」。
+ * 用法：
  */
 'use strict';
 

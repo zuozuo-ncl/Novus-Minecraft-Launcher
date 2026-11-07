@@ -14,17 +14,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.function.Consumer;
 
-/**
- * 游戏下载进度窗口
- *
- * 按需求把「进度条 / 当前文件 / 速度 / 日志」从下载页移到这里，
- * 让下载页专注在版本选择上。
- *
- * 交互约定：
- * - **不阻塞主窗口**（非模态）：用户可以边下载边切页面做别的事
- * - **关闭窗口不会取消下载**：下载在后台继续，重新点「开始下载」可再次打开窗口
- * - 窗口内提供「取消下载」按钮，那才是真正中断下载的入口
- */
+/** 游戏下载进度窗口 */
 public class DownloadProgressWindow {
 
     private static final Logger logger = LoggerFactory.getLogger(DownloadProgressWindow.class);
@@ -74,10 +64,7 @@ public class DownloadProgressWindow {
 
     /**
      * 关闭本窗口（幂等，且只会关掉自己这一层）。
-     *
      * 下载进度面板是 closable=false：没有 ✕ 也不能点遮罩关闭。
-     * 若外部在取消下载后拿不到面板引用去主动收起，就会留下一个任何按钮
-     * 都关不掉的遮罩，整个页面被永久锁死。
      */
     public void close() {
         javafx.scene.layout.Region root = panelRoot;

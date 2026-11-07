@@ -33,13 +33,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
-/**
- * 下载页
- *
- * 两个子标签：
- * - 游戏下载：选择版本下载（含详细进度：当前文件/速度/剩余）
- * - 模组下载：Modrinth 搜索 → 选版本 → 下载
- */
+/** 下载页 */
 public class DownloadPage implements Page {
 
     private static final Logger logger = LoggerFactory.getLogger(DownloadPage.class);
@@ -56,18 +50,8 @@ public class DownloadPage implements Page {
     private static final java.util.Set<String> LOADING_ICONS
             = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
-    /**
-     * 正在下载的图标 -> 等它完成的单元格回调
-     *
-     * 单元格不会一直占着下载线程：下载中的图标挂一个回调，
-     * 下载完统一回填所有等它的格子。
-     */
-    /**
-     * 图标下载线程池
-     *
-     * 串行下载 20 张要 73 秒；并发 6 路可以压到十几秒。
-     * 上限 6 是为了避免触发 Modrinth 限流。
-     */
+    /** 正在下载的图标 -> 等它完成的单元格回调 */
+    /** 图标下载线程池 */
     private static final java.util.concurrent.ExecutorService ICON_POOL =
             java.util.concurrent.Executors.newFixedThreadPool(6, r -> {
                 Thread t = new Thread(r, "icon-loader");
@@ -127,15 +111,7 @@ public class DownloadPage implements Page {
     private Label modLoadingLabel;
     /** 是否正在加载热门模组 */
     private volatile boolean loadingPopular = false;
-    /**
-     * 两个列表（模组 / 整合包）各自等待简介表的「上屏任务」
-     *
-     * 之前只有一个槽：两个 Tab 的公加载种结果会互相覆盖，而且
-     * onLoaded 回调和轮询各执行一次，同一次结果被渲染两遍（图标批量回填、
-     * setAll、淡入都跟着翻倍，表现为页面闪动、条目数从 20 变成 36）。
-     * 现在按列表各占一个槽，并绑定「未完成才能取走」的令牌：
-     * 无论哪条路径先到，同一份结果只会应用一次。
-     */
+    /** 两个列表（模组 / 整合包）各自等待简介表的「上屏任务」 */
     private final java.util.Map<ListView<ModrinthClient.ModProject>, IntroTicket> pendingIntro =
             new java.util.IdentityHashMap<>();
 
@@ -193,13 +169,7 @@ public class DownloadPage implements Page {
     private final List<ModrinthClient.ModProject> packResults = new ArrayList<>();
     private int packPage = 0;
     private volatile boolean packLoading = false;
-    /**
-     * 程序化更新筛选下拉框时抑制 onAction
-     *
-     * ComboBox.setItems/setAll/select 都会触发 onAction。搜索结果的回调里
-     * 正在更新「游戏版本」下拉框，如果不在 onAction 里拦住，就会立刻再发一次
-     * searchPacks —— 新的结果回来又更新下拉框 —— 无限递归，整个页面闪个不停。
-     */
+    /** 程序化更新筛选下拉框时抑制 onAction */
     private boolean suppressPackFilterAction = false;
     /** 同上，模组页的筛选下拉框 */
     private boolean suppressModFilterAction = false;
@@ -209,12 +179,7 @@ public class DownloadPage implements Page {
     private int currentPage = 0;
     private static final int PAGE_SIZE = 20;
 
-    /**
-     * 异步搜索的「最新请求号」
-     *
-     * 没有它，先发后到的旧响应会覆盖新结果：玩家连按两次回车或快速切换筛选，
-     * 列表显示的却是上一次查询的内容，页码也跟着错位。
-     */
+    /** 异步搜索的「最新请求号」 */
     private static final class ViewState {
         int gen;
 
@@ -284,6 +249,26 @@ public class DownloadPage implements Page {
     @Override
     public void onHide() {
         // 下载不中断，允许切到别的页面继续下
+    }
+
+    @Override
+    public void shutdown() {
+        // 模组下载页构造时新建了 Downloader（内部 4+16 个线程 + 连接池），
+        // 以前整个生命周期都不关闭，每多开一次启动器就多泄漏一份
+        try {
+            if (modDownloader != null) {
+                modDownloader.shutdown();
+            }
+        } catch (Exception e) {
+            logger.debug("关闭模组下载器失败: {}", e.getMessage());
+        }
+        try {
+            if (modrinthClient != null) {
+                modrinthClient.shutdown();
+            }
+        } catch (Exception e) {
+            logger.debug("关闭 Modrinth 客户端失败: {}", e.getMessage());
+        }
     }
 
     // ==================== UI ====================
@@ -621,13 +606,7 @@ public class DownloadPage implements Page {
 
 // ==================== 整合包 Tab ====================
 
-    /**
-     * 整合包页
-     *
-     * 结构与模组页一致（搜索 + 列表），只是搜索的项目类型是 modpack。
-     * 单击某个整合包 -> 弹出 {@link com.mclauncher.ui.window.ModpackInstallWindow}，
-     * 在那里选版本并一键安装。
-     */
+    /** 整合包页 */
     private BorderPane buildModpackTab() {
         BorderPane pane = new BorderPane();
         pane.getStyleClass().add("bg-surface");
@@ -884,12 +863,7 @@ public class DownloadPage implements Page {
         }
     }
 
-    /**
-     * 整合包列表单元格
-     *
-     * 复用模组的图标加载机制（同一个缓存），但元信息显示「支持的游戏版本」
-     * 而不是模组单元格里的「加载器」—— 整合包本身不支持选加载器筛选。
-     */
+    /** 整合包列表单元格 */
     private class PackCardCell extends ListCell<ModrinthClient.ModProject> {
         /** 图标槽位：尺寸固定，加载完成后只替换里面的 ImageView */
         private final StackPane iconSlot = createIconSlot();
@@ -997,14 +971,7 @@ public class DownloadPage implements Page {
     /** 图标槽位里占位图/真实图的标识键，用于判断是否需要换 */
     private static final String ICON_KEY = "icon-key";
 
-    /**
-     * 把图标挂到槽位里（**同步**：要么是真实图，要么是占位图）
-     *
-     * 只负责从缓存取；缓存没有就放占位图并返回 false，由调用方决定
-     * 是等（新列表）还是异步补（列表已在屏幕上）。
-     *
-     * @return true 表示已放入真实图标
-     */
+    /** 把图标挂到槽位里（**同步**：要么是真实图，要么是占位图） */
     private boolean mountIconCached(StackPane slot, ModrinthClient.ModProject item) {
         String url = item.getIconUrl();
         if (url != null && !url.isBlank() && !FAILED_ICONS.contains(url)) {
@@ -1032,12 +999,7 @@ public class DownloadPage implements Page {
         return url != null && !url.isBlank() && ICON_CACHE.containsKey(url);
     }
 
-    /**
-     * 确保这批项目的图标都在下载
-     *
-     * 只对「缓存没有、也没失败、没在下载」的项目开线程；
-     * 线程结束后写缓存并执行 onDone（FX 线程）。
-     */
+    /** 确保这批项目的图标都在下载 */
     private void ensureIconsLoaded(List<ModrinthClient.ModProject> items, Runnable onDone) {
         // 统计本批需要下载的图标数。**必须等全部完成才回调一次** ——
         // 之前每张图下载完都会调 onDone，一屏 20 个图标就把结果渲染了 20 次，
@@ -1213,19 +1175,7 @@ public class DownloadPage implements Page {
         placeholder.getChildren().add(l);
         return placeholder;
     }
-    /**
-     * 模组卡片单元
-     *
-     * 重写目的：原实现只往单元格里塞一个 Label，
-     * 正文与背景糊在一起、没有层次。
-     *
-     * 现在按规范渲染：
-     * - 卡片背景 #2D2D2D（见 .mod-card）
-     * - 模组名 纯白加粗（.mod-name）
-     * - 简介 浅灰（.mod-desc）
-     * - 加载器/下载量 主题蓝（.mod-meta）
-     * - 左侧圆形图标（无图标时用首字母占位）
-     */
+    /** 模组卡片单元 */
     private class ModCardCell extends ListCell<ModrinthClient.ModProject> {
         /** 图标槽位：节点复用，加载完成后只替换里面的 ImageView */
         private final StackPane iconSlot = createIconSlot();
@@ -1641,8 +1591,6 @@ public class DownloadPage implements Page {
 
     /**
      * 加载热门模组（首次进入模组页时调用）
-     *
-     * 用「空查询 + 按下载量排序」拿到 Modrinth 的热门榜单。
      * 目的：用户刚进来时不要面对一片空白。
      */
     private void loadPopularMods() {
@@ -1682,14 +1630,7 @@ public class DownloadPage implements Page {
 
     /**
      * 等简介表就绪后再上屏
-     *
-     * 简介表是 1.7MB（gzip）/5.7MB（原始）的 JSON，慢网络下要几十秒。
-     * 如果先把列表画出来，玩家看到的就是一串英文，而且之后再没有机制去改它
      * —— 这正是「必须手动点开一个模组才会变中文」的原因。
-     *
-     * 所以策略是：**没就绪就先显示加载提示，不渲染英文结果**；
-     * 就绪后一次性画出中文 + 图标。
-     * 只有长时间（60 秒）仍失败时才退回英文，避免永远空白。
      */
     private void presentWhenReady(ListView<ModrinthClient.ModProject> list,
                                   List<ModrinthClient.ModProject> items,
@@ -1714,13 +1655,7 @@ public class DownloadPage implements Page {
         waitIntro(list, kind);
     }
 
-    /**
-     * 简介表就绪前每 100ms 检查一次；最多等 60 秒
-     *
-     * 只靠这个定时器兜底：onLoaded 回调也会触发同一次上屏，两边都通过
-     * takePending() 抢同一张令牌，先到的那个执行，后到的拿不到就不做。
-     * 每轮都重新从 map 里取令牌，被新一次搜索替换掉的旧令牌会自然停下。
-     */
+    /** 简介表就绪前每 100ms 检查一次；最多等 60 秒 */
     private void waitIntro(ListView<ModrinthClient.ModProject> list, String kind) {
         IntroTicket ticket = pendingIntro.get(list);
         if (ticket == null) {
@@ -1780,9 +1715,7 @@ public class DownloadPage implements Page {
 
     /**
      * 列表上屏：图标全部就绪后才切换内容（避免逐张图片跳出来）
-     *
      * 注意 kind 必须原样传下去。之前这里写死成 "mod"，整合包的结果会被
-     * 当成模组去操作 modStatusLabel / modResultTitle，触发 NPE。
      */
     private void renderResults(ListView<ModrinthClient.ModProject> list,
                                List<ModrinthClient.ModProject> items,
@@ -1880,9 +1813,7 @@ public class DownloadPage implements Page {
 
     /**
      * 显示/隐藏模组区的加载提示
-     *
      * 注意：只控制提示本身，**不动列表内容** ——
-     * 这样用户在等待时仍能看到之前的结果，不会觉得「卡死/内容消失」。
      */
     private void setModLoading(boolean loading, String text) {
         if (modLoadingIndicator != null) {
@@ -1903,27 +1834,11 @@ public class DownloadPage implements Page {
         return String.valueOf(n);
     }
 
-    /**
-     * 打开版本选择窗口（模态）
-     *
-     * 交互重构：点击「查看可选版本」不再跳转/清空页面，
-     * 而是弹出独立窗口，原搜索结果完整保留。
-     */
+    /** 打开版本选择窗口（模态） */
+    /** 填充模组页的「游戏版本」下拉框 */
     /**
      * 填充模组页的「游戏版本」下拉框
-     *
-     * 数据来源是**本地已安装的游戏版本**（扫描游戏目录下的 versions/），
-     * 而不是模组支持的所有版本 —— 用户关心的是「我自己装了哪些版本」。
-     *
-     * 这样智能推荐才能拿到正确的 preferredGameVersion。
-     */
-    /**
-     * 填充模组页的「游戏版本」下拉框
-     *
      * 关键：下拉框显示的是**本地版本目录名**（如 `1.20.1-fabric0.20.1`），
-     * 但传给「智能推荐」的必须是**纯游戏版本号**（`1.20.1`）——
-     * 模组的 game_versions 字段存的是后者。直接拿目录名去匹配永远匹配不上，
-     * 于是推荐会退化到「最新发布」（例如 26.3），与用户实际在玩的版本无关。
      */
     private void loadLocalGameVersions() {
         if (modVersionFilter == null) {
@@ -1984,14 +1899,7 @@ public class DownloadPage implements Page {
         }
     }
 
-    /**
-     * 从版本目录名里提取纯 Minecraft 版本号
-     *
-     *   1.20.1                  -> 1.20.1
-     *   1.20.1-fabric0.20.1     -> 1.20.1
-     *   1.20.1-forge-47.2.0     -> 1.20.1
-     *   1.20.1-OptiFine_HD_U_I5 -> 1.20.1
-     */
+    /** 从版本目录名里提取纯 Minecraft 版本号 */
     private String extractMcVersion(String dirName) {
         if (dirName == null) {
             return "";
@@ -2077,12 +1985,7 @@ public class DownloadPage implements Page {
         window.show();
     }
 
-    /**
-     * 下载当前选定的版本
-     *
-     * 保留此方法以兼容旧的隐藏下载按钮；
-     * 正常流程下用户是通过版本选择窗口下载的。
-     */
+    /** 下载当前选定的版本 */
     private void downloadSelectedMod() {
         if (chosenVersion == null) {
             return;

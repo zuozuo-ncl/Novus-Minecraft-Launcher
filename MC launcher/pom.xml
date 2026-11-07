@@ -28,7 +28,6 @@
 
     <dependencies>
         <!-- JavaFX -->
-        <!-- JNA：调用 Wintun.dll 创建虚拟网卡（联机 VPN） -->
         <dependency>
             <groupId>net.java.dev.jna</groupId>
             <artifactId>jna</artifactId>
@@ -144,29 +143,11 @@
                         <goals>
                             <goal>shade</goal>
                         </goals>
-                        <configuration>
-                            <!--
-                              产物：target/mc-launcher-<版本>-shaded.jar
-
-                              用 outputFile 直接指定输出路径，而不是靠
-                              finalName / shadedClassifierName 推导：
-                                · finalName 会连原始 jar 一起改名，还会触发
-                                  「替换原 jar」流程（Windows 上文件被锁时直接失败）
-                                · shadedArtifactAttached + shadedClassifierName
-                                  生成的名字取决于 build.finalName，容易和预期不符
-                              outputFile 的语义最直接：shade 只往这个路径写文件，
-                              原始 jar 保持 mc-launcher-<版本>.jar 不动。
-                            -->
                             <outputFile>${project.build.directory}/${project.artifactId}-${project.version}-shaded.jar</outputFile>
                             <createDependencyReducedPom>false</createDependencyReducedPom>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                                     <mainClass>${main.class}</mainClass>
-                                    <!--
-                                      把版本号写进 Manifest。
-                                      启动器从 Implementation-Version 读自己的版本，
-                                      这样版本号只由构建产物决定，不受用户配置影响。
-                                    -->
                                     <manifestEntries>
                                         <Implementation-Version>${project.version}</Implementation-Version>
                                         <Implementation-Title>${project.name}</Implementation-Title>
@@ -209,10 +190,6 @@
                             <resources>
                                 <resource>
                                     <directory>src/main/resources</directory>
-                                    <!--
-                                      只对版本文件开启过滤，避免 ${...} 出现在其它
-                                      资源里被误替换（CSS / xml 里可能有类似写法）。
-                                    -->
                                     <filtering>true</filtering>
                                     <includes>
                                         <include>launcher-version.txt</include>

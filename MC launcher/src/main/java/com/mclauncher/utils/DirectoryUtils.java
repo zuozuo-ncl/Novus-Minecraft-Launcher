@@ -25,12 +25,7 @@ public final class DirectoryUtils {
 
     private DirectoryUtils() {}
 
-    /**
-     * 确保目录存在，并尝试将其标记为隐藏
-     *
-     * @param dir 目标目录
-     * @return 创建后的目录
-     */
+    /** 确保目录存在，并尝试将其标记为隐藏 */
     public static Path ensureHiddenDirectory(Path dir) throws IOException {
         if (!Files.isDirectory(dir)) {
             Files.createDirectories(dir);
@@ -49,15 +44,7 @@ public final class DirectoryUtils {
         return dir;
     }
 
-    /**
-     * 把目录标记为隐藏
-     *
-     * - Windows：设置 dos:hidden 属性（资源管理器里才会真正看不见）
-     * - macOS / Linux：以 "." 开头的目录本身就是隐藏的，
-     *   无需额外处理（POSIX 属性里没有「隐藏」概念）
-     *
-     * 失败时不抛异常 —— 隐藏只是「体面」，不影响功能。
-     */
+    /** 把目录标记为隐藏 */
     public static boolean hide(Path path) {
         if (path == null || !Files.exists(path)) {
             return false;
